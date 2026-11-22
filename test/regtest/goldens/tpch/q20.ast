@@ -52,8 +52,8 @@
                   (table lineitem)
                 )
                 (where
-                  (&& (&& (&& (== l_partkey ps_partkey) (== l_suppkey ps_suppkey)) (>= l_shipdate (: 9131 i32)))
-                    (< l_shipdate (: 9496 i32)))
+                  (&& (&& (&& (== l_partkey ps_partkey) (== l_suppkey ps_suppkey)) (>= l_shipdate (: 9131 <named DATE [i32]>)))
+                    (< l_shipdate (: 9496 <named DATE [i32]>)))
                 )
               )
             )

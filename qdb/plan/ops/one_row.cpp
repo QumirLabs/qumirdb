@@ -8,11 +8,11 @@ namespace NQdb {
 
 using namespace NQumir::NAst;
 
-TOneRowOperator::TOneRowOperator()
+TOneRowOperator::TOneRowOperator(NQumir::NAst::TTypeFactory& types)
 {
-    Type = std::make_shared<TFunctionType>(
+    Type = types.MakeFunction(
         std::vector<TTypePtr>{},
-        std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{}));
+        types.MakeStruct(std::vector<std::pair<std::string, TTypePtr>>{}));
 }
 
 const std::string TOneRowOperator::ToString() const

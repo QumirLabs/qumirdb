@@ -10,6 +10,8 @@
 #include <utility>
 #include <vector>
 
+#include "test_types.h"
+
 namespace {
 
 using namespace NQdb;
@@ -22,8 +24,8 @@ public:
     static constexpr const char* OpId = "fake_source";
 
     explicit TFakeSource(std::vector<std::pair<std::string, TTypePtr>> fields) {
-        auto schema = std::make_shared<TStructType>(std::move(fields));
-        Type = std::make_shared<TFunctionType>(std::vector<TTypePtr>{}, schema);
+        auto schema = TestTypes().MakeStruct(std::move(fields));
+        Type = TestTypes().MakeFunction(std::vector<TTypePtr>{}, schema);
     }
 
     std::string_view RelName() const override { return OpId; }
@@ -33,14 +35,14 @@ public:
 };
 
 TOperatorPtr Source(std::vector<std::pair<std::string, TTypePtr>> fields) {
-    return std::make_shared<TFakeSource>(std::move(fields));
+    return NQumir::MakeIntrusive<TFakeSource>(std::move(fields));
 }
 
-TTypePtr I64() { return std::make_shared<TIntegerType>(); }
-TTypePtr Str() { return std::make_shared<TStringType>(); }
+TTypePtr I64() { return TestTypes().MakeInteger(); }
+TTypePtr Str() { return TestTypes().Make<TStringType>(); }
 
 const TStructType* AsStruct(const TTypePtr& t) {
-    return static_cast<const TStructType*>(t.get());
+    return static_cast<const TStructType*>(t);
 }
 
 TOperatorPtr LeftAB() { return Source({{"a", I64()}, {"b", Str()}}); }
@@ -49,7 +51,7 @@ TOperatorPtr RightCD() { return Source({{"c", I64()}, {"d", Str()}}); }
 } // namespace
 
 TEST(JoinNode, InnerOutputConcatenatesBothSides) {
-    auto join = MakeJoin(LeftAB(), RightCD(), {{"a", "c"}}, EJoinType::Inner);
+    auto join = MakeJoin(TestTypes(), LeftAB(), RightCD(), {{"a", "c"}}, EJoinType::Inner);
     ASSERT_TRUE(join) << (join ? "" : join.error().ToString());
 
     auto* out = AsStruct((*join)->OutputColumns());
@@ -65,7 +67,7 @@ TEST(JoinNode, InnerOutputConcatenatesBothSides) {
 }
 
 TEST(JoinNode, LeftOuterMakesRightSideNullable) {
-    auto join = MakeJoin(LeftAB(), RightCD(), {{"a", "c"}}, EJoinType::Left);
+    auto join = MakeJoin(TestTypes(), LeftAB(), RightCD(), {{"a", "c"}}, EJoinType::Left);
     ASSERT_TRUE(join) << (join ? "" : join.error().ToString());
 
     auto* out = AsStruct((*join)->OutputColumns());
@@ -77,7 +79,7 @@ TEST(JoinNode, LeftOuterMakesRightSideNullable) {
 }
 
 TEST(JoinNode, RightOuterMakesLeftSideNullable) {
-    auto join = MakeJoin(LeftAB(), RightCD(), {{"a", "c"}}, EJoinType::Right);
+    auto join = MakeJoin(TestTypes(), LeftAB(), RightCD(), {{"a", "c"}}, EJoinType::Right);
     ASSERT_TRUE(join);
     auto* out = AsStruct((*join)->OutputColumns());
     EXPECT_TRUE(IsNullableType(out->Fields[0].second));  // a (left, padded)
@@ -87,7 +89,7 @@ TEST(JoinNode, RightOuterMakesLeftSideNullable) {
 }
 
 TEST(JoinNode, FullOuterMakesBothSidesNullable) {
-    auto join = MakeJoin(LeftAB(), RightCD(), {{"a", "c"}}, EJoinType::Full);
+    auto join = MakeJoin(TestTypes(), LeftAB(), RightCD(), {{"a", "c"}}, EJoinType::Full);
     ASSERT_TRUE(join);
     auto* out = AsStruct((*join)->OutputColumns());
     for (const auto& [name, type] : out->Fields) {
@@ -96,14 +98,14 @@ TEST(JoinNode, FullOuterMakesBothSidesNullable) {
 }
 
 TEST(JoinNode, SemiAndAntiKeepOnlyPreservedSide) {
-    auto semi = MakeJoin(LeftAB(), RightCD(), {{"a", "c"}}, EJoinType::LeftSemi);
+    auto semi = MakeJoin(TestTypes(), LeftAB(), RightCD(), {{"a", "c"}}, EJoinType::LeftSemi);
     ASSERT_TRUE(semi);
     auto* semiOut = AsStruct((*semi)->OutputColumns());
     ASSERT_EQ(semiOut->Fields.size(), 2u);
     EXPECT_EQ(semiOut->Fields[0].first, "a");
     EXPECT_EQ(semiOut->Fields[1].first, "b");
 
-    auto anti = MakeJoin(LeftAB(), RightCD(), {{"a", "c"}}, EJoinType::RightAnti);
+    auto anti = MakeJoin(TestTypes(), LeftAB(), RightCD(), {{"a", "c"}}, EJoinType::RightAnti);
     ASSERT_TRUE(anti);
     auto* antiOut = AsStruct((*anti)->OutputColumns());
     ASSERT_EQ(antiOut->Fields.size(), 2u);
@@ -113,7 +115,7 @@ TEST(JoinNode, SemiAndAntiKeepOnlyPreservedSide) {
 
 // The plan has no marker column to name yet; only the join kernel runs it.
 TEST(JoinNode, MarkJoinIsNotTypedInPlansYet) {
-    auto join = MakeJoin(LeftAB(), RightCD(), {{"a", "c"}}, EJoinType::LeftMark);
+    auto join = MakeJoin(TestTypes(), LeftAB(), RightCD(), {{"a", "c"}}, EJoinType::LeftMark);
     ASSERT_FALSE(join);
     EXPECT_NE(join.error().ToString().find("left_mark"), std::string::npos);
 }
@@ -121,23 +123,23 @@ TEST(JoinNode, MarkJoinIsNotTypedInPlansYet) {
 TEST(JoinNode, OverlappingColumnNamesAreRejected) {
     auto l = Source({{"a", I64()}, {"shared", Str()}});
     auto r = Source({{"c", I64()}, {"shared", Str()}});
-    auto join = MakeJoin(l, r, {{"a", "c"}}, EJoinType::Inner);
+    auto join = MakeJoin(TestTypes(), l, r, {{"a", "c"}}, EJoinType::Inner);
     ASSERT_FALSE(join);
     EXPECT_NE(join.error().ToString().find("shared"), std::string::npos);
 }
 
 TEST(JoinNode, EmptyKeyListAcceptedForInner) {
-    auto join = MakeJoin(LeftAB(), RightCD(), {}, EJoinType::Inner);
+    auto join = MakeJoin(TestTypes(), LeftAB(), RightCD(), {}, EJoinType::Inner);
     EXPECT_TRUE(join);
 }
 
 TEST(JoinNode, EmptyKeyListRejectedForNonInner) {
-    auto join = MakeJoin(LeftAB(), RightCD(), {}, EJoinType::LeftSemi);
+    auto join = MakeJoin(TestTypes(), LeftAB(), RightCD(), {}, EJoinType::LeftSemi);
     EXPECT_FALSE(join);
 }
 
 TEST(JoinNode, FilterIsParsedAndReferencedColumnsCoverKeysAndFilter) {
-    auto join = MakeJoin(LeftAB(), RightCD(), {{"a", "c"}}, EJoinType::Inner, "(< b d)");
+    auto join = MakeJoin(TestTypes(), LeftAB(), RightCD(), {{"a", "c"}}, EJoinType::Inner, "(< b d)");
     ASSERT_TRUE(join) << (join ? "" : join.error().ToString());
 
     auto j = TMaybeOp<TJoinOperator>(*join);
@@ -153,7 +155,7 @@ TEST(JoinNode, FilterIsParsedAndReferencedColumnsCoverKeysAndFilter) {
 }
 
 TEST(JoinNode, ToStringRoundTripsTypeAndFilter) {
-    auto join = MakeJoin(LeftAB(), RightCD(), {{"a", "c"}}, EJoinType::Left, "(< b d)");
+    auto join = MakeJoin(TestTypes(), LeftAB(), RightCD(), {{"a", "c"}}, EJoinType::Left, "(< b d)");
     ASSERT_TRUE(join);
     auto s = (*join)->ToString();
     EXPECT_NE(s.find("(rel join"), std::string::npos);

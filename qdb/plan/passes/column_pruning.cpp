@@ -29,7 +29,7 @@ bool HasOutputColumn(const TOperatorPtr& op, const std::string& name) {
     return false;
 }
 
-void Prune(const TOperatorPtr& root, const TColumnSet* explicitRootDemand, TCteUsageMap* usage) {
+void Prune(NQumir::NAst::TTypeFactory& types, const TOperatorPtr& root, const TColumnSet* explicitRootDemand, TCteUsageMap* usage) {
     TColumnSet initial;
     if (explicitRootDemand) {
         initial = *explicitRootDemand;
@@ -39,8 +39,8 @@ void Prune(const TOperatorPtr& root, const TColumnSet* explicitRootDemand, TCteU
         }
     }
 
-    auto narrowStruct = [](const TTypePtr& type, const TColumnSet& keep) -> TTypePtr {
-        auto* st = static_cast<TStructType*>(type.get());
+    auto narrowStruct = [&types](const TTypePtr& type, const TColumnSet& keep) -> TTypePtr {
+        auto* st = static_cast<const TStructType*>(type);
         if (!st) {
             return type;
         }
@@ -50,20 +50,24 @@ void Prune(const TOperatorPtr& root, const TColumnSet* explicitRootDemand, TCteU
                 fields.emplace_back(name, fieldType);
             }
         }
-        return std::make_shared<TStructType>(std::move(fields));
+        return types.MakeStruct(std::move(fields));
     };
 
     std::function<void(const TOperatorPtr&, TColumnSet)> walk =
         [&](const TOperatorPtr& op, TColumnSet needed) {
 
-        auto* fun = static_cast<TFunctionType*>(op->Type.get());
+        auto* fun = static_cast<const TFunctionType*>(op->Type);
+        // Signatures are immutable: a narrowed one replaces the operator's.
+        auto setSignature = [&](std::vector<TTypePtr> params, const TTypePtr& ret) {
+            op->Type = types.MakeFunction(std::move(params), ret);
+            fun = static_cast<const TFunctionType*>(op->Type);
+        };
 
         if (TMaybeOp<TSourceOperator>(op)) {
             auto required = op->RequiredColumnsForChild(0, needed);
             if (fun) {
                 auto narrowed = narrowStruct(fun->ReturnType, required);
-                fun->ParamTypes = {narrowed};
-                fun->ReturnType = narrowed;
+                setSignature({narrowed}, narrowed);
             }
             return;
         }
@@ -87,7 +91,7 @@ void Prune(const TOperatorPtr& root, const TColumnSet* explicitRootDemand, TCteU
         if (auto proj = TMaybeOp<TProjectOperator>(op)) {
             auto& specs = proj.Cast()->MutableProjections();
             auto* output = fun
-                ? static_cast<TStructType*>(fun->ReturnType.get())
+                ? static_cast<const TStructType*>(fun->ReturnType)
                 : nullptr;
             size_t outputIndex = 0;
             size_t kept = 0;
@@ -128,7 +132,7 @@ void Prune(const TOperatorPtr& root, const TColumnSet* explicitRootDemand, TCteU
                 if (fun) {
                     // A struct-valued expression is evaluated as one projection;
                     // retaining any of its fields retains the whole flat group.
-                    fun->ReturnType = narrowStruct(fun->ReturnType, keptOutputs);
+                    setSignature(std::vector(fun->ParamTypes), narrowStruct(fun->ReturnType, keptOutputs));
                 }
             }
         }
@@ -156,7 +160,7 @@ void Prune(const TOperatorPtr& root, const TColumnSet* explicitRootDemand, TCteU
                     for (const auto& key : aggregate->GroupKeys()) {
                         keptOutputs.insert(key);
                     }
-                    fun->ReturnType = narrowStruct(fun->ReturnType, keptOutputs);
+                    setSignature(std::vector(fun->ParamTypes), narrowStruct(fun->ReturnType, keptOutputs));
                 }
             }
         }
@@ -165,7 +169,7 @@ void Prune(const TOperatorPtr& root, const TColumnSet* explicitRootDemand, TCteU
         // (e.g. p_name in a LIKE); the predicate still reads them via the child.
         TColumnSet effectiveNeeded = needed;
         if (fun && TMaybeOp<TFilterOperator>(op)) {
-            if (auto* rt = static_cast<TStructType*>(fun->ReturnType.get());
+            if (auto* rt = static_cast<const TStructType*>(fun->ReturnType);
                 rt && !rt->Fields.empty()) {
                 TColumnSet keep;
                 for (auto& [name, _] : rt->Fields) {
@@ -189,7 +193,7 @@ void Prune(const TOperatorPtr& root, const TColumnSet* explicitRootDemand, TCteU
                 // Propagate the kept column to the child demand.
                 effectiveNeeded.insert(keep.begin(), keep.end());
                 if (keep.size() < rt->Fields.size()) {
-                    fun->ReturnType = narrowStruct(fun->ReturnType, keep);
+                    setSignature(std::vector(fun->ParamTypes), narrowStruct(fun->ReturnType, keep));
                 }
             }
         }
@@ -198,7 +202,9 @@ void Prune(const TOperatorPtr& root, const TColumnSet* explicitRootDemand, TCteU
         for (size_t i = 0; i < inputs.size(); ++i) {
             auto required = op->RequiredColumnsForChild(i, effectiveNeeded);
             if (fun && i < fun->ParamTypes.size()) {
-                fun->ParamTypes[i] = narrowStruct(fun->ParamTypes[i], required);
+                auto params = fun->ParamTypes;
+                params[i] = narrowStruct(params[i], required);
+                setSignature(std::move(params), fun->ReturnType);
             }
             walk(inputs[i], std::move(required));
         }
@@ -209,18 +215,19 @@ void Prune(const TOperatorPtr& root, const TColumnSet* explicitRootDemand, TCteU
 
 } // namespace
 
-void ApplyColumnPruning(const TOperatorPtr& root) {
-    Prune(root, nullptr, nullptr);
+void ApplyColumnPruning(NQumir::NAst::TTypeFactory& types, const TOperatorPtr& root) {
+    Prune(types, root, nullptr, nullptr);
 }
 
 void ApplyColumnPruning(
+    NQumir::NAst::TTypeFactory& types,
     const TOperatorPtr& root, const TColumnSet* explicitRootDemand, TCteUsageMap* usage) {
-    Prune(root, explicitRootDemand, usage);
+    Prune(types, root, explicitRootDemand, usage);
 }
 
-TCteUsageMap PropagateCteDemands(const TOperatorPtr& main) {
+TCteUsageMap PropagateCteDemands(NQumir::NAst::TTypeFactory& types, const TOperatorPtr& main) {
     TCteUsageMap usage;
-    ApplyColumnPruning(main, nullptr, &usage);
+    ApplyColumnPruning(types, main, nullptr, &usage);
     auto defs = CollectCteDefinitions(main); // dependency-first
     for (auto it = defs.rbegin(); it != defs.rend(); ++it) {
         // Every collected definition was reached through a TCteRef, so its usage
@@ -230,7 +237,7 @@ TCteUsageMap PropagateCteDemands(const TOperatorPtr& main) {
             throw std::runtime_error(
                 "cte demand: definition reached with no recorded references");
         }
-        ApplyColumnPruning((*it)->Plan, &u->second.RequiredOutputs, &usage);
+        ApplyColumnPruning(types, (*it)->Plan, &u->second.RequiredOutputs, &usage);
     }
     return usage;
 }

@@ -27,6 +27,7 @@
 #include <qdb/plan/passes/top_sort.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/passes/unbound_vars.h>
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/plan/types/type_text.h>
@@ -143,17 +144,16 @@ std::optional<uint64_t> EncodeStatsScalar(
     return std::nullopt;
 }
 
-// A scan of the export never runs, so the reader has only its schema.
+// A scan of the export never runs, so the reader has only its schema. The types are
+// of the request's factory, which its query compiles in.
 class TSchemaOnlyReader final : public NQdb::ISource {
 public:
     TSchemaOnlyReader(std::vector<NQdb::TColumnSchema> columns, NQdb::TStatsPtr stats)
-        : Columns_(std::move(columns))
+        : Schema_{std::move(columns)}
         , Stats_(std::move(stats))
-    {
-        Schema_ = NQdb::TSchema{std::span<const NQdb::TColumnSchema>(Columns_)};
-    }
+    {}
 
-    const NQdb::TSchema& Schema() const override {
+    NQdb::TSchema Schema(NQumir::NAst::TTypeFactory&) const override {
         return Schema_;
     }
 
@@ -166,7 +166,6 @@ public:
     }
 
 private:
-    std::vector<NQdb::TColumnSchema> Columns_;
     NQdb::TSchema Schema_;
     NQdb::TStatsPtr Stats_;
 };
@@ -181,7 +180,6 @@ public:
         , Stats_(stats)
     {
         Names_.reserve(fields.size());
-        Columns_.reserve(fields.size());
         AllColumns_.reserve(fields.size());
         for (auto& [name, type] : fields) {
             Names_.push_back(std::move(name));
@@ -190,12 +188,11 @@ public:
                 .Type = std::move(type),
             });
         }
-        Columns_ = AllColumns_;
-        Schema_ = NQdb::TSchema{std::span<const NQdb::TColumnSchema>(Columns_)};
     }
 
-    const NQdb::TSchema& Schema() const override {
-        return Schema_;
+    // The types are of the request's factory, which its query compiles in.
+    NQdb::TSchema Schema(NQumir::NAst::TTypeFactory&) const override {
+        return {AllColumns_};
     }
 
     const NQdb::TStatsPtr Stats() const override {
@@ -273,6 +270,7 @@ public:
     }
 
     std::vector<NQdb::NScheduler::TScanRowGroup> PruneRowGroups(
+        NQumir::NAst::TTypeFactory&,
         const NQumir::NAst::TExprPtr&,
         std::string_view,
         std::ostream*,
@@ -308,8 +306,6 @@ private:
     TTableStats Stats_;
     std::vector<std::string> Names_;
     std::vector<NQdb::TColumnSchema> AllColumns_;
-    std::vector<NQdb::TColumnSchema> Columns_;
-    NQdb::TSchema Schema_;
 };
 
 struct TCatalog {
@@ -317,6 +313,8 @@ struct TCatalog {
 };
 
 struct TExportRequest {
+    // The request's type factory: its dataset schema and its query are its types.
+    std::shared_ptr<NQumir::NAst::TTypeFactory> Types;
     std::string Sql;
     TCatalog Catalog;
     NQdb::NScheduler::TSettings Scheduler;
@@ -646,6 +644,7 @@ struct TCompiledWasm64Module {
 // (Memory64) is preferred; wasm32 is a fallback for browsers without
 // Memory64, with linear memory capped at 4GiB.
 std::expected<TCompiledWasm64Module, std::string> CompileKernelAstToWasm(
+    NQumir::NAst::TTypeFactory& types,
     NQumir::NAst::TExprPtr ast,
     int64_t globalBase,
     const std::vector<std::string>& entryNames,
@@ -659,7 +658,7 @@ std::expected<TCompiledWasm64Module, std::string> CompileKernelAstToWasm(
     opts.CoreInput = !(externalCatalog && externalCatalog->HasKumirModules());
     opts.NativeCode = false;
     opts.TargetTriple = targetTriple;
-    NQumir::TLLVMRunner runner(std::move(opts));
+    NQumir::TLLVMRunner runner(std::move(opts), nullptr, &types);
 
     const auto wasmPath = TempPath(".wasm");
     std::vector<std::filesystem::path> objectPaths;
@@ -815,6 +814,7 @@ std::optional<TTableStats::TColumn> ParseColumnStats(const llvm::json::Object& o
 }
 
 std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> ParseTableColumns(
+    NQumir::NAst::TTypeFactory& types,
     const llvm::json::Object& table)
 {
     auto* columns = table.getArray("columns");
@@ -834,7 +834,7 @@ std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> ParseTableColumns(
         if (!name || !type) {
             throw std::runtime_error("dataset column must have name and type");
         }
-        out.emplace_back(std::string(*name), NQdb::ParseTypeText(*type));
+        out.emplace_back(std::string(*name), NQdb::ParseTypeText(types, *type));
     }
     return out;
 }
@@ -879,7 +879,7 @@ TTableStats ParseTableStats(const llvm::json::Object& table) {
     return stats;
 }
 
-TCatalog ParseCatalog(const llvm::json::Object& root) {
+TCatalog ParseCatalog(NQumir::NAst::TTypeFactory& types, const llvm::json::Object& root) {
     const auto* datasetValue = root.get("dataset");
     const auto* dataset = datasetValue ? datasetValue->getAsObject() : nullptr;
     if (!dataset) {
@@ -905,7 +905,7 @@ TCatalog ParseCatalog(const llvm::json::Object& root) {
             std::string(*name),
             std::make_shared<TSchemaOnlySource>(
                 std::string(*name),
-                ParseTableColumns(*table),
+                ParseTableColumns(types, *table),
                 ParseTableStats(*table)));
     }
     return catalog;
@@ -1006,9 +1006,12 @@ std::expected<TExportRequest, std::string> ParseRequest(std::string_view text) {
     }
 
     try {
+        auto types = std::make_shared<NQumir::NAst::TTypeFactory>();
+        auto catalog = ParseCatalog(*types, *root);
         return TExportRequest{
+            .Types = std::move(types),
             .Sql = std::string(*sql),
-            .Catalog = ParseCatalog(*root),
+            .Catalog = std::move(catalog),
             .Scheduler = ParseSchedulerSettings(*root),
             .EmbedWasm = ParseEmbedWasm(*root),
             .WasmBits = ParseWasmBits(*root),
@@ -1019,12 +1022,13 @@ std::expected<TExportRequest, std::string> ParseRequest(std::string_view text) {
 }
 
 std::expected<TParsedSql, NQumir::TError> ParseSql(
+    const std::shared_ptr<NQumir::NAst::TTypeFactory>& types,
     std::string_view sql,
     TCatalog& catalog)
 {
     std::istringstream in{std::string(sql)};
     NQdb::NSql::TTokenStream tokens(in);
-    NQdb::NSql::TParser parser;
+    NQdb::NSql::TParser parser(*types);
     auto statements = parser.ParseAll(tokens);
     if (!statements) {
         return std::unexpected(statements.error());
@@ -1044,7 +1048,7 @@ std::expected<TParsedSql, NQumir::TError> ParseSql(
                     : "plan export supports only a single query statement"));
         }
         if (auto module = NQdb::NSql::TMaybeNode<NQdb::NSql::TSqlExternalModule>(statement)) {
-            auto applied = externalCatalog.Apply(*module.Cast());
+            auto applied = externalCatalog.Apply(*types, *module.Cast());
             if (!applied) {
                 return std::unexpected(applied.error());
             }
@@ -1066,7 +1070,7 @@ std::expected<TParsedSql, NQumir::TError> ParseSql(
             "plan export requires a query after CREATE definitions"));
     }
 
-    NQdb::TTableSourceFactory sources = [&](std::string_view table)
+    NQdb::TTableSourceFactory sources = [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<NQdb::TOperatorPtr, NQumir::TError>
     {
         auto it = catalog.Sources.find(std::string(table));
@@ -1074,15 +1078,12 @@ std::expected<TParsedSql, NQumir::TError> ParseSql(
             return std::unexpected(NQumir::TError(
                 "unknown browser dataset table: " + std::string(table)));
         }
-        return std::make_shared<NQdb::TSourceOperator>(it->second, std::string(table));
+        return NQumir::MakeIntrusive<NQdb::TSourceOperator>(types, it->second, std::string(table));
     };
 
-    NQdb::NKernel::TAnnotationContext annotation{
-        .ExternalCatalog = hasExternalDefinitions
-            ? externalCatalog.Snapshot()
-            : nullptr,
-    };
-    auto plan = NQdb::BuildPlan(query, sources, annotation);
+    auto annotation = NQdb::NKernel::MakeAnnotationContext(
+        *types, hasExternalDefinitions ? externalCatalog.Snapshot(types) : nullptr);
+    auto plan = NQdb::BuildPlan(*types, query, sources, annotation);
     if (!plan) {
         return std::unexpected(plan.error());
     }
@@ -1723,6 +1724,7 @@ std::string AstText(const NQumir::NAst::TExprPtr& ast) {
 // compile one fused query-level wasm module. Failures land in `diagnostics`;
 // the bundle still forms, but exec will be marked unsupported for wasm stages.
 TWasmFinalizeResult WasmFinalizeKernels(
+    NQumir::NAst::TTypeFactory& types,
     std::span<NQdb::TGeneratedKernel> kernels,
     TArtifactStore& artifacts,
     llvm::json::Array& diagnostics,
@@ -1777,7 +1779,7 @@ TWasmFinalizeResult WasmFinalizeKernels(
 
     auto fused = NQdb::BuildFusedProgram(unique);
     auto wasm = CompileKernelAstToWasm(
-        fused.Program, WasmSlot0, fused.Entrypoints, cacheDir, externalCatalog, wasmBits);
+        types, fused.Program, WasmSlot0, fused.Entrypoints, cacheDir, externalCatalog, wasmBits);
     if (!wasm) {
         out.ErrorStage = "wasm-fusion";
         out.Error = wasm.error();
@@ -1835,9 +1837,9 @@ llvm::json::Object CoreTypeJson(const NQumir::NAst::TTypePtr& type) {
             {"nullable", nullable},
         };
     }
-    auto inner = UnwrapNamedType(valueType);
+    auto inner = UnwrapNamedValueType(valueType);
     std::string name;
-    if (auto integer = TMaybeType<TIntegerType>(inner)) {
+    if (auto integer = MaybeIntegerType(inner)) {
         name = integer.Cast()->ToString();
     } else if (TMaybeType<TFloatType>(inner)) {
         name = inner->ToString();
@@ -1961,7 +1963,7 @@ llvm::json::Array ProjectOutputJson(
     const NQdb::TProjectColumnPlan& plan)
 {
     using namespace NQumir::NAst;
-    auto* outStruct = static_cast<TStructType*>(plan.OutputType.get());
+    auto* outStruct = static_cast<const TStructType*>(plan.OutputType);
     llvm::json::Array out;
     for (size_t i = 0; i < plan.Columns.size(); ++i) {
         const auto& column = plan.Columns[i];
@@ -1986,7 +1988,7 @@ llvm::json::Array ProjectOutputJson(
 }
 
 llvm::json::Array SourceColumnsJson(const NQumir::NAst::TTypePtr& sourceType) {
-    auto* st = static_cast<NQumir::NAst::TStructType*>(sourceType.get());
+    auto* st = static_cast<const NQumir::NAst::TStructType*>(sourceType);
     llvm::json::Array out;
     for (const auto& [qname, type] : st->Fields) {
         auto entry = CoreTypeJson(type);
@@ -2282,6 +2284,7 @@ std::optional<llvm::json::Object> BuildWindowStageJson(
 }
 
 struct TExecPlanCodec {
+    NQumir::NAst::TTypeFactory& Types;
     const NQdb::TExecPlan& Plan;
     const TKernelIndex& Kernels;
     bool EmbedWasm = false;
@@ -2324,7 +2327,7 @@ struct TExecPlanCodec {
         using namespace NQumir::NAst;
 
         if (node.Kind == NQdb::EExecPlanNodeKind::UnionAll) {
-            auto* output = static_cast<TStructType*>(node.OutputType.get());
+            auto* output = static_cast<const TStructType*>(node.OutputType);
             AddNode(node, llvm::json::Object{
                 {"kind", "union-all"},
                 {"label", "union-all"},
@@ -2392,9 +2395,9 @@ struct TExecPlanCodec {
             case NQdb::EExecPlanNodeKind::Project: {
                 auto* project = const_cast<NQdb::TProjectOperator*>(
                     static_cast<const NQdb::TProjectOperator*>(node.Operator));
-                auto* input = static_cast<TStructType*>(
-                    Input(node, 0).OutputType.get());
-                auto columnPlan = BuildProjectColumnPlan(*project, *input);
+                auto* input = static_cast<const TStructType*>(
+                    Input(node, 0).OutputType);
+                auto columnPlan = BuildProjectColumnPlan(Types, *project, *input);
                 llvm::json::Object entrypoints;
                 if (!columnPlan.ComputedExprs.empty()) {
                     const auto* ref = FindKernel(
@@ -2445,8 +2448,8 @@ struct TExecPlanCodec {
                         "aggregate kernel failed to compile to wasm");
                     return;
                 }
-                auto* outputType = static_cast<TStructType*>(
-                    node.OutputType.get());
+                auto* outputType = static_cast<const TStructType*>(
+                    node.OutputType);
                 const size_t keyCount = ref->Kernel->AggKeys.size();
                 llvm::json::Array output;
                 for (size_t i = 0; i < outputType->Fields.size(); ++i) {
@@ -2523,18 +2526,18 @@ struct TExecPlanCodec {
                         "join kernel failed to compile to wasm");
                     return;
                 }
-                auto* left = static_cast<TStructType*>(
-                    Input(node, 0).OutputType.get());
-                auto* right = static_cast<TStructType*>(
-                    Input(node, 1).OutputType.get());
-                auto* output = static_cast<TStructType*>(
-                    node.OutputType.get());
+                auto* left = static_cast<const TStructType*>(
+                    Input(node, 0).OutputType);
+                auto* right = static_cast<const TStructType*>(
+                    Input(node, 1).OutputType);
+                auto* output = static_cast<const TStructType*>(
+                    node.OutputType);
                 std::vector<std::pair<std::string, std::string>> keyPairs;
                 for (const auto& key : join->Keys()) {
                     keyPairs.emplace_back(key.Left, key.Right);
                 }
                 const auto keyDesc =
-                    NKernel::BuildJoinKeyDescriptor(*left, *right, keyPairs);
+                    NKernel::BuildJoinKeyDescriptor(Types, *left, *right, keyPairs);
                 llvm::json::Array keys;
                 for (size_t i = 0; i < join->Keys().size(); ++i) {
                     const auto& key = join->Keys()[i];
@@ -2576,12 +2579,12 @@ struct TExecPlanCodec {
                         "cross join kernel failed to compile to wasm");
                     return;
                 }
-                auto* left = static_cast<TStructType*>(
-                    Input(node, 0).OutputType.get());
-                auto* right = static_cast<TStructType*>(
-                    Input(node, 1).OutputType.get());
-                auto* output = static_cast<TStructType*>(
-                    node.OutputType.get());
+                auto* left = static_cast<const TStructType*>(
+                    Input(node, 0).OutputType);
+                auto* right = static_cast<const TStructType*>(
+                    Input(node, 1).OutputType);
+                auto* output = static_cast<const TStructType*>(
+                    node.OutputType);
                 AddNode(node, llvm::json::Object{
                     {"kind", "cross-join"},
                     {"label", JoinPlanLabel(*join)},
@@ -2629,8 +2632,8 @@ struct TExecPlanCodec {
                 const auto kind = producer ? "cte-producer" : "cte-consumer";
                 const auto cteId =
                     static_cast<int64_t>(consumer->Def()->Id);
-                auto* output = static_cast<TStructType*>(
-                    node.OutputType.get());
+                auto* output = static_cast<const TStructType*>(
+                    node.OutputType);
                 AddNode(node, llvm::json::Object{
                     {"kind", kind},
                     {"label", std::string(kind) + " " + std::to_string(cteId)},
@@ -2644,10 +2647,10 @@ struct TExecPlanCodec {
             case NQdb::EExecPlanNodeKind::Window: {
                 auto* window = const_cast<NQdb::TWindowOperator*>(
                     static_cast<const NQdb::TWindowOperator*>(node.Operator));
-                auto* input = static_cast<TStructType*>(
-                    Input(node, 0).OutputType.get());
-                auto* output = static_cast<TStructType*>(
-                    node.OutputType.get());
+                auto* input = static_cast<const TStructType*>(
+                    Input(node, 0).OutputType);
+                auto* output = static_cast<const TStructType*>(
+                    node.OutputType);
                 std::string error;
                 auto encoded = BuildWindowStageJson(
                     *window, *input, *output, Kernels, node.StageId,
@@ -2665,8 +2668,8 @@ struct TExecPlanCodec {
             case NQdb::EExecPlanNodeKind::TopSort: {
                 const bool top =
                     node.Kind == NQdb::EExecPlanNodeKind::TopSort;
-                auto* input = static_cast<TStructType*>(
-                    Input(node, 0).OutputType.get());
+                auto* input = static_cast<const TStructType*>(
+                    Input(node, 0).OutputType);
                 std::string error;
                 if (top) {
                     auto* sort = static_cast<const NQdb::TTopSortOperator*>(
@@ -2751,7 +2754,7 @@ struct TExecPlanCodec {
         // Batches carry column types only while rows flow; the result schema
         // types an empty result too.
         const auto* output = static_cast<const NQumir::NAst::TStructType*>(
-            Plan.Nodes.at(Plan.Root).OutputType.get());
+            Plan.Nodes.at(Plan.Root).OutputType);
         llvm::json::Object out{
             {"supported", true},
             {"embedWasm", EmbedWasm},
@@ -2775,6 +2778,7 @@ struct TExecPlanCodec {
 };
 
 llvm::json::Object EncodeExecPlan(
+    NQumir::NAst::TTypeFactory& types,
     const NQdb::TExecPlan* plan,
     std::span<const NQdb::TGeneratedKernel> kernels,
     std::span<const TKernelArtifacts> artifacts,
@@ -2792,6 +2796,7 @@ llvm::json::Object EncodeExecPlan(
             return kernel.Name == "instrumentation";
         });
         return TExecPlanCodec{
+            .Types = types,
             .Plan = *plan,
             .Kernels = kernelIndex,
             .EmbedWasm = embedWasm,
@@ -2808,7 +2813,7 @@ llvm::json::Object BuildBundle(
     TExportRequest& request,
     const std::string& cacheDir)
 {
-    auto plan = ParseSql(request.Sql, request.Catalog);
+    auto plan = ParseSql(request.Types, request.Sql, request.Catalog);
     if (!plan) {
         return ErrorObject("parse", plan.error().ToString());
     }
@@ -2818,7 +2823,7 @@ llvm::json::Object BuildBundle(
 
     NQdb::TPlanPassDiagnostics planDiagnostics;
     try {
-        NQdb::ApplyPlanPasses(logicalPlan, {
+        NQdb::ApplyPlanPasses(*request.Types, logicalPlan, {
             // The browser runtime has no data-source lookup task yet. Keep its
             // plan on the eager path until it can bind a lookup-capable source.
             .EnableRuntimeFilters = false,
@@ -2866,9 +2871,10 @@ llvm::json::Object BuildBundle(
         // One lowering; kernels arrive as ASTs on lowered.Kernels.
         auto lowered = NQdb::NScheduler::LowerPlanToGraph(
             logicalPlan,
+            request.Types,
             request.Scheduler,
             &lowerDiagnostics,
-            externalCatalog);
+            &annotation);
 
         // Core owns graph contraction, ordered inputs, output propagation, and
         // stage/kernel binding. The exporter only encodes the returned plan.
@@ -2884,9 +2890,9 @@ llvm::json::Object BuildBundle(
         }
         if (request.Scheduler.Instrumentation.Operators && typedExecPlan) {
             NQdb::TKernelCompiler compiler({
+                .Types = request.Types,
                 .Sink = &lowered.Kernels,
                 .BindNow = false,
-                .ExternalCatalog = externalCatalog,
             });
             compiler.CompileInstrumentation();
         }
@@ -2907,6 +2913,7 @@ llvm::json::Object BuildBundle(
 
         // Wasm finalization: ast artifacts always, wasm in embed mode.
         wasmFinalized = WasmFinalizeKernels(
+            *request.Types,
             lowered.Kernels,
             artifacts,
             diagnostics,
@@ -2944,6 +2951,7 @@ llvm::json::Object BuildBundle(
             wasmFinalized.Error, wasmFinalized.ErrorStage);
     } else if (typedExecPlan) {
         execPlan = EncodeExecPlan(
+            *request.Types,
             &*typedExecPlan,
             loweredKernels,
             wasmFinalized.Kernels,

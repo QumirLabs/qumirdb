@@ -2,6 +2,7 @@
 #include <qdb/scheduler/tasks/runtime_adapter.h>
 #include "mock_source.h"
 #include "plan_runner.h"
+#include "test_types.h"
 
 #include <qdb/exec/aggregate_exec.h>
 #include <qdb/exec/instrumentation/operator.h>
@@ -42,27 +43,27 @@ namespace {
 
 std::shared_ptr<TKernelSlot> MeasurementKernel() {
     // Prepared code may be shared; every test owns its mutable counters.
-    return TKernelCompiler().CompileInstrumentation();
+    return TKernelCompiler({.Types = SharedTestTypes()}).CompileInstrumentation();
 }
 
 TOperatorPtr SqlPlan(const std::string& sql, ITable& source) {
     std::istringstream input(sql);
     NSql::TTokenStream tokens(input);
-    NSql::TParser parser;
+    NSql::TParser parser(TestTypes());
     auto parsed = parser.Parse(tokens);
     if (!parsed) {
         throw parsed.error();
     }
-    auto plan = BuildPlan(*parsed, [&](std::string_view table)
+    auto plan = BuildPlan(TestTypes(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
-        return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
+        return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(table));
     });
     if (!plan) {
         throw plan.error();
     }
-    AnnotateTypes(*plan);
-    ApplyColumnPruning(*plan);
+    AnnotateTypes(TestTypes(), *plan);
+    ApplyColumnPruning(TestTypes(), *plan);
     return *plan;
 }
 
@@ -86,13 +87,13 @@ uint64_t StageSum(const std::string& text, const std::string& kind, const std::s
 } // namespace
 
 TEST(OperatorInstrumentation, ResolvesLogicalAndPhysicalColumnWidths) {
-    auto schema = std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{
-        {"decimal", std::make_shared<TNullable>(std::make_shared<TDecimal>(18, 2))},
-        {"binint", BinIntStorageType()},
-        {"date", std::make_shared<TNamedType>("DATE", std::make_shared<TIntegerType>(TIntegerType::I32))},
-        {"boolean", std::make_shared<TBoolType>()},
-        {"text", std::make_shared<TNullable>(std::make_shared<TStringType>())},
-        {"float", std::make_shared<TFloatType>()},
+    auto schema = TestTypes().MakeStruct(std::vector<std::pair<std::string, TTypePtr>>{
+        {"decimal", MakeNullableType(TestTypes(), MakeDecimalType(TestTypes(), {18, 2}))},
+        {"binint", BinIntStorageType(TestTypes())},
+        {"date", TestTypes().MakeNamed("DATE", TestTypes().MakeInteger(TIntegerType::I32))},
+        {"boolean", TestTypes().Make<TBoolType>()},
+        {"text", MakeNullableType(TestTypes(), TestTypes().Make<TStringType>())},
+        {"float", TestTypes().MakeFloat()},
     });
     // DECIMAL(18,2) is stored in i64.
     EXPECT_EQ(InstrumentationColumnWidths(schema), (std::vector<int64_t>{8, 16, 4, 1, -1, 8}));
@@ -104,20 +105,20 @@ TEST(OperatorInstrumentation, ResolvesLogicalAndPhysicalColumnWidths) {
         EXPECT_EQ(layouts[i].Width, expected[i].first) << i;
         EXPECT_EQ(layouts[i].Bitmap, expected[i].second) << i;
     }
-    EXPECT_THROW(RowLayouts(std::make_shared<TIntegerType>(TIntegerType::I32)), std::runtime_error);
-    auto unsupported = std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{
-        {"bad", std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{})},
+    EXPECT_THROW(RowLayouts(TestTypes().MakeInteger(TIntegerType::I32)), std::runtime_error);
+    auto unsupported = TestTypes().MakeStruct(std::vector<std::pair<std::string, TTypePtr>>{
+        {"bad", TestTypes().MakeStruct(std::vector<std::pair<std::string, TTypePtr>>{})},
     });
     EXPECT_THROW(RowLayouts(unsupported), std::runtime_error);
 }
 
 TEST(OperatorInstrumentation, RowLayoutsUnwrapNamedNullableChains) {
     auto named = [](TTypePtr type) {
-        return std::make_shared<TNamedType>("ALIAS", std::move(type));
+        return TestTypes().MakeNamed("ALIAS", std::move(type));
     };
-    auto schema = std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{
-        {"flag", named(std::make_shared<TNullable>(std::make_shared<TBoolType>()))},
-        {"text", named(std::make_shared<TNullable>(std::make_shared<TStringType>()))},
+    auto schema = TestTypes().MakeStruct(std::vector<std::pair<std::string, TTypePtr>>{
+        {"flag", named(MakeNullableType(TestTypes(), TestTypes().Make<TBoolType>()))},
+        {"text", named(MakeNullableType(TestTypes(), TestTypes().Make<TStringType>()))},
     });
     const auto layouts = RowLayouts(schema);
     ASSERT_EQ(layouts.size(), 2u);
@@ -188,10 +189,10 @@ TEST(OperatorInstrumentation, BackpressureRetriesDoNotCountFailedPushOrEmptyFetc
 }
 
 TEST(OperatorInstrumentation, ObservesEveryGeometricGrowthInsideABatch) {
-    auto i64 = std::make_shared<TIntegerType>();
-    TStructType inputType({{"k", i64}});
-    auto spec = NKernel::BuildAggregateKernelSpec(inputType, {"k"}, {{.Name = "n", .Func = "count"}});
-    auto kernels = TKernelCompiler().CompileAggregate(spec);
+    auto i64 = TestTypes().MakeInteger();
+    const auto& inputType = *TestTypes().MakeStruct({{"k", i64}});
+    auto spec = NKernel::BuildAggregateKernelSpec(TestTypes(), inputType, {"k"}, {{.Name = "n", .Func = "count"}});
+    auto kernels = TKernelCompiler({.Types = SharedTestTypes()}).CompileAggregate(spec);
     TOperatorInstrumentation counters;
     counters.Kernel = MeasurementKernel();
     TAggregateProcessor processor(kernels, {.InitialCapacity = 8});
@@ -233,11 +234,11 @@ TEST(OperatorInstrumentation, StringStateMemoryCountsOnlyTheGroupsAfterRehash) {
     // measure exactly 8 bytes more per group.
     constexpr int64_t groups = 200000;
     auto measure = [](int64_t length) {
-        TStructType inputType({{"k", std::make_shared<TStringType>()},
-            {"s", std::make_shared<TStringType>()}});
-        auto spec = NKernel::BuildAggregateKernelSpec(inputType, {"k"}, {{.Name = "m",
-            .Func = "min", .Arg = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "s")}});
-        auto kernels = TKernelCompiler().CompileAggregate(spec);
+        const auto& inputType = *TestTypes().MakeStruct({{"k", TestTypes().Make<TStringType>()},
+            {"s", TestTypes().Make<TStringType>()}});
+        auto spec = NKernel::BuildAggregateKernelSpec(TestTypes(), inputType, {"k"}, {{.Name = "m",
+            .Func = "min", .Arg = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "s")}});
+        auto kernels = TKernelCompiler({.Types = SharedTestTypes()}).CompileAggregate(spec);
         TOperatorInstrumentation counters;
         counters.Kernel = MeasurementKernel();
         TAggregateProcessor processor(kernels, {.InitialCapacity = 8});
@@ -273,12 +274,12 @@ TEST(OperatorInstrumentation, StringStateMemoryCountsOnlyTheGroupsAfterRehash) {
 TEST(OperatorInstrumentation, MeasuresResidualSemiJoinMatchSetWithoutRowBuckets) {
     TKernelHeap heap;
     TKernelHeapScope scope(heap);
-    auto i64 = std::make_shared<TIntegerType>();
-    TStructType leftType({{"lk", i64}});
-    TStructType rightType({{"rk", i64}});
-    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}},
-        EJoinType::LeftSemi, NKernel::NOz::Bool(true));
-    auto kernels = TKernelCompiler().CompileJoin(spec);
+    auto i64 = TestTypes().MakeInteger();
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}});
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}},
+        EJoinType::LeftSemi, NKernel::NOz::Bool(TestTypes(), true));
+    auto kernels = TKernelCompiler({.Types = SharedTestTypes()}).CompileJoin(spec);
     alignas(8) std::array<uint8_t, TKernelCompiler::HashTableSize> left{};
     alignas(8) std::array<uint8_t, TKernelCompiler::HashTableSize> right{};
     alignas(8) std::array<uint8_t, TKernelCompiler::PairBufferSize> pairs{};
@@ -296,7 +297,7 @@ TEST(OperatorInstrumentation, MeasuresResidualSemiJoinMatchSetWithoutRowBuckets)
 TEST(OperatorInstrumentation, DisabledPlanHasNoMeasurementProgramOrCounters) {
     TMockSource source({"k"});
     auto plan = SqlPlan("SELECT k FROM t", source);
-    auto lowered = LowerPlanToGraph(plan, {}, nullptr);
+    auto lowered = LowerPlanToGraph(plan, SharedTestTypes(), {}, nullptr);
     for (const auto& kernel : lowered.Kernels) {
         EXPECT_NE(kernel.Name, "instrumentation");
     }
@@ -363,12 +364,12 @@ TEST(OperatorInstrumentation, StreamingOuterResidualsKeepCountersAcrossFinalizat
             TMockSource left({"lk", "lv"}, {leftBatch});
             TMockSource right({"rk", "rv"}, {rightBatch});
             auto residual = NKernel::NOz::Bin("<"_op, NKernel::NOz::Ident("lv"), NKernel::NOz::Ident("rv"));
-            auto plan = std::make_shared<TJoinOperator>(
-                std::make_shared<TSourceOperator>(Borrow(left), "l"),
-                std::make_shared<TSourceOperator>(Borrow(right), "r"),
+            auto plan = NQumir::MakeIntrusive<TJoinOperator>(TestTypes(),
+                NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(left), "l"),
+                NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(right), "r"),
                 std::vector<TJoinKey>{{"lk", "rk"}}, joinType, std::move(residual));
-            AnnotateTypes(plan);
-            ApplyColumnPruning(plan);
+            AnnotateTypes(TestTypes(), plan);
+            ApplyColumnPruning(TestTypes(), plan);
             TSettings settings;
             settings.Scheduler.Mode = mode;
             settings.Scheduler.WorkerCount = 2;
@@ -416,21 +417,21 @@ TEST(OperatorInstrumentation, UnionShufflesKeepTheirOwnInputSchemas) {
         TMockSource third({"k", "v"}, {batch});
         TMockSource fourth({"r"}, {matchBatch});
         auto branch = [](ITable& firstInput, ITable& secondInput) -> TOperatorPtr {
-            auto inputs = std::make_shared<TJoinOperator>(
-                std::make_shared<TSourceOperator>(Borrow(firstInput), "t"),
-                std::make_shared<TSourceOperator>(Borrow(secondInput), "u"),
+            auto inputs = NQumir::MakeIntrusive<TJoinOperator>(TestTypes(),
+                NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(firstInput), "t"),
+                NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(secondInput), "u"),
                 std::vector<TJoinKey>{{"k", "r"}}, EJoinType::Inner, nullptr);
-            auto grouped = std::make_shared<TAggregateOperator>(inputs,
+            auto grouped = NQumir::MakeIntrusive<TAggregateOperator>(TestTypes(), inputs,
                 std::vector<std::string>{"k"}, std::vector<TAggregateSpec>{
-                    {.Name = "s", .Func = "sum", .Arg = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "v")}});
-            return std::make_shared<TProjectOperator>(grouped,
+                    {.Name = "s", .Func = "sum", .Arg = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "v")}});
+            return NQumir::MakeIntrusive<TProjectOperator>(TestTypes(), grouped,
                 std::vector<TProjectionSpec>{
-                    {.Name = "s", .Expression = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "s")}});
+                    {.Name = "s", .Expression = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "s")}});
         };
-        auto plan = std::make_shared<TUnionAllOperator>(std::vector<TOperatorPtr>{
+        auto plan = NQumir::MakeIntrusive<TUnionAllOperator>(TestTypes(), std::vector<TOperatorPtr>{
             branch(first, second), branch(third, fourth)});
-        AnnotateTypes(plan);
-        ApplyColumnPruning(plan);
+        AnnotateTypes(TestTypes(), plan);
+        ApplyColumnPruning(TestTypes(), plan);
         TSettings settings;
         settings.Scheduler.Mode = mode;
         settings.Scheduler.WorkerCount = 2;
@@ -475,10 +476,10 @@ TEST(OperatorInstrumentation, ShuffleAccountsSparseRetainedOwnersOnceAcrossParti
             {.Data = reinterpret_cast<char*>(values.data())}};
         TRowSet batch{.Columns = columns, .ColumnCount = 2, .RowCount = 10000,
             .Selection = selected.data(), .RefCount = 1};
-        auto i64 = std::make_shared<TIntegerType>();
-        auto schema = std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{
+        auto i64 = TestTypes().MakeInteger();
+        auto schema = TestTypes().MakeStruct(std::vector<std::pair<std::string, TTypePtr>>{
             {"k", i64}, {"v", i64}});
-        auto hash = TKernelCompiler().CompileAggregateHash(*schema, {"k"});
+        auto hash = TKernelCompiler({.Types = SharedTestTypes()}).CompileAggregateHash(*schema, {"k"});
         std::vector<uint64_t> hashes(10000);
         ASSERT_TRUE(hash(&batch, hashes.data()));
         ASSERT_NE(hashes[9998] % 4, hashes[9999] % 4);

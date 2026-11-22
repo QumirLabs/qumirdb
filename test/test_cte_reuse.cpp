@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "mock_source.h"
+#include "test_types.h"
 
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/aggregate.h>
@@ -31,27 +32,27 @@ namespace {
 TOperatorPtr BuildSqlPlan(std::string_view sql, const std::map<std::string, ITable*>& tables) {
     std::istringstream in{std::string(sql)};
     NSql::TTokenStream ts(in);
-    NSql::TParser parser;
+    NSql::TParser parser(TestTypes());
     auto parsed = parser.Parse(ts);
     EXPECT_TRUE(parsed.has_value()) << (parsed ? "" : parsed.error().ToString());
-    auto factory = [&](std::string_view table)
+    auto factory = [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         auto it = tables.find(std::string(table));
         if (it == tables.end()) {
             return std::unexpected(NQumir::TError("unknown table: " + std::string(table)));
         }
-        return std::make_shared<TSourceOperator>(Borrow(*it->second), std::string(table));
+        return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(*it->second), std::string(table));
     };
-    auto plan = BuildPlan(parsed.value(), factory);
+    auto plan = BuildPlan(TestTypes(), parsed.value(), factory);
     EXPECT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
     return plan.value();
 }
 
 void Annotate(const TOperatorPtr& plan) {
-    AssignSourceAliases(plan);
-    QualifyColumns(plan);
-    AnnotateTypes(plan);
+    AssignSourceAliases(TestTypes(), plan);
+    QualifyColumns(TestTypes(), plan);
+    AnnotateTypes(TestTypes(), plan);
 }
 
 // Builds and annotates main + every definition, then propagates demand (as the
@@ -61,7 +62,7 @@ TCteUsageMap Analyze(const TOperatorPtr& plan) {
         Annotate(def->Plan);
     }
     Annotate(plan);
-    return PropagateCteDemands(plan);
+    return PropagateCteDemands(TestTypes(), plan);
 }
 
 std::multiset<size_t> RefCounts(const TCteUsageMap& usage) {
@@ -73,7 +74,7 @@ std::multiset<size_t> RefCounts(const TCteUsageMap& usage) {
 }
 
 void CollectConsumers(
-    const TOperatorPtr& op, std::vector<std::shared_ptr<TCteConsumer>>& out) {
+    const TOperatorPtr& op, std::vector<NQumir::TIntrusivePtr<TCteConsumer>>& out) {
     if (!op) {
         return;
     }
@@ -83,13 +84,13 @@ void CollectConsumers(
     }
     for (const auto& child : op->Children()) {
         if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            CollectConsumers(childOp.Cast(), out);
+            CollectConsumers(TOperatorPtr(childOp.Cast()), out);
         }
     }
 }
 
-std::vector<std::shared_ptr<TCteConsumer>> FindConsumers(const TOperatorPtr& op) {
-    std::vector<std::shared_ptr<TCteConsumer>> out;
+std::vector<NQumir::TIntrusivePtr<TCteConsumer>> FindConsumers(const TOperatorPtr& op) {
+    std::vector<NQumir::TIntrusivePtr<TCteConsumer>> out;
     CollectConsumers(op, out);
     return out;
 }
@@ -103,7 +104,7 @@ TOperatorPtr FindSource(const TOperatorPtr& op) {
     }
     for (const auto& child : op->Children()) {
         if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            if (auto found = FindSource(childOp.Cast())) {
+            if (auto found = FindSource(TOperatorPtr(childOp.Cast()))) {
                 return found;
             }
         }
@@ -111,7 +112,7 @@ TOperatorPtr FindSource(const TOperatorPtr& op) {
     return nullptr;
 }
 
-std::shared_ptr<TFilterOperator> FindFilter(const TOperatorPtr& op) {
+NQumir::TIntrusivePtr<TFilterOperator> FindFilter(const TOperatorPtr& op) {
     if (!op) {
         return nullptr;
     }
@@ -120,7 +121,7 @@ std::shared_ptr<TFilterOperator> FindFilter(const TOperatorPtr& op) {
     }
     for (const auto& child : op->Children()) {
         if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            if (auto found = FindFilter(childOp.Cast())) {
+            if (auto found = FindFilter(TOperatorPtr(childOp.Cast()))) {
                 return found;
             }
         }
@@ -137,7 +138,7 @@ TOperatorPtr FindAggregate(const TOperatorPtr& op) {
     }
     for (const auto& child : op->Children()) {
         if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            if (auto found = FindAggregate(childOp.Cast())) {
+            if (auto found = FindAggregate(TOperatorPtr(childOp.Cast()))) {
                 return found;
             }
         }
@@ -147,7 +148,7 @@ TOperatorPtr FindAggregate(const TOperatorPtr& op) {
 
 std::vector<std::string> FieldNames(const TOperatorPtr& op) {
     std::vector<std::string> names;
-    auto* schema = static_cast<NQumir::NAst::TStructType*>(op->OutputColumns().get());
+    auto* schema = static_cast<const NQumir::NAst::TStructType*>(op->OutputColumns());
     if (schema) {
         for (const auto& [name, _] : schema->Fields) {
             names.push_back(name);
@@ -165,7 +166,7 @@ bool ContainsCteRef(const TOperatorPtr& op) {
     }
     for (const auto& child : op->Children()) {
         if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            if (ContainsCteRef(childOp.Cast())) {
+            if (ContainsCteRef(TOperatorPtr(childOp.Cast()))) {
                 return true;
             }
         }
@@ -224,7 +225,7 @@ TEST(CteReuse, ApplyRemovesEveryCteRef) {
     auto plan = BuildSqlPlan(
         "WITH x AS (SELECT a FROM t) SELECT p.a FROM x p JOIN x q ON p.a = q.a", tables);
     auto usage = Analyze(plan);
-    auto resolved = ApplyCteReuse(std::move(plan), ChooseCteReuse(usage));
+    auto resolved = ApplyCteReuse(TestTypes(), std::move(plan), ChooseCteReuse(usage));
     EXPECT_FALSE(ContainsCteRef(resolved));
 }
 
@@ -238,7 +239,7 @@ TEST(CteReuse, MaterializeNarrowsSpoolAndSourceToDemand) {
     auto plan = BuildSqlPlan(
         "WITH x AS (SELECT a, b FROM t) SELECT p.a FROM x p JOIN x q ON p.a = q.a", tables);
     auto usage = Analyze(plan);
-    auto resolved = ApplyCteReuse(std::move(plan), ChooseCteReuse(usage));
+    auto resolved = ApplyCteReuse(TestTypes(), std::move(plan), ChooseCteReuse(usage));
 
     auto consumers = FindConsumers(resolved);
     ASSERT_EQ(consumers.size(), 2u);
@@ -263,7 +264,7 @@ TEST(CteReuse, BoundaryProjectionNarrowsUnionSpool) {
         "WITH x AS (SELECT a, b FROM t UNION ALL SELECT a, b FROM t) "
         "SELECT p.a FROM x p JOIN x q ON p.a = q.a", tables);
     auto usage = Analyze(plan);
-    auto resolved = ApplyCteReuse(std::move(plan), ChooseCteReuse(usage));
+    auto resolved = ApplyCteReuse(TestTypes(), std::move(plan), ChooseCteReuse(usage));
 
     auto consumers = FindConsumers(resolved);
     ASSERT_EQ(consumers.size(), 2u);
@@ -280,13 +281,13 @@ TEST(CteReuse, AggregateOutputPruningDropsOnlyUnusedAggregate) {
         "WITH x AS (SELECT a, count(*) AS c, sum(b) AS s FROM t GROUP BY a) "
         "SELECT p.a, p.c FROM x p JOIN x q ON p.a = q.a", tables);
     auto usage = Analyze(plan);
-    auto resolved = ApplyCteReuse(std::move(plan), ChooseCteReuse(usage));
+    auto resolved = ApplyCteReuse(TestTypes(), std::move(plan), ChooseCteReuse(usage));
 
     auto consumers = FindConsumers(resolved);
     ASSERT_FALSE(consumers.empty());
     auto aggregate = FindAggregate(consumers[0]->Materialization()->Plan);
     ASSERT_TRUE(aggregate != nullptr);
-    auto* agg = static_cast<TAggregateOperator*>(aggregate.get());
+    auto* agg = static_cast<TAggregateOperator*>(aggregate.Get());
     ASSERT_EQ(agg->Aggs().size(), 1u);
     EXPECT_EQ(agg->Aggs()[0].Func, "count");
     EXPECT_EQ(agg->GroupKeys().size(), 1u);
@@ -303,13 +304,13 @@ TEST(CteReuse, AggregateOutputPruningKeepsHavingAggregate) {
         "GROUP BY a HAVING count(*) > 1) "
         "SELECT p.a FROM x p JOIN x q ON p.a = q.a", tables);
     auto usage = Analyze(plan);
-    auto resolved = ApplyCteReuse(std::move(plan), ChooseCteReuse(usage));
+    auto resolved = ApplyCteReuse(TestTypes(), std::move(plan), ChooseCteReuse(usage));
 
     auto consumers = FindConsumers(resolved);
     ASSERT_FALSE(consumers.empty());
     auto aggregate = FindAggregate(consumers[0]->Materialization()->Plan);
     ASSERT_TRUE(aggregate != nullptr);
-    auto* agg = static_cast<TAggregateOperator*>(aggregate.get());
+    auto* agg = static_cast<TAggregateOperator*>(aggregate.Get());
     ASSERT_EQ(agg->Aggs().size(), 1u);
     EXPECT_EQ(agg->Aggs()[0].Func, "count");
     EXPECT_EQ(agg->GroupKeys().size(), 1u);
@@ -376,7 +377,7 @@ TEST(CteReuse, ConsumerPredicatePushedToDefinitionSource) {
     auto plan = BuildSqlPlan(
         "WITH x AS (SELECT a, b FROM t) "
         "SELECT p.a FROM x p JOIN x q ON p.a = q.a WHERE p.b = 1 AND q.b = 1", tables);
-    ApplyPlanPasses(plan);
+    ApplyPlanPasses(TestTypes(), plan);
 
     auto consumers = FindConsumers(plan);
     ASSERT_EQ(consumers.size(), 2u);
@@ -394,7 +395,7 @@ TEST(CteReuse, MultiColumnConsumerPredicatesUseSharedSupersetBuilder) {
         "SELECT p.a FROM x p JOIN x q ON p.a = q.a "
         "WHERE p.a + p.b < 10 AND q.a + q.b < 20",
         tables);
-    ApplyPlanPasses(plan);
+    ApplyPlanPasses(TestTypes(), plan);
 
     auto consumers = FindConsumers(plan);
     ASSERT_EQ(consumers.size(), 2u);
@@ -415,7 +416,7 @@ TEST(CteReuse, AsymmetricPredicateNotPushed) {
     auto plan = BuildSqlPlan(
         "WITH x AS (SELECT a, b FROM t) "
         "SELECT p.a FROM x p JOIN x q ON p.a = q.a WHERE p.b = 1", tables);
-    ApplyPlanPasses(plan);
+    ApplyPlanPasses(TestTypes(), plan);
 
     auto consumers = FindConsumers(plan);
     ASSERT_EQ(consumers.size(), 2u);

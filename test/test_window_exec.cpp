@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "mock_source.h"
 #include "plan_runner.h"
+#include "test_types.h"
 
 #include <qdb/plan/ops/operator.h>
 #include <qdb/plan/ops/source.h>
@@ -35,12 +36,12 @@ namespace {
 TOperatorPtr ParsePlan(const std::string& sexp, ITable& source) {
     NSexp::TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-        return std::make_shared<TSourceOperator>(Borrow(source), std::string(path));
+        return NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), std::string(path));
     };
     opts.CteRegistry =
         std::make_shared<std::unordered_map<uint32_t, TCteDefinitionPtr>>();
 
-    NQumir::NAst::NCore::TParser parser;
+    NQumir::NAst::NCore::TParser parser(TestTypes());
     for (auto& [name, fn] : NSexp::MakeRelParsers(std::move(opts))) {
         parser.NodeParsers[name] = std::move(fn);
     }
@@ -52,9 +53,9 @@ TOperatorPtr ParsePlan(const std::string& sexp, ITable& source) {
         throw std::runtime_error(result.error().ToString());
     }
 
-    auto root = std::static_pointer_cast<IOperator>(result.value());
-    AnnotateTypes(root);
-    ApplyColumnPruning(root);
+    auto root = NQumir::StaticPointerCast<IOperator>(result.value());
+    AnnotateTypes(TestTypes(), root);
+    ApplyColumnPruning(TestTypes(), root);
     return root;
 }
 
@@ -145,9 +146,9 @@ TEST(WindowExec, PrefixSumI32OutputsI64) {
     TMockSource source(
         {"k", "o", "v"},
         std::move(batches),
-        {std::make_shared<NQumir::NAst::TIntegerType>(),
-         std::make_shared<NQumir::NAst::TIntegerType>(),
-         std::make_shared<NQumir::NAst::TIntegerType>(
+        {TestTypes().MakeInteger(),
+         TestTypes().MakeInteger(),
+         TestTypes().MakeInteger(
              NQumir::NAst::TIntegerType::I32)});
 
     auto root = ParsePlan(
@@ -263,10 +264,10 @@ TEST(WindowExec, RankResetsPerStringAndI64Partition) {
         {"g", "s", "o", "p"},
         std::move(batches),
         {
-            std::make_shared<NQumir::NAst::TStringType>(),
-            std::make_shared<NQumir::NAst::TIntegerType>(),
-            std::make_shared<NQumir::NAst::TIntegerType>(),
-            std::make_shared<NQumir::NAst::TIntegerType>(),
+            TestTypes().Make<NQumir::NAst::TStringType>(),
+            TestTypes().MakeInteger(),
+            TestTypes().MakeInteger(),
+            TestTypes().MakeInteger(),
         });
 
     auto root = ParsePlan(
@@ -381,8 +382,8 @@ TEST(WindowExec, AvgI32BroadcastsF64PerPartition) {
     TMockSource source(
         {"k", "v"},
         std::move(batches),
-        {std::make_shared<NQumir::NAst::TIntegerType>(),
-         std::make_shared<NQumir::NAst::TIntegerType>(
+        {TestTypes().MakeInteger(),
+         TestTypes().MakeInteger(
              NQumir::NAst::TIntegerType::I32)});
 
     auto root = ParsePlan(
@@ -440,7 +441,7 @@ TEST(WindowExec, AvgDecimalBroadcastsPerPartition) {
     TMockSource source(
         {"k", "v"},
         std::move(batches),
-        {std::make_shared<NQumir::NAst::TIntegerType>(), std::make_shared<TDecimal>(15, 2)});
+        {TestTypes().MakeInteger(), MakeDecimalType(TestTypes(), {15, 2})});
 
     auto root = ParsePlan(
         "(rel window (rel source \"data.parquet\") "
@@ -458,7 +459,7 @@ TEST(WindowExec, AvgDecimalBroadcastsPerPartition) {
     auto* outKeys = reinterpret_cast<int64_t*>(result.Columns[0].Data);
     auto* outAvg = reinterpret_cast<qdb_bin_int*>(result.Columns[2].Data);
 
-    auto* outType = static_cast<NQumir::NAst::TStructType*>(root->OutputColumns().get());
+    auto* outType = static_cast<const NQumir::NAst::TStructType*>(root->OutputColumns());
     ASSERT_NE(outType, nullptr);
     ASSERT_EQ(outType->Fields.size(), 3u);
     auto avgSpec = DecimalSpecOf(outType->Fields[2].second);
@@ -487,13 +488,13 @@ TEST(WindowExec, AvgDecimalBroadcastsPerPartition) {
 
 TEST(WindowExec, AvgDecimalTypeKeepsIntegralDigitsAtPrecisionCap) {
     auto whole = DecimalSpecOf(
-        ComputeWindowAvgResultType(std::make_shared<TDecimal>(38, 0)));
+        ComputeWindowAvgResultType(TestTypes(), MakeDecimalType(TestTypes(), {38, 0})));
     ASSERT_TRUE(whole.has_value());
     EXPECT_EQ(whole->Precision, 38);
     EXPECT_EQ(whole->Scale, 0);
 
     auto fractional = DecimalSpecOf(
-        ComputeWindowAvgResultType(std::make_shared<TDecimal>(38, 37)));
+        ComputeWindowAvgResultType(TestTypes(), MakeDecimalType(TestTypes(), {38, 37})));
     ASSERT_TRUE(fractional.has_value());
     EXPECT_EQ(fractional->Precision, 38);
     EXPECT_EQ(fractional->Scale, 37);
@@ -521,8 +522,8 @@ TEST(WindowExec, AvgDecimalKeepsFractionalPrecision) {
         .RefCount = 1,
     }};
     TMockSource source({"k", "v"}, std::move(batches),
-        {std::make_shared<NQumir::NAst::TIntegerType>(),
-         std::make_shared<TDecimal>(15, 2)});
+        {TestTypes().MakeInteger(),
+         MakeDecimalType(TestTypes(), {15, 2})});
 
     auto root = ParsePlan(
         "(rel window (rel source \"data.parquet\") (partition k) (fn a avg v))",
@@ -687,7 +688,7 @@ TEST(WindowExec, Q47LikeCteSelfJoinUsesWindowRankNeighbors) {
       (psum |lag.sum_sales|)
       (nsum |lead.sum_sales|))))
 )qdb", source);
-    ApplyPlanPasses(root);
+    ApplyPlanPasses(TestTypes(), root);
 
     auto runtime = RunPlan(root);
 
@@ -757,12 +758,12 @@ TEST(WindowExec, Q47LikeCteSelfJoinKeepsDecimalWindowAvg) {
         {"c", "b", "s", "y", "m", "sales"},
         std::move(batches),
         {
-            std::make_shared<NQumir::NAst::TIntegerType>(),
-            std::make_shared<NQumir::NAst::TIntegerType>(),
-            std::make_shared<NQumir::NAst::TIntegerType>(),
-            std::make_shared<NQumir::NAst::TIntegerType>(),
-            std::make_shared<NQumir::NAst::TIntegerType>(),
-            std::make_shared<TDecimal>(15, 2),
+            TestTypes().MakeInteger(),
+            TestTypes().MakeInteger(),
+            TestTypes().MakeInteger(),
+            TestTypes().MakeInteger(),
+            TestTypes().MakeInteger(),
+            MakeDecimalType(TestTypes(), {15, 2}),
         });
 
     auto root = ParsePlan(R"qdb(
@@ -815,7 +816,7 @@ TEST(WindowExec, Q47LikeCteSelfJoinKeepsDecimalWindowAvg) {
       (psum |lag.sum_sales|)
       (nsum |lead.sum_sales|))))
 )qdb", source);
-    ApplyPlanPasses(root);
+    ApplyPlanPasses(TestTypes(), root);
 
     auto runtime = RunPlan(root);
 
@@ -877,12 +878,12 @@ TEST(WindowExec, Q47LikeCteConsumerAppliesDecimalOutlierFilter) {
         {"c", "b", "s", "y", "m", "sales"},
         std::move(batches),
         {
-            std::make_shared<NQumir::NAst::TIntegerType>(),
-            std::make_shared<NQumir::NAst::TIntegerType>(),
-            std::make_shared<NQumir::NAst::TIntegerType>(),
-            std::make_shared<NQumir::NAst::TIntegerType>(),
-            std::make_shared<NQumir::NAst::TIntegerType>(),
-            std::make_shared<TDecimal>(15, 2),
+            TestTypes().MakeInteger(),
+            TestTypes().MakeInteger(),
+            TestTypes().MakeInteger(),
+            TestTypes().MakeInteger(),
+            TestTypes().MakeInteger(),
+            MakeDecimalType(TestTypes(), {15, 2}),
         });
 
     auto root = ParsePlan(R"qdb(
@@ -913,7 +914,7 @@ TEST(WindowExec, Q47LikeCteConsumerAppliesDecimalOutlierFilter) {
       (sum_sales sum_sales)
       (avg_monthly_sales avg_monthly_sales))))
 )qdb", source);
-    ApplyPlanPasses(root);
+    ApplyPlanPasses(TestTypes(), root);
 
     auto runtime = RunPlan(root);
 
@@ -974,12 +975,12 @@ TEST(WindowExec, Q47LikeCteSelfJoinAppliesDecimalOutlierFilter) {
         {"c", "b", "s", "y", "m", "sales"},
         std::move(batches),
         {
-            std::make_shared<NQumir::NAst::TIntegerType>(),
-            std::make_shared<NQumir::NAst::TIntegerType>(),
-            std::make_shared<NQumir::NAst::TIntegerType>(),
-            std::make_shared<NQumir::NAst::TIntegerType>(),
-            std::make_shared<NQumir::NAst::TIntegerType>(),
-            std::make_shared<TDecimal>(15, 2),
+            TestTypes().MakeInteger(),
+            TestTypes().MakeInteger(),
+            TestTypes().MakeInteger(),
+            TestTypes().MakeInteger(),
+            TestTypes().MakeInteger(),
+            MakeDecimalType(TestTypes(), {15, 2}),
         });
 
     auto root = ParsePlan(R"qdb(
@@ -1036,7 +1037,7 @@ TEST(WindowExec, Q47LikeCteSelfJoinAppliesDecimalOutlierFilter) {
       (sum_sales |v1.sum_sales|)
       (avg_monthly_sales |v1.avg_monthly_sales|))))
 )qdb", source);
-    ApplyPlanPasses(root);
+    ApplyPlanPasses(TestTypes(), root);
 
     auto runtime = RunPlan(root);
 
@@ -1133,7 +1134,7 @@ TEST(WindowExec, RankDecimalWithoutPartition) {
     TMockSource source(
         {"d", "p"},
         std::move(batches),
-        {std::make_shared<TDecimal>(15, 4), std::make_shared<NQumir::NAst::TIntegerType>()});
+        {MakeDecimalType(TestTypes(), {15, 4}), TestTypes().MakeInteger()});
 
     auto root = ParsePlan(
         "(rel window (rel source \"data.parquet\") "
@@ -1195,8 +1196,8 @@ TEST(WindowExec, SumDecimalBroadcastsNullForAllNullPartition) {
         {"k", "v"},
         std::move(batches),
         {
-            std::make_shared<NQumir::NAst::TIntegerType>(),
-            std::make_shared<TNullable>(std::make_shared<TDecimal>(15, 2)),
+            TestTypes().MakeInteger(),
+            MakeNullableType(TestTypes(), MakeDecimalType(TestTypes(), {15, 2})),
         });
 
     auto root = ParsePlan(
@@ -1267,9 +1268,9 @@ TEST(WindowExec, PrefixSumDecimalSkipsNullsAndKeepsNullUntilFirstValue) {
         {"k", "o", "v"},
         std::move(batches),
         {
-            std::make_shared<NQumir::NAst::TIntegerType>(),
-            std::make_shared<NQumir::NAst::TIntegerType>(),
-            std::make_shared<TNullable>(std::make_shared<TDecimal>(15, 2)),
+            TestTypes().MakeInteger(),
+            TestTypes().MakeInteger(),
+            MakeNullableType(TestTypes(), MakeDecimalType(TestTypes(), {15, 2})),
         });
 
     auto root = ParsePlan(
@@ -1344,9 +1345,9 @@ TEST(WindowExec, PrefixMaxDecimalSkipsNullsAndKeepsNullUntilFirstValue) {
         {"k", "o", "v"},
         std::move(batches),
         {
-            std::make_shared<NQumir::NAst::TIntegerType>(),
-            std::make_shared<NQumir::NAst::TIntegerType>(),
-            std::make_shared<TNullable>(std::make_shared<TDecimal>(15, 2)),
+            TestTypes().MakeInteger(),
+            TestTypes().MakeInteger(),
+            MakeNullableType(TestTypes(), MakeDecimalType(TestTypes(), {15, 2})),
         });
 
     auto root = ParsePlan(
@@ -1410,9 +1411,8 @@ TEST(WindowExec, PrefixSumGroupsNullPartitionKey) {
         .Selection = nullptr,
         .RefCount = 1,
     }};
-    auto nullableI64 = std::make_shared<NQdb::TNullable>(
-        std::make_shared<NQumir::NAst::TIntegerType>());
-    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    auto nullableI64 = MakeNullableType(TestTypes(), TestTypes().MakeInteger());
+    auto i64 = TestTypes().MakeInteger();
     TMockSource source({"k", "o", "v"}, std::move(batches),
         {nullableI64, i64, i64});
 
@@ -1530,9 +1530,9 @@ struct TF32WindowRun {
             std::vector<std::string>{"k", "o", "v"},
             std::move(batches),
             std::vector<NQumir::NAst::TTypePtr>{
-                std::make_shared<NQumir::NAst::TIntegerType>(),
-                std::make_shared<NQumir::NAst::TIntegerType>(),
-                std::make_shared<TNullable>(std::make_shared<NQumir::NAst::TFloatType>(
+                TestTypes().MakeInteger(),
+                TestTypes().MakeInteger(),
+                MakeNullableType(TestTypes(), TestTypes().MakeFloat(
                     NQumir::NAst::TFloatType::F32)),
             });
         Runtime = RunPlan(ParsePlan(
@@ -1562,11 +1562,11 @@ TEST(WindowExec, PrefixSumAndMaxOfF32WidenSumAndKeepMax) {
     ASSERT_EQ(result.RowCount, 6);
 
     auto sumType = NQumir::NAst::TMaybeType<NQumir::NAst::TFloatType>(
-        UnwrapNullableType(static_cast<NQumir::NAst::TStructType*>(
-            runtime->OutputType().get())->Fields[3].second));
+        UnwrapNullableType(static_cast<const NQumir::NAst::TStructType*>(
+            runtime->OutputType())->Fields[3].second));
     auto maxType = NQumir::NAst::TMaybeType<NQumir::NAst::TFloatType>(
-        UnwrapNullableType(static_cast<NQumir::NAst::TStructType*>(
-            runtime->OutputType().get())->Fields[4].second));
+        UnwrapNullableType(static_cast<const NQumir::NAst::TStructType*>(
+            runtime->OutputType())->Fields[4].second));
     ASSERT_TRUE(sumType);
     ASSERT_TRUE(maxType);
     EXPECT_EQ(sumType.Cast()->BitWidth(), 64);

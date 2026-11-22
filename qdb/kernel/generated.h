@@ -4,6 +4,7 @@
 #include <qdb/kernel/execution_context.h>
 
 #include <qumir/parser/ast.h>
+#include <qumir/parser/type_factory.h>
 
 #include <cstdint>
 #include <memory>
@@ -79,6 +80,9 @@ T FromKernelWord(int64_t word) {
 // Machine binding for one generated kernel program. Created empty at
 // generation time; filled exactly once by FinalizeKernels for one backend.
 struct TKernelSlot {
+    // The query's type factory: declared first, so it outlives Runner and Vm,
+    // whose compiled program refers to its types.
+    std::shared_ptr<NQumir::NAst::TTypeFactory> Types;
     // LLVM: parallel to TGeneratedKernel::Entrypoints; nullptr until bound.
     std::vector<void*> Fns;
     // Owns the JIT'd code: the pointers are valid while this lives.

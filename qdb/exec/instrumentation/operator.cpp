@@ -1,6 +1,7 @@
 #include <qdb/exec/instrumentation/operator.h>
 
 #include <qdb/kernel/column_value.h>
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
@@ -11,13 +12,13 @@ namespace NQdb {
 
 std::vector<int64_t> InstrumentationColumnWidths(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
-    auto structure = TMaybeType<TStructType>(UnwrapNamedType(type));
+    auto structure = TMaybeType<TStructType>(UnwrapNamedValueType(type));
     if (!structure) {
         throw std::runtime_error("instrumentation rowset schema must be a struct");
     }
     std::vector<int64_t> widths;
     for (const auto& [name, field] : structure.Cast()->Fields) {
-        const auto value = UnwrapNamedType(UnwrapNullableType(field));
+        const auto& value = UnwrapNamedValueType(UnwrapNullableType(field));
         if (TMaybeType<TStringType>(value)) {
             widths.push_back(-1);
         } else if (const auto width = NKernel::FixedValueWidth(field)) {

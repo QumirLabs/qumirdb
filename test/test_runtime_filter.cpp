@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "test_types.h"
 
 #include "runtime_filter_test_util.h"
 
@@ -130,7 +131,7 @@ TEST(RuntimeFilterKernel, BindsWhenTheQueryIsFinalized) {
     auto context = std::make_shared<TRuntimeContext>();
     std::vector<TGeneratedKernel> kernels;
     TKernelCompiler compiler(TKernelCompilerOptions{
-        .Sink = &kernels,
+        .Types = SharedTestTypes(), .Sink = &kernels,
         .BindNow = false,
         .RuntimeContext = context,
     });
@@ -139,7 +140,7 @@ TEST(RuntimeFilterKernel, BindsWhenTheQueryIsFinalized) {
     EXPECT_EQ(kernels.front().Entrypoints, (std::vector<std::string>(
         RuntimeFilterKernelEntrypoints.begin(), RuntimeFilterKernelEntrypoints.end())));
     EXPECT_FALSE(kernels.front().Slot->Runner);
-    FinalizeKernels(kernels, EKernelBackend::Llvm);
+    FinalizeKernels(kernels, SharedTestTypes(), EKernelBackend::Llvm);
 
     TRuntimeFilter filter(context, /*maxKeys=*/8, /*bloomBytes=*/512);
     auto keys = Hashes(200, 23);

@@ -7,6 +7,7 @@
 #include <qumir/parser/type.h>
 
 #include "plan_runner.h"
+#include "test_types.h"
 #include <qdb/exec/filter_exec.h>
 #include <qdb/exec/planner_helpers.h>
 #include <qdb/exec/project_exec.h>
@@ -49,9 +50,9 @@ TOperatorPtr ParseRel(const std::string& sexp, ITable& src)
 {
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-        return std::make_shared<TSourceOperator>(Borrow(src), std::string(path));
+        return NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(src), std::string(path));
     };
-    NCore::TParser parser;
+    NCore::TParser parser(TestTypes());
     for (auto& [name, fn] : MakeRelParsers(std::move(opts))) {
         parser.NodeParsers[name] = std::move(fn);
     }
@@ -59,9 +60,9 @@ TOperatorPtr ParseRel(const std::string& sexp, ITable& src)
     NCore::TTokenStream ts(in);
     auto parsed = parser.Parse(ts);
     if (!parsed) throw std::runtime_error(parsed.error().ToString());
-    auto root = std::static_pointer_cast<IOperator>(*parsed);
-    AnnotateTypes(root);
-    ApplyColumnPruning(root);
+    auto root = NQumir::StaticPointerCast<IOperator>(*parsed);
+    AnnotateTypes(TestTypes(), root);
+    ApplyColumnPruning(TestTypes(), root);
     return root;
 }
 
@@ -81,12 +82,12 @@ std::unique_ptr<TTestRuntime> SqlPlan(
 {
     std::istringstream in(sql);
     NSql::TTokenStream ts(in);
-    NSql::TParser parser;
+    NSql::TParser parser(TestTypes());
     auto parsed = parser.Parse(ts);
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
     }
-    auto root = BuildPlan(*parsed, [&](std::string_view table)
+    auto root = BuildPlan(TestTypes(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         auto it = sources.find(std::string(table));
@@ -94,16 +95,16 @@ std::unique_ptr<TTestRuntime> SqlPlan(
             return std::unexpected(NQumir::TError(
                 "unknown test table: " + std::string(table)));
         }
-        return std::make_shared<TSourceOperator>(Borrow(*it->second), std::string(table));
+        return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(*it->second), std::string(table));
     });
     if (!root) {
         throw std::runtime_error(root.error().ToString());
     }
     if (optimize) {
-        ApplyPlanPasses(*root);
+        ApplyPlanPasses(TestTypes(), *root);
     } else {
-        AnnotateTypes(*root);
-        ApplyColumnPruning(*root);
+        AnnotateTypes(TestTypes(), *root);
+        ApplyColumnPruning(TestTypes(), *root);
     }
     return RunPlan(*root, settings);
 }
@@ -120,17 +121,17 @@ bool IsValid(const TColumn& column, int64_t row) {
 }
 
 TEST(ProjectE2E, NamedStructProjectionFreezesItsFlattenedLayout) {
-    auto i64 = std::make_shared<TIntegerType>();
-    auto structure = std::make_shared<TNamedType>("Pair", std::make_shared<TStructType>(
+    auto i64 = TestTypes().MakeInteger();
+    auto structure = TestTypes().MakeNamed("Pair", TestTypes().MakeStruct(
         std::vector<std::pair<std::string, TTypePtr>>{{"first", i64}, {"second", i64}}));
     TMockSource source(TMockColumns{}, {{"x", i64}, {"pair", structure}});
-    auto input = std::make_shared<TSourceOperator>(Borrow(source), "t");
-    TOperatorPtr plan = std::make_shared<TProjectOperator>(input, std::vector<TProjectionSpec>{
-        {.Name = "unused", .Expression = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "x")},
-        {.Expression = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "pair"),
+    auto input = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), "t");
+    TOperatorPtr plan = NQumir::MakeIntrusive<TProjectOperator>(TestTypes(), input, std::vector<TProjectionSpec>{
+        {.Name = "unused", .Expression = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "x")},
+        {.Expression = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "pair"),
             .ImplicitName = true},
     });
-    AnnotateTypes(plan);
+    AnnotateTypes(TestTypes(), plan);
     ASSERT_EQ(plan->OutputColumns()->Fields.size(), 3);
 
     // Pruning the leading column must not renumber the struct's colN outputs
@@ -140,8 +141,8 @@ TEST(ProjectE2E, NamedStructProjectionFreezesItsFlattenedLayout) {
     EXPECT_EQ(project.Cast()->Projections()[1].ColumnAliases,
         (std::vector<std::string>{"col1", "col2"}));
     TColumnSet demand{"col2"};
-    ApplyColumnPruning(plan, &demand, nullptr);
-    AnnotateTypes(plan);
+    ApplyColumnPruning(TestTypes(), plan, &demand, nullptr);
+    AnnotateTypes(TestTypes(), plan);
     ASSERT_EQ(project.Cast()->Projections().size(), 1);
     EXPECT_FALSE(project.Cast()->Projections()[0].ImplicitName);
     ASSERT_EQ(plan->OutputColumns()->Fields.size(), 2);
@@ -197,8 +198,8 @@ TEST(ProjectE2E, FilterRebuildsFromPlanDataAndSlot) {
     ASSERT_TRUE(filter);
 
     std::vector<TGeneratedKernel> kernels;
-    auto built = BuildFilterPlan(*filter.Cast(),
-        filter.Cast()->Input()->OutputColumns(), {.Sink = &kernels});
+    auto built = BuildFilterPlan(TestTypes(), *filter.Cast(),
+        filter.Cast()->Input()->OutputColumns(), {.Types = SharedTestTypes(), .Sink = &kernels});
     ASSERT_EQ(kernels.size(), 1u);
     EXPECT_EQ(built.Plan.Kernel, 0u);
     EXPECT_TRUE(built.Plan.KeptInputColumns);
@@ -218,8 +219,8 @@ TEST(ProjectE2E, ProjectRebuildsFromPlanDataAndSlot) {
     ASSERT_TRUE(project);
 
     std::vector<TGeneratedKernel> kernels;
-    auto built = BuildProjectPlan(*project.Cast(),
-        project.Cast()->Input()->OutputColumns(), {.Sink = &kernels});
+    auto built = BuildProjectPlan(TestTypes(), *project.Cast(),
+        project.Cast()->Input()->OutputColumns(), {.Types = SharedTestTypes(), .Sink = &kernels});
     ASSERT_EQ(kernels.size(), 1u);
     ASSERT_TRUE(built.Plan.Kernel);
     EXPECT_EQ(built.Plan.Columns.size(), 2u);
@@ -239,8 +240,8 @@ TEST(ProjectE2E, FilterKeepAllRebuildsFromPlanDataAndSlot) {
     ASSERT_TRUE(filter);
 
     std::vector<TGeneratedKernel> kernels;
-    auto built = BuildFilterPlan(*filter.Cast(),
-        filter.Cast()->Input()->OutputColumns(), {.Sink = &kernels});
+    auto built = BuildFilterPlan(TestTypes(), *filter.Cast(),
+        filter.Cast()->Input()->OutputColumns(), {.Types = SharedTestTypes(), .Sink = &kernels});
     ASSERT_EQ(kernels.size(), 1u);
     EXPECT_FALSE(built.Plan.KeptInputColumns);
 
@@ -258,7 +259,7 @@ TEST(ProjectE2E, ProjectWithoutComputedColumnsRebuildsFromPlanData) {
     auto project = TMaybeOp<TProjectOperator>(root);
     ASSERT_TRUE(project);
 
-    auto built = BuildProjectPlan(*project.Cast(),
+    auto built = BuildProjectPlan(TestTypes(), *project.Cast(),
         project.Cast()->Input()->OutputColumns(), {});
     EXPECT_FALSE(built.Plan.Kernel);
 
@@ -278,8 +279,8 @@ TEST(ProjectE2E, IdentZeroCopyPlusComputed) {
     };
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 3, .RowCount = 3, .RefCount = 1};
     NQdb::TMockSource src({"x", "z", "w"},
-        {std::make_shared<TFloatType>(), std::make_shared<TFloatType>(),
-         std::make_shared<TFloatType>()},
+        {TestTypes().MakeFloat(), TestTypes().MakeFloat(),
+         TestTypes().MakeFloat()},
         {batch});
 
     // kept_x is a zero-copy ident; c is computed x * (2.0 - z).
@@ -287,7 +288,7 @@ TEST(ProjectE2E, IdentZeroCopyPlusComputed) {
         "(rel project (rel source \"L\") (kept_x x) (c (* x (- (: 2.0 f64) z))))", src);
 
     // Output schema: kept_x (f64), c (f64).
-    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    auto* outType = static_cast<const TStructType*>(plan->OutputType());
     ASSERT_EQ(outType->Fields.size(), 2u);
     EXPECT_EQ(outType->Fields[0].first, "kept_x");
     EXPECT_EQ(outType->Fields[1].first, "c");
@@ -315,14 +316,14 @@ TEST(ProjectE2E, NormalizesBareNullIfBranchBeforeProjectKernel) {
         TColumn{.Data = reinterpret_cast<char*>(values.data())},
     };
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 1, .RowCount = 4, .RefCount = 1};
-    NQdb::TMockSource src({"value"}, {std::make_shared<TIntegerType>()}, {batch});
+    NQdb::TMockSource src({"value"}, {TestTypes().MakeInteger()}, {batch});
 
     auto plan = Plan(
         "(rel project (rel source \"L\") "
         "(maybe_value (if (< value (: 3 i64)) value (call qdb_sql_null))))",
         src);
 
-    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    auto* outType = static_cast<const TStructType*>(plan->OutputType());
     ASSERT_EQ(outType->Fields.size(), 1u);
     ASSERT_TRUE(IsNullableType(outType->Fields[0].second));
     EXPECT_TRUE(TMaybeType<TIntegerType>(UnwrapNullableType(outType->Fields[0].second)));
@@ -358,7 +359,7 @@ TEST(ProjectE2E, NormalizesBareNullStringIfBranchBeforeProjectKernel) {
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 4, .RefCount = 1};
     NQdb::TMockSource src(
         {"flag", "label"},
-        {std::make_shared<TIntegerType>(), std::make_shared<TStringType>()},
+        {TestTypes().MakeInteger(), TestTypes().Make<TStringType>()},
         {batch});
 
     auto plan = Plan(
@@ -367,7 +368,7 @@ TEST(ProjectE2E, NormalizesBareNullStringIfBranchBeforeProjectKernel) {
         "label (call qdb_sql_null))))",
         src);
 
-    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    auto* outType = static_cast<const TStructType*>(plan->OutputType());
     ASSERT_EQ(outType->Fields.size(), 1u);
     ASSERT_TRUE(IsNullableType(outType->Fields[0].second));
     EXPECT_TRUE(TMaybeType<TStringType>(UnwrapNullableType(outType->Fields[0].second)));
@@ -389,7 +390,7 @@ TEST(ProjectE2E, StringLiteralIsNotFlattenedAsStringViewStruct) {
     NQdb::TMockSource src({"value"});
     auto plan = SqlPlan("SELECT 's' AS sale_type FROM t", {{"t", &src}});
 
-    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    auto* outType = static_cast<const TStructType*>(plan->OutputType());
     ASSERT_EQ(outType->Fields.size(), 1u);
     EXPECT_EQ(outType->Fields[0].first, "sale_type");
     EXPECT_TRUE(TMaybeType<TStringType>(outType->Fields[0].second));
@@ -402,7 +403,7 @@ TEST(ProjectE2E, DecimalProjectComputesWithI64Storage) {
         TColumn{.Data = reinterpret_cast<char*>(amount.data())},
     };
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 1, .RowCount = 3, .RefCount = 1};
-    NQdb::TMockSource src({"amount"}, {std::make_shared<NQdb::TDecimal>(7, 2)}, {batch});
+    NQdb::TMockSource src({"amount"}, {MakeDecimalType(TestTypes(), {7, 2})}, {batch});
 
     auto plan = Plan(
         "(rel project (rel source \"L\") "
@@ -411,7 +412,7 @@ TEST(ProjectE2E, DecimalProjectComputesWithI64Storage) {
         "(half (/ amount 2)))",
         src);
 
-    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    auto* outType = static_cast<const TStructType*>(plan->OutputType());
     ASSERT_EQ(outType->Fields.size(), 3u);
     EXPECT_TRUE(NQdb::IsDecimalType(outType->Fields[0].second));
     EXPECT_TRUE(NQdb::IsDecimalType(outType->Fields[1].second));
@@ -455,7 +456,7 @@ TEST(ProjectE2E, Decimal64KernelsConvertI64Storage) {
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 5, .RefCount = 1};
     NQdb::TMockSource src(
         {"v", "big"},
-        {std::make_shared<TIntegerType>(), std::make_shared<NQdb::TDecimal>(20, 2)},
+        {TestTypes().MakeInteger(), MakeDecimalType(TestTypes(), {20, 2})},
         {batch});
 
     auto plan = Plan(
@@ -505,7 +506,7 @@ TEST(ProjectE2E, Decimal64FromF64RoundsHalfAwayFromZero) {
         TColumn{.Data = reinterpret_cast<char*>(values.data())},
     };
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 1, .RowCount = 5, .RefCount = 1};
-    NQdb::TMockSource src({"x"}, {std::make_shared<TFloatType>()}, {batch});
+    NQdb::TMockSource src({"x"}, {TestTypes().MakeFloat()}, {batch});
 
     auto plan = Plan(
         "(rel project (rel source \"L\") "
@@ -535,15 +536,15 @@ TEST(ProjectE2E, DecimalDecimalDivisionScalesUpInI128) {
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
     NQdb::TMockSource src(
         {"amount", "divisor"},
-        {std::make_shared<NQdb::TDecimal>(7, 2),
-         std::make_shared<NQdb::TDecimal>(7, 2)},
+        {MakeDecimalType(TestTypes(), {7, 2}),
+         MakeDecimalType(TestTypes(), {7, 2})},
         {batch});
 
     auto plan = Plan(
         "(rel project (rel source \"L\") (ratio (/ amount divisor)))",
         src);
 
-    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    auto* outType = static_cast<const TStructType*>(plan->OutputType());
     ASSERT_EQ(outType->Fields.size(), 1u);
     auto spec = NQdb::DecimalSpecOf(outType->Fields[0].second);
     ASSERT_TRUE(spec.has_value());
@@ -573,8 +574,8 @@ TEST(ProjectE2E, DecimalRemainderAlignsScalesAndKeepsDividendSign) {
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
     NQdb::TMockSource src(
         {"amount", "divisor"},
-        {std::make_shared<NQdb::TDecimal>(10, 2),
-         std::make_shared<NQdb::TDecimal>(5, 3)},
+        {MakeDecimalType(TestTypes(), {10, 2}),
+         MakeDecimalType(TestTypes(), {5, 3})},
         {batch});
 
     auto plan = Plan(
@@ -583,7 +584,7 @@ TEST(ProjectE2E, DecimalRemainderAlignsScalesAndKeepsDividendSign) {
         "(by_decimal (% amount divisor)))",
         src);
 
-    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    auto* outType = static_cast<const TStructType*>(plan->OutputType());
     ASSERT_EQ(outType->Fields.size(), 2u);
     auto byIntSpec = NQdb::DecimalSpecOf(outType->Fields[0].second);
     ASSERT_TRUE(byIntSpec.has_value());
@@ -623,7 +624,7 @@ TEST(ProjectE2E, DecimalAverageShapeDividesSumByCount) {
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
     NQdb::TMockSource src(
         {"k", "amount"},
-        {std::make_shared<TIntegerType>(), std::make_shared<NQdb::TDecimal>(7, 2)},
+        {TestTypes().MakeInteger(), MakeDecimalType(TestTypes(), {7, 2})},
         {batch});
 
     auto plan = Plan(
@@ -633,7 +634,7 @@ TEST(ProjectE2E, DecimalAverageShapeDividesSumByCount) {
         "  (k k) (avg (/ s c)))",
         src);
 
-    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    auto* outType = static_cast<const TStructType*>(plan->OutputType());
     ASSERT_EQ(outType->Fields.size(), 2u);
     EXPECT_TRUE(NQdb::IsDecimalType(outType->Fields[1].second));
 
@@ -661,14 +662,14 @@ TEST(ProjectE2E, NullableDecimalProjectPropagatesValidity) {
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 1, .RowCount = 3, .RefCount = 1};
     NQdb::TMockSource src(
         {"amount"},
-        {std::make_shared<NQdb::TNullable>(std::make_shared<NQdb::TDecimal>(7, 2))},
+        {MakeNullableType(TestTypes(), MakeDecimalType(TestTypes(), {7, 2}))},
         {batch});
 
     auto plan = Plan(
         "(rel project (rel source \"L\") (plus_one (+ amount 1)))",
         src);
 
-    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    auto* outType = static_cast<const TStructType*>(plan->OutputType());
     ASSERT_EQ(outType->Fields.size(), 1u);
     ASSERT_TRUE(NQdb::IsNullableType(outType->Fields[0].second));
     EXPECT_TRUE(NQdb::IsDecimalType(NQdb::UnwrapNullableType(outType->Fields[0].second)));
@@ -700,9 +701,9 @@ TEST(ProjectE2E, DecimalDivisionByZeroIsNull) {
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 3, .RowCount = 3, .RefCount = 1};
     NQdb::TMockSource src(
         {"amount", "divisor", "cnt"},
-        {std::make_shared<NQdb::TDecimal>(7, 2),
-         std::make_shared<NQdb::TDecimal>(7, 2),
-         std::make_shared<TIntegerType>()},
+        {MakeDecimalType(TestTypes(), {7, 2}),
+         MakeDecimalType(TestTypes(), {7, 2}),
+         TestTypes().MakeInteger()},
         {batch});
 
     auto plan = Plan(
@@ -711,7 +712,7 @@ TEST(ProjectE2E, DecimalDivisionByZeroIsNull) {
         "(share (/ amount cnt)))",
         src);
 
-    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    auto* outType = static_cast<const TStructType*>(plan->OutputType());
     ASSERT_EQ(outType->Fields.size(), 2u);
     EXPECT_TRUE(NQdb::IsNullableType(outType->Fields[0].second));
     EXPECT_TRUE(NQdb::IsNullableType(outType->Fields[1].second));
@@ -742,7 +743,7 @@ TEST(FilterE2E, DecimalFilterAlignsIntegerLiteralScale) {
         TColumn{.Data = reinterpret_cast<char*>(amount.data())},
     };
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 1, .RowCount = 3, .RefCount = 1};
-    NQdb::TMockSource src({"amount"}, {std::make_shared<NQdb::TDecimal>(7, 2)}, {batch});
+    NQdb::TMockSource src({"amount"}, {MakeDecimalType(TestTypes(), {7, 2})}, {batch});
 
     auto plan = Plan("(rel filter (rel source \"L\") (> amount 12))", src);
 
@@ -765,7 +766,7 @@ TEST(FilterE2E, NullableDecimalDivisionComparesWithFloatLiteral) {
         TColumn{.Data = reinterpret_cast<char*>(b.data()), .Mask = bMask.data()},
     };
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
-    auto nullableI64 = std::make_shared<NQdb::TNullable>(std::make_shared<TIntegerType>());
+    auto nullableI64 = MakeNullableType(TestTypes(), TestTypes().MakeInteger());
     NQdb::TMockSource src({"a", "b"}, {nullableI64, nullableI64}, {batch});
 
     auto plan = Plan(
@@ -799,8 +800,8 @@ TEST(FilterE2E, DecimalAbsDivisionComparesWithFloatLiteral) {
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
     NQdb::TMockSource src(
         {"sum_sales", "avg_sales"},
-        {std::make_shared<NQdb::TDecimal>(15, 2),
-         std::make_shared<NQdb::TDecimal>(19, 6)},
+        {MakeDecimalType(TestTypes(), {15, 2}),
+         MakeDecimalType(TestTypes(), {19, 6})},
         {batch});
 
     auto plan = Plan(R"qdb(
@@ -837,8 +838,8 @@ TEST(FilterE2E, FloatAbsDivisionComparesWithFloatLiteral) {
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
     NQdb::TMockSource src(
         {"sum_sales", "avg_sales"},
-        {std::make_shared<NQumir::NAst::TFloatType>(),
-         std::make_shared<NQumir::NAst::TFloatType>()},
+        {TestTypes().MakeFloat(),
+         TestTypes().MakeFloat()},
         {batch});
 
     auto plan = Plan(R"qdb(
@@ -877,8 +878,7 @@ TEST(FilterE2E, NullableFloatAbsDivisionComparesWithFloatLiteral) {
         TColumn{.Data = reinterpret_cast<char*>(avgSales.data()), .Mask = avgMask.data()},
     };
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 4, .RefCount = 1};
-    auto nullableF64 = std::make_shared<NQdb::TNullable>(
-        std::make_shared<NQumir::NAst::TFloatType>());
+    auto nullableF64 = MakeNullableType(TestTypes(), TestTypes().MakeFloat());
     NQdb::TMockSource src(
         {"sum_sales", "avg_sales"},
         {nullableF64, nullableF64},
@@ -911,7 +911,7 @@ TEST(ProjectE2E, FloatAbsClearsNegativeZero) {
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 1, .RowCount = 2, .RefCount = 1};
     NQdb::TMockSource src(
         {"v"},
-        {std::make_shared<NQumir::NAst::TFloatType>()},
+        {TestTypes().MakeFloat()},
         {batch});
 
     auto plan = Plan(R"qdb(
@@ -968,9 +968,9 @@ TEST(FilterE2E, DecimalOutlierPredicateCombinesWithIntegerConjuncts) {
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 3, .RowCount = 4, .RefCount = 1};
     NQdb::TMockSource src(
         {"y", "sum_sales", "avg_sales"},
-        {std::make_shared<NQumir::NAst::TIntegerType>(),
-         std::make_shared<NQdb::TDecimal>(15, 2),
-         std::make_shared<NQdb::TDecimal>(19, 6)},
+        {TestTypes().MakeInteger(),
+         MakeDecimalType(TestTypes(), {15, 2}),
+         MakeDecimalType(TestTypes(), {19, 6})},
         {batch});
 
     auto plan = Plan(R"qdb(
@@ -1014,9 +1014,9 @@ TEST(FilterE2E, DecimalOutlierPredicateWithCaseNull) {
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 3, .RowCount = 4, .RefCount = 1};
     NQdb::TMockSource src(
         {"y", "sum_sales", "avg_sales"},
-        {std::make_shared<NQumir::NAst::TIntegerType>(),
-         std::make_shared<NQdb::TDecimal>(15, 2),
-         std::make_shared<NQdb::TDecimal>(19, 6)},
+        {TestTypes().MakeInteger(),
+         MakeDecimalType(TestTypes(), {15, 2}),
+         MakeDecimalType(TestTypes(), {19, 6})},
         {batch});
 
     auto plan = Plan(R"qdb(
@@ -1047,7 +1047,7 @@ TEST(FilterE2E, PublishesSelectionFromUnaryStreamingShell) {
         TColumn{.Data = reinterpret_cast<char*>(values.data())},
     };
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 1, .RowCount = 4, .RefCount = 1};
-    NQdb::TMockSource src({"value"}, {std::make_shared<TIntegerType>()}, {batch});
+    NQdb::TMockSource src({"value"}, {TestTypes().MakeInteger()}, {batch});
 
     auto plan = Plan("(rel filter (rel source \"L\") (> value 1))", src);
 
@@ -1067,7 +1067,7 @@ TEST(FilterE2E, NormalizesBareNullIfBranchBeforeFilterKernel) {
         TColumn{.Data = reinterpret_cast<char*>(values.data())},
     };
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 1, .RowCount = 4, .RefCount = 1};
-    NQdb::TMockSource src({"value"}, {std::make_shared<TIntegerType>()}, {batch});
+    NQdb::TMockSource src({"value"}, {TestTypes().MakeInteger()}, {batch});
 
     auto plan = Plan(
         "(rel filter (rel source \"L\") "
@@ -1099,7 +1099,7 @@ TEST(ProjectE2E, SchedulerRuntimeRunsUnaryPipeline) {
     };
     NQdb::TMockSource src(
         {"value", "payload"},
-        {std::make_shared<TIntegerType>(), std::make_shared<TIntegerType>()},
+        {TestTypes().MakeInteger(), TestTypes().MakeInteger()},
         {batch});
     NScheduler::TSettings settings;
     settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
@@ -1152,7 +1152,7 @@ TEST(ProjectE2E, SchedulerRuntimeRunsLimitTail) {
     };
     NQdb::TMockSource src(
         {"value"},
-        {std::make_shared<TIntegerType>()},
+        {TestTypes().MakeInteger()},
         {firstBatch, secondBatch});
     NScheduler::TSettings settings;
     settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;

@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "test_types.h"
 
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/lib.h>
@@ -94,12 +95,12 @@ protected:
                  "robin_hood_rehash_generic.oz", "owned_arena_lifecycle.oz",
                  "aggregation_hashtable_generic.oz", "owned_blocks.oz",
                  "robin_hood_dual_key.oz"}) {
-            auto library = NQdb::NKernel::ParseFunctionLibrary(
+            auto library = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
                 NQdb::NKernel::ReadAggregationKernel(name), {"aht_update"});
             ASSERT_TRUE(library) << name << ": " << library.error().ToString();
             functions.insert(functions.end(), library->begin(), library->end());
         }
-        auto entries = NQdb::NKernel::ParseFunctionLibrary(TestEntries);
+        auto entries = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(), TestEntries);
         ASSERT_TRUE(entries) << entries.error().ToString();
         functions.insert(functions.end(), entries->begin(), entries->end());
 
@@ -108,8 +109,8 @@ protected:
         options.NativeCode = true;
         options.RunDefiniteAssignment = true;
         NQdb::NTest::ConfigureQumirDbSourceModule(options);
-        Runner_ = std::make_unique<NQumir::TLLVMRunner>(options);
-        auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
+        Runner_ = std::make_unique<NQumir::TLLVMRunner>(options, nullptr, &NQdb::TestTypes());
+        auto program = NQumir::MakeIntrusive<NQumir::NAst::TBlockExpr>(
             NQumir::TLocation{}, std::move(functions));
         NQdb::NTest::AddQumirDbUse(program);
         std::string error;

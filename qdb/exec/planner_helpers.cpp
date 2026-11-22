@@ -12,8 +12,11 @@
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/spec.h>
+#include <qdb/modules/qumirdb.h>
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
+#include <qdb/plan/types/type_text.h>
 
 #include <qumir/parser/type.h>
 
@@ -36,7 +39,7 @@ namespace {
 // TStringView struct (16 bytes) per row; the executor post-converts those.
 size_t ProjectColumnWidth(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
-    if (TMaybeType<TStringType>(UnwrapNamedType(UnwrapNullableType(type)))) {
+    if (TMaybeType<TStringType>(UnwrapNamedValueType(UnwrapNullableType(type)))) {
         return 16; // sizeof(TStringView): ptr(8) + size(8)
     }
     if (const auto width = NKernel::FixedValueWidth(type)) {
@@ -44,21 +47,21 @@ size_t ProjectColumnWidth(const NQumir::NAst::TTypePtr& type) {
     }
     throw std::runtime_error(
         "project: unsupported computed column type " +
-        (type ? type->ToString() : std::string("<null>")));
+        SqlTypeName(type));
 }
 
 // Returns the kernel-level type the project kernel should write for a computed
 // column. StringView is resolved from the qumirdb source module before lowering.
-NQumir::NAst::TTypePtr ProjectJitType(const NQumir::NAst::TTypePtr& outType) {
+NQumir::NAst::TTypePtr ProjectJitType(NQumir::NAst::TTypeFactory& types, const NQumir::NAst::TTypePtr& outType) {
     using namespace NQumir::NAst;
     if (IsDecimalType(outType)) {
-        return DecimalStorageTypeFor(outType);
+        return DecimalStorageTypeFor(types, outType);
     }
-    if (TMaybeType<TStringType>(UnwrapNamedType(UnwrapNullableType(outType)))) {
-        TTypePtr sv = std::make_shared<TNamedType>("StringView", nullptr);
+    if (TMaybeType<TStringType>(UnwrapNamedValueType(UnwrapNullableType(outType)))) {
+        TTypePtr sv = NQumir::NRegistry::QumirDbNamedType(types, "StringView");
         // Keep nullability so the project kernel emits the Nullable[StringView] split
         // (Value -> data, Valid -> mask) instead of casting the struct to StringView.
-        return IsNullableType(outType) ? std::make_shared<TNullable>(std::move(sv)) : sv;
+        return IsNullableType(outType) ? MakeNullableType(types, std::move(sv)) : sv;
     }
     return outType;
 }
@@ -68,8 +71,8 @@ bool IsRadixSortableType(const NQumir::NAst::TTypePtr& type) {
     if (DecimalSpecOfValueType(UnwrapNullableType(type))) {
         return true; // 128-bit decimal: two-word radix (sort_binint_rowids)
     }
-    auto inner = UnwrapNamedType(UnwrapNullableType(type));
-    return static_cast<bool>(TMaybeType<TIntegerType>(inner)) ||
+    auto inner = UnwrapNamedValueType(UnwrapNullableType(type));
+    return static_cast<bool>(MaybeIntegerType(inner)) ||
         static_cast<bool>(TMaybeType<TFloatType>(inner)) ||
         static_cast<bool>(TMaybeType<TBoolType>(inner)) ||
         static_cast<bool>(TMaybeType<TStringType>(inner));
@@ -184,7 +187,8 @@ std::optional<uint64_t> EstimateAggregateGroupsForSizing(
     return std::nullopt;
 }
 
-std::shared_ptr<TAggregateOperator> BuildAggregateCombineOperator(
+NQumir::TIntrusivePtr<TAggregateOperator> BuildAggregateCombineOperator(
+    NQumir::NAst::TTypeFactory& types,
     const TAggregateOperator& aggregate,
     std::vector<std::string> groupKeys)
 {
@@ -195,31 +199,31 @@ std::shared_ptr<TAggregateOperator> BuildAggregateCombineOperator(
         combineAggs.push_back(TAggregateSpec{
             .Name = agg.Name,
             .Func = std::move(func),
-            .Arg = std::make_shared<NQumir::NAst::TIdentExpr>(
+            .Arg = NQumir::MakeIntrusive<NQumir::NAst::TIdentExpr>(
                 NQumir::TLocation{}, agg.Name),
             .EmptyIsZero = agg.Func == "count" || agg.EmptyIsZero,
         });
     }
-    return std::make_shared<TAggregateOperator>(
-        aggregate.Input(), std::move(groupKeys), std::move(combineAggs));
+    return NQumir::MakeIntrusive<TAggregateOperator>(
+        types, aggregate.Input(), std::move(groupKeys), std::move(combineAggs));
 }
 
-std::shared_ptr<TProjectOperator> BuildAggregatePassThroughOperator(
+NQumir::TIntrusivePtr<TProjectOperator> BuildAggregatePassThroughOperator(
+    NQumir::NAst::TTypeFactory& types,
     const TAggregateOperator& aggregate)
 {
     using namespace NQumir::NAst;
-    auto maybeInput = TMaybeType<TStructType>(
-        UnwrapNamedType(aggregate.Input()->OutputColumns()));
-    if (!maybeInput) {
+    const auto inputColumns = aggregate.Input()->OutputColumns();
+    if (!inputColumns) {
         return nullptr;
     }
-    const auto* inputStruct = maybeInput.Cast().get();
+    const auto* inputStruct = inputColumns;
     const NQumir::TLocation loc{};
     auto ident = [&](const std::string& name) {
-        return std::make_shared<TIdentExpr>(loc, name);
+        return NQumir::MakeIntrusive<TIdentExpr>(loc, name);
     };
     auto literal = [&](int64_t value) {
-        return std::make_shared<TNumberExpr>(loc, value);
+        return NQumir::MakeIntrusive<TNumberExpr>(loc, value, types);
     };
 
     std::vector<TProjectionSpec> projections;
@@ -236,9 +240,9 @@ std::shared_ptr<TProjectOperator> BuildAggregatePassThroughOperator(
         TExprPtr state;
         if (agg.Func == "count") {
             state = argIdent
-                ? std::make_shared<TIfExpr>(
+                ? NQumir::MakeIntrusive<TIfExpr>(
                     loc,
-                    std::make_shared<TCallExpr>(
+                    NQumir::MakeIntrusive<TCallExpr>(
                         loc, ident("qdb_is_null"), std::vector<TExprPtr>{ident(argIdent.Cast()->Name)}),
                     literal(0),
                     literal(1))
@@ -246,21 +250,21 @@ std::shared_ptr<TProjectOperator> BuildAggregatePassThroughOperator(
         } else if (argIdent && (agg.Func == "sum" || agg.Func == "min" || agg.Func == "max")) {
             const auto& argName = argIdent.Cast()->Name;
             auto argType = FieldType(inputStruct, argName);
-            auto stateType = AggregateResultType(agg.Func, argType);
+            auto stateType = AggregateResultType(types, agg.Func, argType);
             if (!argType || !stateType) {
                 return nullptr;
             }
             state = ident(argName);
             // The state of an integer aggregate is i64 whatever the argument width.
             if (TypeKey(UnwrapNullableType(argType)) != TypeKey(UnwrapNullableType(stateType))) {
-                state = std::make_shared<TCastExpr>(loc, std::move(state), UnwrapNullableType(stateType));
+                state = NQumir::MakeIntrusive<TCastExpr>(loc, std::move(state), UnwrapNullableType(stateType));
             }
         } else {
             return nullptr;
         }
         projections.push_back({.Name = agg.Name, .Expression = std::move(state)});
     }
-    return std::make_shared<TProjectOperator>(aggregate.Input(), std::move(projections));
+    return NQumir::MakeIntrusive<TProjectOperator>(types, aggregate.Input(), std::move(projections));
 }
 
 int64_t EstimateAggregateInitialCapacity(
@@ -377,7 +381,7 @@ TAggregateTablePlan PlanAggregateTable(
     return plan;
 }
 
-NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src)
+NQumir::NAst::TTypePtr BuildSourceRuntimeType(NQumir::NAst::TTypeFactory& types, TSourceOperator& src)
 {
     const auto& table = src.GetTable();
     // The narrowed reader's schema is the row the scan emits.
@@ -403,7 +407,7 @@ NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src)
     }
 
     std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> fields;
-    const auto& schema = narrowed ? narrowed->Schema() : table->Schema();
+    const auto schema = narrowed ? narrowed->Schema(types) : src.TableSchema();
     for (const auto& col : schema.Columns) {
         auto bare = std::string(col.Name);
         auto it = bareToQual.find(bare);
@@ -413,7 +417,7 @@ NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src)
             fields.emplace_back(bare, col.Type);
         }
     }
-    return std::make_shared<NQumir::NAst::TStructType>(std::move(fields));
+    return types.MakeStruct(std::move(fields));
 }
 
 bool RowJoinTableServes(
@@ -523,6 +527,7 @@ std::string_view JoinBuildSideName(EJoinBuildSide side) {
 }
 
 TFilterPlan BuildFilterPlan(
+    NQumir::NAst::TTypeFactory& types,
     TFilterOperator& filter,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options)
@@ -530,13 +535,13 @@ TFilterPlan BuildFilterPlan(
     if (!options.RuntimeContext) {
         options.RuntimeContext = std::make_shared<TRuntimeContext>();
     }
-    auto* inputStruct = static_cast<NQumir::NAst::TStructType*>(inputType.get());
+    auto* inputStruct = static_cast<const NQumir::NAst::TStructType*>(inputType);
     if (!inputStruct) {
         throw std::runtime_error("filter input must have TStructType");
     }
 
     auto spec = NKernel::BuildFilterKernelSpec(
-        *inputStruct, filter.Predicate(), "<kernel>", options.ExternalCatalog.get(),
+        types, *inputStruct, filter.Predicate(), "<kernel>", options.Annotation,
         options.RuntimeContext.get());
     TKernelCompiler compiler(std::move(options));
     auto dispatch = compiler.CompileFilter(spec);
@@ -556,19 +561,19 @@ TFilterColumnPlan BuildFilterColumnPlan(
     const TFilterOperator& filter,
     const NQumir::NAst::TTypePtr& inputType)
 {
-    auto* inputStruct = static_cast<NQumir::NAst::TStructType*>(
-        inputType.get());
+    auto* inputStruct = static_cast<const NQumir::NAst::TStructType*>(
+        inputType);
     if (!inputStruct) {
         throw std::runtime_error("filter input must have TStructType");
     }
 
     // Emit exactly the pruned output columns; a schema identical to the input
     // (by name and order) keeps the zero-copy fast path.
-    NQumir::NAst::TTypePtr outputType;
+    NQumir::NAst::TTypePtr outputType = nullptr;
     const NQumir::NAst::TStructType* outputStruct = nullptr;
-    if (auto* fun = static_cast<NQumir::NAst::TFunctionType*>(filter.Type.get())) {
+    if (auto* fun = static_cast<const NQumir::NAst::TFunctionType*>(filter.Type)) {
         outputType = fun->ReturnType;
-        outputStruct = static_cast<NQumir::NAst::TStructType*>(outputType.get());
+        outputStruct = static_cast<const NQumir::NAst::TStructType*>(outputType);
     }
     // A stale/decorrelated ReturnType can list columns absent from the actual
     // input; only narrow when it is a proper subset, else pass through in full.
@@ -610,6 +615,7 @@ TFilterColumnPlan BuildFilterColumnPlan(
 }
 
 TProjectColumnPlan BuildProjectColumnPlan(
+    NQumir::NAst::TTypeFactory& types,
     TProjectOperator& project,
     const NQumir::NAst::TStructType& inputStruct)
 {
@@ -643,7 +649,7 @@ TProjectColumnPlan BuildProjectColumnPlan(
             outFields.emplace_back(outputName, it->second);
             ++annotatedFieldIndex;
         } else {
-            NQumir::NAst::TTypePtr outType;
+            NQumir::NAst::TTypePtr outType = nullptr;
             if (projection.Expression->Type
                 && !IsNullableType(projection.Expression->Type)
                 && NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(
@@ -657,22 +663,22 @@ TProjectColumnPlan BuildProjectColumnPlan(
             }
             if (!outType) {
                 outType = NKernel::AnnotateExprType(
-                    projection.Expression, inputStruct);
+                    types, projection.Expression, inputStruct);
             }
             using namespace NQumir::NAst;
             auto structType = TMaybeType<TStructType>(
                 !IsNullableType(outType)
-                    ? UnwrapNamedType(outType)
+                    ? UnwrapNamedValueType(outType)
                     : TTypePtr{});
             if (!structType && IsNullableType(outType)
                 && TMaybeType<TStructType>(
-                    UnwrapNamedType(UnwrapNullableType(outType))))
+                    UnwrapNamedValueType(UnwrapNullableType(outType))))
             {
                 throw NQumir::TError(
                     "nullable struct-return projections are not supported");
             }
             plan.ComputedExprs.push_back(projection.Expression);
-            plan.ComputedJitTypes.push_back(ProjectJitType(outType));
+            plan.ComputedJitTypes.push_back(ProjectJitType(types, outType));
 
             auto addComputedColumn = [&](const std::string& fallbackName,
                                          const TTypePtr& fieldType) {
@@ -681,7 +687,7 @@ TProjectColumnPlan BuildProjectColumnPlan(
                     ? annotatedOutput->Fields[annotatedFieldIndex].first
                     : fallbackName;
                 const bool isStr = static_cast<bool>(TMaybeType<TStringType>(
-                    UnwrapNamedType(UnwrapNullableType(fieldType))));
+                    UnwrapNamedValueType(UnwrapNullableType(fieldType))));
                 plan.Columns.push_back({
                     .Computed = true,
                     .Index = static_cast<int32_t>(plan.ComputedWidths.size()),
@@ -704,12 +710,13 @@ TProjectColumnPlan BuildProjectColumnPlan(
             addComputedColumn(projection.Name, outType);
         }
     }
-    plan.OutputType = std::make_shared<NQumir::NAst::TStructType>(
+    plan.OutputType = types.MakeStruct(
         std::move(outFields));
     return plan;
 }
 
 TProjectPlan BuildProjectPlan(
+    NQumir::NAst::TTypeFactory& types,
     TProjectOperator& project,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options)
@@ -717,21 +724,21 @@ TProjectPlan BuildProjectPlan(
     if (!options.RuntimeContext) {
         options.RuntimeContext = std::make_shared<TRuntimeContext>();
     }
-    auto* inputStruct = static_cast<NQumir::NAst::TStructType*>(inputType.get());
+    auto* inputStruct = static_cast<const NQumir::NAst::TStructType*>(inputType);
     if (!inputStruct) {
         throw std::runtime_error("project input must have TStructType");
     }
 
-    auto plan = BuildProjectColumnPlan(project, *inputStruct);
+    auto plan = BuildProjectColumnPlan(types, project, *inputStruct);
 
     std::optional<uint32_t> kernel;
     if (!plan.ComputedExprs.empty()) {
         auto spec = NKernel::BuildProjectKernelSpec(
-            *inputStruct,
+            types, *inputStruct,
             plan.ComputedExprs,
             plan.ComputedJitTypes,
             "<project>",
-            options.ExternalCatalog.get(),
+            options.Annotation,
             options.RuntimeContext.get());
         TKernelCompiler compiler(std::move(options));
         kernel = compiler.CompileProject(spec).Kernel;
@@ -750,18 +757,19 @@ TProjectPlan BuildProjectPlan(
 }
 
 TSortPlanData BuildSortPlanData(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TTypePtr& inputTypePtr,
     const std::vector<TSortKey>& keys,
     std::string_view kernelName,
     std::optional<int64_t> topLimit,
     TKernelCompilerOptions options)
 {
-    auto* inputStruct = static_cast<NQumir::NAst::TStructType*>(inputTypePtr.get());
+    auto* inputStruct = static_cast<const NQumir::NAst::TStructType*>(inputTypePtr);
     if (!inputStruct) {
         throw std::runtime_error("sort input must have TStructType");
     }
     const auto& inputType = *inputStruct;
-    auto spec = NKernel::BuildSortKernelSpec(inputType, keys, std::string(kernelName));
+    auto spec = NKernel::BuildSortKernelSpec(types, inputType, keys, std::string(kernelName));
     PrintKernelSpec(options.Diagnostics, spec);
     auto sortInputs = BuildSortKernelInputs(spec);
     if (!sortInputs.AllKeysRadixSortable || sortInputs.RadixKeys.empty()) {
@@ -816,12 +824,13 @@ TSortPlanData BuildSortPlanData(
 }
 
 TWindowPlanData BuildWindowPlanData(
+    NQumir::NAst::TTypeFactory& types,
     TWindowOperator& window,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options)
 {
     using namespace NQumir::NAst;
-    auto* inputStruct = static_cast<TStructType*>(inputType.get());
+    auto* inputStruct = static_cast<const TStructType*>(inputType);
     if (!inputStruct) {
         throw std::runtime_error("window input must have TStructType");
     }
@@ -915,14 +924,14 @@ TWindowPlanData BuildWindowPlanData(
             }
             funcs.push_back({
                 .Func = fn.Func,
-                .ResultType = std::make_shared<TIntegerType>(),
+                .ResultType = types.MakeInteger(),
             });
             continue;
         }
         if (fn.Func == "row_number") {
             funcs.push_back({
                 .Func = fn.Func,
-                .ResultType = std::make_shared<TIntegerType>(),
+                .ResultType = types.MakeInteger(),
             });
             continue;
         }
@@ -935,8 +944,8 @@ TWindowPlanData BuildWindowPlanData(
         auto valueType = UnwrapNullableType(argType);
         const bool isBinInt =
             IsDecimal128Type(valueType) || IsBinIntStorageType(valueType);
-        auto inner = PhysicalValueType(valueType);
-        auto integer = TMaybeType<TIntegerType>(inner);
+        auto inner = PhysicalValueType(types, valueType);
+        auto integer = MaybeIntegerType(inner);
         const bool isInteger = static_cast<bool>(integer);
         const bool isFloat = static_cast<bool>(TMaybeType<TFloatType>(inner));
         if (fn.Func == "avg") {
@@ -951,7 +960,7 @@ TWindowPlanData BuildWindowPlanData(
             funcs.push_back({
                 .Func = "avg_partition",
                 .ArgColumn = idx,
-                .ResultType = ComputeWindowAvgResultType(argType),
+                .ResultType = ComputeWindowAvgResultType(types, argType),
             });
             continue;
         }
@@ -964,7 +973,7 @@ TWindowPlanData BuildWindowPlanData(
             funcs.push_back({
                 .Func = ordered ? "sum_prefix" : "sum_partition",
                 .ArgColumn = idx,
-                .ResultType = AggregateResultType("sum", argType),
+                .ResultType = AggregateResultType(types, "sum", argType),
                 .PeerInclusive = ordered && framePeerInclusive(),
             });
             continue;
@@ -994,8 +1003,7 @@ TWindowPlanData BuildWindowPlanData(
     auto* sink = options.Sink;
     const size_t sinkBefore = sink ? sink->size() : 0;
     TKernelCompiler compiler(std::move(options));
-    auto dispatch = compiler.CompileWindow(
-        radixKeys, *inputStruct, partitionRadixKeys, orderRadixKeys, funcs);
+    auto dispatch = compiler.CompileWindow(radixKeys, *inputStruct, partitionRadixKeys, orderRadixKeys, funcs);
     const uint32_t kernelIndex = dispatch.Kernel;
     auto keyColumns = SortColumnRefs(radixKeys);
     if (sink) {

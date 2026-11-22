@@ -34,6 +34,7 @@ struct TFusedKernelStorage {
 
 void FinalizeKernels(
     std::span<TGeneratedKernel> kernels,
+    std::shared_ptr<NQumir::NAst::TTypeFactory> types,
     EKernelBackend backend,
     std::ostream* diagnostics,
     std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog,
@@ -83,11 +84,12 @@ void FinalizeKernels(
             throw std::runtime_error(
                 "the vm kernel backend does not run external modules; use --kernel:backend=llvm");
         }
-        auto program = PrepareVmProgram(storage->Program, fused.Entrypoints);
+        auto program = PrepareVmProgram(*types, storage->Program, fused.Entrypoints);
         if (diagnostics) {
             *diagnostics << "========== END RUNTIME FUSED FINALIZE ==========\n";
         }
         for (const auto& [kernel, uniqueIndex] : bindings) {
+            kernel->Slot->Types = types;
             kernel->Slot->Vm = program;
             kernel->Slot->VmFns.clear();
             for (const auto& name : fused.UniqueEntrypoints[uniqueIndex]) {
@@ -110,7 +112,7 @@ void FinalizeKernels(
         codegen = std::make_unique<NQumir::NCodeGen::TTpdeBackend>();
     }
 #endif
-    auto runner = std::make_shared<NQumir::TLLVMRunner>(std::move(options), std::move(codegen));
+    auto runner = std::make_shared<NQumir::TLLVMRunner>(std::move(options), std::move(codegen), types.get());
 
     std::string error;
     std::unordered_map<std::string, void*> fns;
@@ -157,6 +159,7 @@ void FinalizeKernels(
     }
 
     for (const auto& [kernel, uniqueIndex] : bindings) {
+        kernel->Slot->Types = types;
         kernel->Slot->Fns = uniqueFns[uniqueIndex];
         kernel->Slot->Runner = runner;
         kernel->Slot->JitLifetime = jitLifetime;

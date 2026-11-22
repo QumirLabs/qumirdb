@@ -40,26 +40,26 @@ namespace {
 using NQumir::NAst::TIntegerType;
 using NQumir::NAst::TTypePtr;
 
-TTypePtr ArrowTypeToQumir(const std::shared_ptr<arrow::DataType>& type) {
+TTypePtr ArrowTypeToQumir(NQumir::NAst::TTypeFactory& types, const std::shared_ptr<arrow::DataType>& type) {
     switch (type->id()) {
-        case arrow::Type::INT8: return std::make_shared<TIntegerType>(TIntegerType::I8);
-        case arrow::Type::INT16: return std::make_shared<TIntegerType>(TIntegerType::I16);
-        case arrow::Type::INT32: return std::make_shared<TIntegerType>(TIntegerType::I32);
-        case arrow::Type::INT64: return std::make_shared<TIntegerType>(TIntegerType::I64);
-        case arrow::Type::UINT8: return std::make_shared<TIntegerType>(TIntegerType::U8);
-        case arrow::Type::UINT16: return std::make_shared<TIntegerType>(TIntegerType::U16);
-        case arrow::Type::UINT32: return std::make_shared<TIntegerType>(TIntegerType::U32);
-        case arrow::Type::UINT64: return std::make_shared<TIntegerType>(TIntegerType::U64);
-        case arrow::Type::FLOAT: return std::make_shared<NQumir::NAst::TFloatType>(NQumir::NAst::TFloatType::F32);
-        case arrow::Type::DOUBLE: return std::make_shared<NQumir::NAst::TFloatType>();
-        case arrow::Type::BOOL: return std::make_shared<NQumir::NAst::TBoolType>();
+        case arrow::Type::INT8: return types.MakeInteger(TIntegerType::I8);
+        case arrow::Type::INT16: return types.MakeInteger(TIntegerType::I16);
+        case arrow::Type::INT32: return types.MakeInteger(TIntegerType::I32);
+        case arrow::Type::INT64: return types.MakeInteger(TIntegerType::I64);
+        case arrow::Type::UINT8: return types.MakeInteger(TIntegerType::U8);
+        case arrow::Type::UINT16: return types.MakeInteger(TIntegerType::U16);
+        case arrow::Type::UINT32: return types.MakeInteger(TIntegerType::U32);
+        case arrow::Type::UINT64: return types.MakeInteger(TIntegerType::U64);
+        case arrow::Type::FLOAT: return types.MakeFloat(NQumir::NAst::TFloatType::F32);
+        case arrow::Type::DOUBLE: return types.MakeFloat();
+        case arrow::Type::BOOL: return types.Make<NQumir::NAst::TBoolType>();
         case arrow::Type::STRING:
-        case arrow::Type::LARGE_STRING: return std::make_shared<NQumir::NAst::TStringType>();
-        case arrow::Type::DATE32: return std::make_shared<TDateType>();
-        case arrow::Type::DATE64: return std::make_shared<TIntegerType>(TIntegerType::I64);
+        case arrow::Type::LARGE_STRING: return types.Make<NQumir::NAst::TStringType>();
+        case arrow::Type::DATE32: return MakeDateType(types);
+        case arrow::Type::DATE64: return types.MakeInteger(TIntegerType::I64);
         case arrow::Type::DECIMAL128: {
             auto decimal = std::static_pointer_cast<arrow::Decimal128Type>(type);
-            return std::make_shared<TDecimal>(decimal->precision(), decimal->scale());
+            return MakeDecimalType(types, {decimal->precision(), decimal->scale()});
         }
         case arrow::Type::DECIMAL256:
             throw std::runtime_error("DECIMAL256 parquet columns are not supported");
@@ -67,10 +67,10 @@ TTypePtr ArrowTypeToQumir(const std::shared_ptr<arrow::DataType>& type) {
     }
 }
 
-TTypePtr ArrowFieldToQumir(const std::shared_ptr<arrow::Field>& field) {
-    auto type = ArrowTypeToQumir(field->type());
+TTypePtr ArrowFieldToQumir(NQumir::NAst::TTypeFactory& types, const std::shared_ptr<arrow::Field>& field) {
+    auto type = ArrowTypeToQumir(types, field->type());
     if (type && field->nullable()) {
-        return std::make_shared<TNullable>(std::move(type));
+        return MakeNullableType(types, std::move(type));
     }
     return type;
 }
@@ -275,10 +275,8 @@ struct TParquetFileData {
     std::shared_ptr<parquet::arrow::FileReader> FileReader;
     std::shared_ptr<arrow::Schema> FileSchema;
     std::vector<std::string> FileNames;
-    std::vector<TColumnSchema> FileColumns;
     // Per field: the leaf column TDecimalColumnScan reads, else -1 (read by Arrow).
     std::vector<int> DecimalScanColumns;
-    TSchema FullSchema;
     std::vector<NScheduler::TScanRowGroup> RowGroups;
     std::vector<std::vector<TRowGroupColumnRange>> RowGroupRanges;
     TStatsPtr Stats;
@@ -364,14 +362,6 @@ void TParquetFileData::Open()
         }
         FileNames.push_back(field->name());
     }
-    FileColumns.reserve(FileSchema->num_fields());
-    for (int field = 0; field < FileSchema->num_fields(); ++field) {
-        FileColumns.push_back({
-            .Name = FileNames[static_cast<size_t>(field)],
-            .Type = ArrowFieldToQumir(FileSchema->field(field)),
-        });
-    }
-    FullSchema = TSchema{FileColumns};
 
     const auto& manifest = FileReader->manifest();
     DecimalScanColumns.assign(static_cast<size_t>(FileSchema->num_fields()), -1);
@@ -379,7 +369,9 @@ void TParquetFileData::Open()
         field < DecimalScanColumns.size(); ++field)
     {
         const auto& schemaField = manifest.schema_fields[field];
-        if (!schemaField.is_leaf() || !IsDecimalType(FileColumns[field].Type)) {
+        if (!schemaField.is_leaf()
+            || FileSchema->field(static_cast<int>(field))->type()->id() != arrow::Type::DECIMAL128)
+        {
             continue;
         }
         const auto* descriptor =
@@ -726,36 +718,35 @@ std::vector<int> TParquetSource::EffectiveFileColumnIndexes() const
 
 void TParquetSource::RefreshSchema()
 {
-    Names_.clear();
-    Columns_.clear();
-    // Columns_ names view Names_, so it must not reallocate for the row id.
-    const size_t columnCount = SelectedColumns_.size() + (RowIdRequested() ? 1 : 0);
-    Names_.reserve(columnCount);
-    Columns_.reserve(columnCount);
     std::vector<std::shared_ptr<arrow::Field>> fields;
     fields.reserve(SelectedColumns_.size());
     size_t nextScan = 0;
     for (size_t position = 0; position < SelectedColumns_.size(); ++position) {
         auto field = File_->FileSchema->field(SelectedColumns_[position]);
-        Names_.push_back(field->name());
-        Columns_.push_back({
-            .Name = Names_.back(),
-            .Type = ArrowFieldToQumir(field),
-        });
         if (nextScan < DecimalScans_.size() && DecimalScans_[nextScan].Position == position) {
             field = field->WithType(DecimalScans_[nextScan++].Scan->Type());
         }
         fields.push_back(std::move(field));
     }
     BatchSchema_ = arrow::schema(std::move(fields));
-    if (RowIdRequested()) {
-        Names_.emplace_back(InternalRowIdColumnName);
-        Columns_.push_back({
-            .Name = Names_.back(),
-            .Type = std::make_shared<TIntegerType>(TIntegerType::U64),
+}
+
+TSchema TParquetSource::Schema(NQumir::NAst::TTypeFactory& types) const {
+    TSchema schema;
+    schema.Columns.reserve(SelectedColumns_.size() + (RowIdRequested() ? 1 : 0));
+    for (const int field : SelectedColumns_) {
+        schema.Columns.push_back({
+            .Name = File_->FileNames[static_cast<size_t>(field)],
+            .Type = ArrowFieldToQumir(types, File_->FileSchema->field(field)),
         });
     }
-    Schema_ = TSchema{std::span<const TColumnSchema>(Columns_)};
+    if (RowIdRequested()) {
+        schema.Columns.push_back({
+            .Name = InternalRowIdColumnName,
+            .Type = types.MakeInteger(TIntegerType::U64),
+        });
+    }
+    return schema;
 }
 
 void TParquetFileData::LoadStandardColumnStats(TStats& stats)
@@ -989,9 +980,17 @@ const TStatsPtr TParquetSource::Stats() const
     return File_->Stats;
 }
 
-const TSchema& TParquetFile::Schema() const
+TSchema TParquetFile::Schema(NQumir::NAst::TTypeFactory& types) const
 {
-    return Data_->FullSchema;
+    TSchema schema;
+    schema.Columns.reserve(Data_->FileNames.size());
+    for (size_t field = 0; field < Data_->FileNames.size(); ++field) {
+        schema.Columns.push_back({
+            .Name = Data_->FileNames[field],
+            .Type = ArrowFieldToQumir(types, Data_->FileSchema->field(static_cast<int>(field))),
+        });
+    }
+    return schema;
 }
 
 const TStatsPtr TParquetFile::Stats() const
@@ -1036,6 +1035,7 @@ std::vector<NScheduler::TScanRowGroup> TParquetFile::ScanRowGroupsForColumns(
 }
 
 std::vector<NScheduler::TScanRowGroup> TParquetFile::PruneRowGroups(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TExprPtr& predicate,
     std::string_view sourceAlias,
     std::ostream* diagnostics,
@@ -1046,7 +1046,7 @@ std::vector<NScheduler::TScanRowGroup> TParquetFile::PruneRowGroups(
         return rowGroups;
     }
     auto evaluator = TRowGroupPredicateEvaluator::Compile(
-        predicate, Data_->FullSchema, sourceAlias, diagnostics);
+        types, predicate, Schema(types), sourceAlias, diagnostics);
     if (!evaluator || Data_->RowGroupRanges.size() != Data_->RowGroups.size()) {
         return rowGroups;
     }
@@ -1204,10 +1204,6 @@ std::optional<TLateMaterializationCost> TParquetRowLookup::EstimateLookup(
     }
     cost.LookupBytes = std::min(pageBytes, wholeChunkBytes);
     return cost;
-}
-
-const TSchema& TParquetSource::Schema() const {
-    return Schema_;
 }
 
 bool TParquetSource::Next(TRowSet& rowSet) {

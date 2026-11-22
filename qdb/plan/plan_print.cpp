@@ -7,6 +7,7 @@
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/window.h>
+#include <qdb/plan/types/type_text.h>
 
 #include <qumir/parser/core/printer.h>
 
@@ -23,7 +24,7 @@ std::string ExprLine(const NQumir::NAst::TExprPtr& expr) {
     }
     return NQumir::NAst::NCore::PrintAst(
         expr,
-        NQumir::NAst::NCore::TPrintOptions{.Pretty = false});
+        NQumir::NAst::NCore::TPrintOptions{.Pretty = false, .ShortNamedTypes = PlanNamedTypes()});
 }
 
 std::string JoinPlanLabel(const TJoinOperator& join) {

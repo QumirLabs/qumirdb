@@ -2,6 +2,7 @@
 
 #include "mock_source.h"
 #include "plan_runner.h"
+#include "test_types.h"
 
 #include <qdb/exec/plan_builder.h>
 #include <qdb/io/parquet/source.h>
@@ -37,12 +38,12 @@ class TLookupMockSource final : public TMockSource {
 public:
     TLookupMockSource()
         : TMockSource(TMockColumns{}, {
-            {"URL", std::make_shared<NQumir::NAst::TStringType>()},
-            {"EventTime", std::make_shared<NQumir::NAst::TIntegerType>()},
-            {"Payload0", std::make_shared<NQumir::NAst::TIntegerType>()},
-            {"Payload1", std::make_shared<NQumir::NAst::TIntegerType>()},
-            {"Payload2", std::make_shared<NQumir::NAst::TIntegerType>()},
-            {"Payload3", std::make_shared<NQumir::NAst::TIntegerType>()},
+            {"URL", TestTypes().Make<NQumir::NAst::TStringType>()},
+            {"EventTime", TestTypes().MakeInteger()},
+            {"Payload0", TestTypes().MakeInteger()},
+            {"Payload1", TestTypes().MakeInteger()},
+            {"Payload2", TestTypes().MakeInteger()},
+            {"Payload3", TestTypes().MakeInteger()},
         })
     {}
 
@@ -78,15 +79,15 @@ std::expected<TOperatorPtr, NQumir::TError> BuildSqlPlan(
 {
     std::istringstream input{std::string(sql)};
     NSql::TTokenStream tokens(input);
-    NSql::TParser parser;
+    NSql::TParser parser(TestTypes());
     auto parsed = parser.Parse(tokens);
     if (!parsed) {
         return std::unexpected(parsed.error());
     }
-    return BuildPlan(*parsed, [&](std::string_view table)
+    return BuildPlan(TestTypes(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
-        return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
+        return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(table));
     });
 }
 
@@ -100,7 +101,7 @@ TPlanPassOptions LateMaterializationOptions(
     };
 }
 
-std::shared_ptr<TSourceOperator> NarrowSource(const TOperatorPtr& plan) {
+NQumir::TIntrusivePtr<TSourceOperator> NarrowSource(const TOperatorPtr& plan) {
     auto late = TMaybeOp<TLateMaterializeOperator>(plan);
     if (!late) return {};
     TOperatorPtr current = late.Cast()->Input();
@@ -119,7 +120,7 @@ std::shared_ptr<TSourceOperator> NarrowSource(const TOperatorPtr& plan) {
     return source ? source.Cast() : nullptr;
 }
 
-std::shared_ptr<TLateMaterializeOperator> FindLateMaterialize(
+NQumir::TIntrusivePtr<TLateMaterializeOperator> FindLateMaterialize(
     const TOperatorPtr& plan)
 {
     if (auto late = TMaybeOp<TLateMaterializeOperator>(plan)) {
@@ -127,7 +128,7 @@ std::shared_ptr<TLateMaterializeOperator> FindLateMaterialize(
     }
     for (const auto& child : plan->Children()) {
         if (auto op = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            if (auto late = FindLateMaterialize(op.Cast())) {
+            if (auto late = FindLateMaterialize(TOperatorPtr(op.Cast()))) {
                 return late;
             }
         }
@@ -142,7 +143,7 @@ TEST(LateMaterialization, CanBeDisabledInPlanPipeline) {
     auto plan = BuildSqlPlan("SELECT * FROM hits LIMIT 10", source);
     ASSERT_TRUE(plan) << (plan ? "" : plan.error().ToString());
 
-    ApplyPlanPasses(*plan, {
+    ApplyPlanPasses(TestTypes(), *plan, {
         .EnableCbo = false,
         .LateMaterialization = {.Enabled = false},
     });
@@ -159,7 +160,7 @@ TEST(LateMaterialization, RewritesWideFilteredTopK) {
     ASSERT_TRUE(plan) << (plan ? "" : plan.error().ToString());
 
     TPlanPassDiagnostics diagnostics;
-    ApplyPlanPasses(*plan, LateMaterializationOptions(&diagnostics));
+    ApplyPlanPasses(TestTypes(), *plan, LateMaterializationOptions(&diagnostics));
 
     auto late = TMaybeOp<TLateMaterializeOperator>(*plan);
     ASSERT_TRUE(late);
@@ -178,8 +179,8 @@ TEST(LateMaterialization, RewritesWideFilteredTopK) {
     EXPECT_TRUE(diagnostics.LateMaterialization.Applied);
     EXPECT_EQ(diagnostics.LateMaterialization.Limit, 10u);
 
-    auto second = ApplyLateMaterialization(*plan);
-    EXPECT_EQ(second.get(), plan->get());
+    auto second = ApplyLateMaterialization(TestTypes(), *plan);
+    EXPECT_EQ(second.Get(), plan->Get());
 }
 
 TEST(LateMaterialization, RewritesDirectAliasedColumnsWithPlainLimit) {
@@ -188,7 +189,7 @@ TEST(LateMaterialization, RewritesDirectAliasedColumnsWithPlainLimit) {
         "SELECT \"URL\" AS u, \"Payload0\" AS p FROM hits LIMIT 10",
         source);
     ASSERT_TRUE(plan) << (plan ? "" : plan.error().ToString());
-    ApplyPlanPasses(*plan, LateMaterializationOptions());
+    ApplyPlanPasses(TestTypes(), *plan, LateMaterializationOptions());
 
     auto late = TMaybeOp<TLateMaterializeOperator>(*plan);
     ASSERT_TRUE(late);
@@ -206,7 +207,7 @@ TEST(LateMaterialization, FetchesOnlyOutputWhenSortKeyIsHidden) {
         "ORDER BY \"EventTime\" LIMIT 10",
         source);
     ASSERT_TRUE(plan) << (plan ? "" : plan.error().ToString());
-    ApplyPlanPasses(*plan, LateMaterializationOptions());
+    ApplyPlanPasses(TestTypes(), *plan, LateMaterializationOptions());
 
     auto late = TMaybeOp<TLateMaterializeOperator>(*plan);
     ASSERT_TRUE(late);
@@ -231,7 +232,7 @@ TEST(LateMaterialization, FetchesOnlyOutputWhenSortKeyIsHidden) {
         "ORDER BY \"EventTime\" DESC LIMIT 10 OFFSET 5",
         offsetSource);
     ASSERT_TRUE(offsetPlan) << (offsetPlan ? "" : offsetPlan.error().ToString());
-    ApplyPlanPasses(*offsetPlan, LateMaterializationOptions());
+    ApplyPlanPasses(TestTypes(), *offsetPlan, LateMaterializationOptions());
     auto offsetLate = TMaybeOp<TLateMaterializeOperator>(*offsetPlan);
     ASSERT_TRUE(offsetLate);
     auto offsetLimit = TMaybeOp<TLimitOperator>(offsetLate.Cast()->Input());
@@ -247,7 +248,7 @@ TEST(LateMaterialization, RejectsLargeLimitAndComputedOutput) {
     TLookupMockSource source;
     auto large = BuildSqlPlan("SELECT * FROM hits LIMIT 101", source);
     ASSERT_TRUE(large);
-    ApplyPlanPasses(*large, LateMaterializationOptions());
+    ApplyPlanPasses(TestTypes(), *large, LateMaterializationOptions());
     EXPECT_FALSE(TMaybeOp<TLateMaterializeOperator>(*large));
 
     TLookupMockSource computedSource;
@@ -255,7 +256,7 @@ TEST(LateMaterialization, RejectsLargeLimitAndComputedOutput) {
         "SELECT \"Payload0\" + 1 AS p FROM hits LIMIT 10",
         computedSource);
     ASSERT_TRUE(computed);
-    ApplyPlanPasses(*computed, LateMaterializationOptions());
+    ApplyPlanPasses(TestTypes(), *computed, LateMaterializationOptions());
     EXPECT_FALSE(TMaybeOp<TLateMaterializeOperator>(*computed));
 }
 
@@ -266,7 +267,7 @@ TEST(LateMaterialization, BindsRepeatedLabelsBeforeLookupRewrite) {
         source);
     ASSERT_TRUE(plan) << plan.error().ToString();
     TPlanPassDiagnostics diagnostics;
-    ApplyPlanPasses(*plan, LateMaterializationOptions(&diagnostics));
+    ApplyPlanPasses(TestTypes(), *plan, LateMaterializationOptions(&diagnostics));
     auto late = TMaybeOp<TLateMaterializeOperator>(*plan);
     ASSERT_TRUE(late);
     ASSERT_EQ(late.Cast()->Columns().size(), 2);
@@ -289,7 +290,7 @@ TEST(LateMaterialization, AppliesAfterCteOutputPruning) {
         source);
     ASSERT_TRUE(plan) << (plan ? "" : plan.error().ToString());
 
-    ApplyPlanPasses(*plan, LateMaterializationOptions());
+    ApplyPlanPasses(TestTypes(), *plan, LateMaterializationOptions());
     auto late = FindLateMaterialize(*plan);
     ASSERT_TRUE(late);
     ASSERT_EQ(late->Columns().size(), 1u);
@@ -304,7 +305,7 @@ TEST(LateMaterialization, SExpressionRoundTripBindsOutsideParser) {
         "ORDER BY \"EventTime\" LIMIT 10",
         source);
     ASSERT_TRUE(plan) << (plan ? "" : plan.error().ToString());
-    ApplyPlanPasses(*plan, LateMaterializationOptions());
+    ApplyPlanPasses(TestTypes(), *plan, LateMaterializationOptions());
     ASSERT_TRUE(TMaybeOp<TLateMaterializeOperator>(*plan));
 
     std::ostringstream serialized;
@@ -317,9 +318,9 @@ TEST(LateMaterialization, SExpressionRoundTripBindsOutsideParser) {
     options.SourceFactory = [&](std::string_view path, NQumir::TLocation)
         -> TOperatorPtr
     {
-        return std::make_shared<TSourceOperator>(Borrow(source), std::string(path));
+        return NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), std::string(path));
     };
-    NQumir::NAst::NCore::TParser parser;
+    NQumir::NAst::NCore::TParser parser(TestTypes());
     for (auto& [name, parse] : NSexp::MakeRelParsers(std::move(options))) {
         parser.NodeParsers[name] = std::move(parse);
     }
@@ -327,8 +328,9 @@ TEST(LateMaterialization, SExpressionRoundTripBindsOutsideParser) {
     NQumir::NAst::NCore::TTokenStream tokens(input);
     auto parsed = parser.Parse(tokens);
     ASSERT_TRUE(parsed) << (parsed ? "" : parsed.error().ToString());
-    auto roundTrip = std::dynamic_pointer_cast<IOperator>(*parsed);
-    ASSERT_TRUE(roundTrip);
+    auto maybeRoundTrip = NQumir::NAst::TMaybeNode<IOperator>(*parsed);
+    ASSERT_TRUE(maybeRoundTrip);
+    auto roundTrip = TOperatorPtr(maybeRoundTrip.Cast());
 
     auto parsedLate = TMaybeOp<TLateMaterializeOperator>(roundTrip);
     ASSERT_TRUE(parsedLate);
@@ -340,7 +342,7 @@ TEST(LateMaterialization, SExpressionRoundTripBindsOutsideParser) {
     NSexp::PrintRelPlan(serializedAgain, roundTrip);
     EXPECT_EQ(serializedAgain.str(), serialized.str());
 
-    ApplyPlanPasses(roundTrip, LateMaterializationOptions());
+    ApplyPlanPasses(TestTypes(), roundTrip, LateMaterializationOptions());
     EXPECT_TRUE(TMaybeOp<TLateMaterializeOperator>(roundTrip));
     EXPECT_TRUE(parsedSource->EmitsRowId());
 }
@@ -399,7 +401,7 @@ TEST(LateMaterialization, ExecutesParquetLookupAfterGlobalTopK) {
         EXPECT_TRUE(plan) << (plan ? "" : plan.error().ToString());
         if (!plan) return std::vector<int64_t>{};
         TPlanPassDiagnostics diagnostics;
-        ApplyPlanPasses(*plan, {
+        ApplyPlanPasses(TestTypes(), *plan, {
             .EnableCbo = false,
             .LateMaterialization = {.Enabled = enabled},
             .Diagnostics = &diagnostics,
@@ -425,10 +427,10 @@ TEST(LateMaterialization, ExecutesParquetLookupAfterGlobalTopK) {
                 [&](std::string_view sourcePath, NQumir::TLocation)
                     -> TOperatorPtr
                 {
-                    return std::make_shared<TSourceOperator>(
+                    return NQumir::MakeIntrusive<TSourceOperator>(TestTypes(),
                         Borrow(source), std::string(sourcePath));
                 };
-            NQumir::NAst::NCore::TParser parser;
+            NQumir::NAst::NCore::TParser parser(TestTypes());
             for (auto& [name, parse] :
                  NSexp::MakeRelParsers(std::move(options)))
             {
@@ -441,12 +443,13 @@ TEST(LateMaterialization, ExecutesParquetLookupAfterGlobalTopK) {
                 ADD_FAILURE() << parsed.error().ToString();
                 return std::vector<int64_t>{};
             }
-            *plan = std::dynamic_pointer_cast<IOperator>(*parsed);
-            if (!*plan) {
+            auto maybePlan = NQumir::NAst::TMaybeNode<IOperator>(*parsed);
+            if (!maybePlan) {
                 ADD_FAILURE() << "round-tripped late plan is not relational";
                 return std::vector<int64_t>{};
             }
-            ApplyPlanPasses(*plan, {
+            *plan = TOperatorPtr(maybePlan.Cast());
+            ApplyPlanPasses(TestTypes(), *plan, {
                 .EnableCbo = false,
                 .LateMaterialization = {.Enabled = true},
             });
@@ -463,7 +466,7 @@ TEST(LateMaterialization, ExecutesParquetLookupAfterGlobalTopK) {
             !checkedExecPlan)
         {
             auto lowered = NScheduler::LowerPlanToGraph(
-                *plan, settings, nullptr);
+                *plan, SharedTestTypes(), settings, nullptr);
             const auto materializeTasks = std::ranges::count_if(
                 lowered.Graph->Nodes(),
                 [](const auto& node) {
@@ -502,7 +505,7 @@ TEST(LateMaterialization, ExecutesParquetLookupAfterGlobalTopK) {
             !checkedSingleWorkerGraph)
         {
             auto lowered = NScheduler::LowerPlanToGraph(
-                *plan, settings, nullptr);
+                *plan, SharedTestTypes(), settings, nullptr);
             EXPECT_EQ(std::ranges::count_if(
                 lowered.Graph->Nodes(),
                 [](const auto& node) {
@@ -592,24 +595,24 @@ TEST(LateMaterialization, ExecutesParquetLookupAfterGlobalTopK) {
         1), firstTen);
 
     TParquetFile multiLaneSource(path);
-    auto sourcePlan = std::make_shared<TSourceOperator>(
+    auto sourcePlan = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(),
         Borrow(multiLaneSource), path);
-    sourcePlan->EnableRowId();
-    auto integerType = std::make_shared<NQumir::NAst::TIntegerType>();
-    auto multiLanePlan = std::make_shared<TLateMaterializeOperator>(
+    sourcePlan->EnableRowId(TestTypes());
+    auto integerType = TestTypes().MakeInteger();
+    auto multiLanePlan = NQumir::MakeIntrusive<TLateMaterializeOperator>(TestTypes(),
         sourcePlan,
         std::string(InternalRowIdColumnName),
         std::vector<TLateMaterializeColumn>{
             {"Payload0", "Payload", integerType},
             {"Payload0", "PayloadCopy", integerType},
             {"EventTime", "EventTime", integerType},
-            {"Ratio", "Ratio", std::make_shared<NQumir::NAst::TFloatType>(
+            {"Ratio", "Ratio", TestTypes().MakeFloat(
                 NQumir::NAst::TFloatType::F32)},
         });
     // Lowering expects a pruned plan: the physical locator column is only
     // emitted once column pruning has put it in the source's required set.
-    AnnotateTypes(multiLanePlan, {});
-    ApplyColumnPruning(multiLanePlan);
+    AnnotateTypes(TestTypes(), multiLanePlan, {});
+    ApplyColumnPruning(TestTypes(), multiLanePlan);
 
     NScheduler::TSettings multiLaneSettings;
     multiLaneSettings.Scheduler.Mode =
@@ -617,7 +620,7 @@ TEST(LateMaterialization, ExecutesParquetLookupAfterGlobalTopK) {
     multiLaneSettings.Scheduler.WorkerCount = 4;
     multiLaneSettings.ScanSplit.MaxScanTasks = 4;
     auto lowered = NScheduler::LowerPlanToGraph(
-        multiLanePlan, multiLaneSettings, nullptr);
+        multiLanePlan, SharedTestTypes(), multiLaneSettings, nullptr);
     auto broadcast = std::ranges::find_if(
         lowered.Graph->Nodes(),
         [](const auto& node) {

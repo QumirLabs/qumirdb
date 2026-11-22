@@ -12,7 +12,7 @@ class TSourceOperator;
 struct TLateMaterializeColumn {
     std::string PhysicalName;
     std::string OutputName;
-    NQumir::NAst::TTypePtr Type;
+    NQumir::NAst::TTypePtr Type = nullptr;
 };
 
 class TLateMaterializeOperator final : public IOperator {
@@ -20,6 +20,7 @@ public:
     static constexpr const char* OpId = "late-materialize";
 
     TLateMaterializeOperator(
+        NQumir::NAst::TTypeFactory& types,
         TOperatorPtr input,
         std::string locatorColumn,
         std::vector<TLateMaterializeColumn> columns);

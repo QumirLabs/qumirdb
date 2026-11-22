@@ -157,10 +157,11 @@ EJoinType SimplifiedJoinType(const TJoinOperator& join, const TPredicates& above
     }
 }
 
-TOperatorPtr Simplify(TOperatorPtr node, TPredicates above, bool& changed);
+TOperatorPtr Simplify(NQumir::NAst::TTypeFactory& types, TOperatorPtr node, TPredicates above, bool& changed);
 
 TOperatorPtr SimplifyJoin(
-    const std::shared_ptr<TJoinOperator>& join,
+    NQumir::NAst::TTypeFactory& types,
+    const NQumir::TIntrusivePtr<TJoinOperator>& join,
     TPredicates above,
     bool& changed)
 {
@@ -172,9 +173,9 @@ TOperatorPtr SimplifyJoin(
     }
     for (const auto& key : join->Keys()) {
         if (!key.NullsEqual) {
-            condition.push_back(std::make_shared<TBinaryExpr>(NQumir::TLocation{}, "=="_op,
-                std::make_shared<TIdentExpr>(NQumir::TLocation{}, key.Left),
-                std::make_shared<TIdentExpr>(NQumir::TLocation{}, key.Right)));
+            condition.push_back(NQumir::MakeIntrusive<TBinaryExpr>(NQumir::TLocation{}, "=="_op,
+                NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, key.Left),
+                NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, key.Right)));
         }
     }
 
@@ -219,43 +220,43 @@ TOperatorPtr SimplifyJoin(
             break;
     }
 
-    auto simplifiedLeft = Simplify(join->Left(), std::move(left), changed);
-    auto simplifiedRight = Simplify(join->Right(), std::move(right), changed);
+    auto simplifiedLeft = Simplify(types, join->Left(), std::move(left), changed);
+    auto simplifiedRight = Simplify(types, join->Right(), std::move(right), changed);
     if (type == join->JoinType()) {
         join->MutableLeft() = std::move(simplifiedLeft);
         join->MutableRight() = std::move(simplifiedRight);
         return join;
     }
     changed = true;
-    auto simplified = std::make_shared<TJoinOperator>(
-        std::move(simplifiedLeft), std::move(simplifiedRight), join->Keys(), type, join->Filter());
+    auto simplified = NQumir::MakeIntrusive<TJoinOperator>(
+        types, std::move(simplifiedLeft), std::move(simplifiedRight), join->Keys(), type, join->Filter());
     simplified->Location = join->Location;
     return simplified;
 }
 
-TOperatorPtr Simplify(TOperatorPtr node, TPredicates above, bool& changed) {
+TOperatorPtr Simplify(NQumir::NAst::TTypeFactory& types, TOperatorPtr node, TPredicates above, bool& changed) {
     if (auto maybeFilter = TMaybeOp<TFilterOperator>(node)) {
         auto filter = maybeFilter.Cast();
         above.push_back(filter->Predicate());
-        filter->MutableInput() = Simplify(filter->Input(), std::move(above), changed);
+        filter->MutableInput() = Simplify(types, filter->Input(), std::move(above), changed);
         return node;
     }
     if (auto maybeJoin = TMaybeOp<TJoinOperator>(node)) {
-        return SimplifyJoin(maybeJoin.Cast(), std::move(above), changed);
+        return SimplifyJoin(types, maybeJoin.Cast(), std::move(above), changed);
     }
     // Other operators compute new columns or decide which rows reach the
     // predicates (a limit), so the predicates do not pass into their inputs.
     for (auto& input : node->MutableInputs()) {
-        input = Simplify(input, {}, changed);
+        input = Simplify(types, input, {}, changed);
     }
     return node;
 }
 
 } // namespace
 
-bool SimplifyOuterJoins(TOperatorPtr& root) {
+bool SimplifyOuterJoins(NQumir::NAst::TTypeFactory& types, TOperatorPtr& root) {
     bool changed = false;
-    root = Simplify(root, {}, changed);
+    root = Simplify(types, root, {}, changed);
     return changed;
 }
 

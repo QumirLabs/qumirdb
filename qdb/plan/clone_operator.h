@@ -10,6 +10,6 @@ namespace NQdb {
 void CloneOperatorExprs(const TOperatorPtr& op);
 
 // Independent deep copy of an operator subtree (new nodes + cloned expressions).
-TOperatorPtr CloneOperator(const TOperatorPtr& op);
+TOperatorPtr CloneOperator(NQumir::NAst::TTypeFactory& types, const TOperatorPtr& op);
 
 } // namespace NQdb

@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "test_types.h"
 #include "mock_source.h"
 
 #include <qdb/io/io.h>
@@ -44,10 +45,10 @@ namespace {
 TOperatorPtr BuildAnnotated(const std::string& sexp, const std::map<std::string, ITable*>& tables) {
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-        return std::make_shared<TSourceOperator>(Borrow(*tables.at(std::string(path))), std::string(path));
+        return NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(*tables.at(std::string(path))), std::string(path));
     };
 
-    TParser parser;
+    TParser parser(TestTypes());
     for (auto& [name, fn] : MakeRelParsers(std::move(opts))) {
         parser.NodeParsers[name] = std::move(fn);
     }
@@ -59,15 +60,15 @@ TOperatorPtr BuildAnnotated(const std::string& sexp, const std::map<std::string,
         throw std::runtime_error(parsed.error().ToString());
     }
 
-    auto root = std::static_pointer_cast<IOperator>(*parsed);
-    AssignSourceAliases(root);
-    QualifyColumns(root);
-    AnnotateTypes(root);
+    auto root = NQumir::StaticPointerCast<IOperator>(*parsed);
+    AssignSourceAliases(TestTypes(), root);
+    QualifyColumns(TestTypes(), root);
+    AnnotateTypes(TestTypes(), root);
     return root;
 }
 
 TOperatorPtr Optimize(const std::string& sexp, const std::map<std::string, ITable*>& tables) {
-    TConstFolder folder;
+    TConstFolder folder(TestTypes());
     return ExtractEquiJoins(BuildAnnotated(sexp, tables), folder);
 }
 
@@ -79,7 +80,7 @@ void CollectKeys(const TOperatorPtr& op, std::vector<std::pair<std::string, std:
     }
     for (const auto& child : op->Children()) {
         if (auto childOp = TMaybeNode<IOperator>(child)) {
-            CollectKeys(childOp.Cast(), out);
+            CollectKeys(TOperatorPtr(childOp.Cast()), out);
         }
     }
 }
@@ -94,27 +95,27 @@ std::vector<std::pair<std::string, std::string>> Keys(const TOperatorPtr& root) 
 using TKeys = std::vector<std::pair<std::string, std::string>>;
 
 const TSourceOperator* AsSource(const TOperatorPtr& op) {
-    return dynamic_cast<const TSourceOperator*>(op.get());
+    return dynamic_cast<const TSourceOperator*>(op.Get());
 }
 
 const TJoinOperator* AsJoin(const TOperatorPtr& op) {
-    return dynamic_cast<const TJoinOperator*>(op.get());
+    return dynamic_cast<const TJoinOperator*>(op.Get());
 }
 
 const TFilterOperator* AsFilter(const TOperatorPtr& op) {
-    return dynamic_cast<const TFilterOperator*>(op.get());
+    return dynamic_cast<const TFilterOperator*>(op.Get());
 }
 
 const TSortOperator* AsSort(const TOperatorPtr& op) {
-    return dynamic_cast<const TSortOperator*>(op.get());
+    return dynamic_cast<const TSortOperator*>(op.Get());
 }
 
 const TLimitOperator* AsLimit(const TOperatorPtr& op) {
-    return dynamic_cast<const TLimitOperator*>(op.get());
+    return dynamic_cast<const TLimitOperator*>(op.Get());
 }
 
 const TWindowOperator* AsWindow(const TOperatorPtr& op) {
-    return dynamic_cast<const TWindowOperator*>(op.get());
+    return dynamic_cast<const TWindowOperator*>(op.Get());
 }
 
 std::set<std::string> LeafAliases(const TOperatorPtr& op) {
@@ -125,7 +126,7 @@ std::set<std::string> LeafAliases(const TOperatorPtr& op) {
     }
     for (const auto& child : op->Children()) {
         if (auto childOp = TMaybeNode<IOperator>(child)) {
-            out.merge(LeafAliases(childOp.Cast()));
+            out.merge(LeafAliases(TOperatorPtr(childOp.Cast())));
         }
     }
     return out;
@@ -191,26 +192,26 @@ TEST(EquiJoin, ExtractsKeysThroughLimitAndSort) {
     NQdb::TMockSource a({"aid", "aval"});
     NQdb::TMockSource b({"bid", "bval"});
 
-    auto left = std::make_shared<TSourceOperator>(Borrow(a), "A");
-    left->SetAlias("a");
-    auto right = std::make_shared<TSourceOperator>(Borrow(b), "B");
-    right->SetAlias("b");
+    auto left = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(a), "A");
+    left->SetAlias(TestTypes(), "a");
+    auto right = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(b), "B");
+    right->SetAlias(TestTypes(), "b");
 
-    TOperatorPtr root = std::make_shared<TLimitOperator>(
-        std::make_shared<TSortOperator>(
-            std::make_shared<TFilterOperator>(
-                std::make_shared<TJoinOperator>(
+    TOperatorPtr root = NQumir::MakeIntrusive<TLimitOperator>(TestTypes(),
+        NQumir::MakeIntrusive<TSortOperator>(TestTypes(),
+            NQumir::MakeIntrusive<TFilterOperator>(TestTypes(),
+                NQumir::MakeIntrusive<TJoinOperator>(TestTypes(),
                     left, right, std::vector<TJoinKey>{}, EJoinType::Inner, nullptr),
-                std::make_shared<TBinaryExpr>(
+                NQumir::MakeIntrusive<TBinaryExpr>(
                     NQumir::TLocation{}, TOperator("=="),
-                    std::make_shared<TIdentExpr>(NQumir::TLocation{}, "aid"),
-                    std::make_shared<TIdentExpr>(NQumir::TLocation{}, "bid"))),
+                    NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "aid"),
+                    NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "bid"))),
             std::vector<TSortKey>{{"aval", ESortDirection::Asc, ESortNulls::Default}}),
         10);
 
-    QualifyColumns(root);
-    AnnotateTypes(root);
-    TConstFolder folder;
+    QualifyColumns(TestTypes(), root);
+    AnnotateTypes(TestTypes(), root);
+    TConstFolder folder(TestTypes());
     root = ExtractEquiJoins(root, folder);
 
     EXPECT_EQ(Keys(root), (TKeys{{"a.aid", "b.bid"}}));
@@ -221,31 +222,31 @@ TEST(JoinOrder, ReordersThroughLimitAndSort) {
     NQdb::TMockSource b({"bid", "bval"});
     NQdb::TMockSource c({"cid", "cval"});
 
-    auto sourceA = std::make_shared<TSourceOperator>(Borrow(a), "A");
-    sourceA->SetAlias("a");
-    auto sourceB = std::make_shared<TSourceOperator>(Borrow(b), "B");
-    sourceB->SetAlias("b");
-    auto sourceC = std::make_shared<TSourceOperator>(Borrow(c), "C");
-    sourceC->SetAlias("c");
+    auto sourceA = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(a), "A");
+    sourceA->SetAlias(TestTypes(), "a");
+    auto sourceB = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(b), "B");
+    sourceB->SetAlias(TestTypes(), "b");
+    auto sourceC = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(c), "C");
+    sourceC->SetAlias(TestTypes(), "c");
 
-    TOperatorPtr root = std::make_shared<TLimitOperator>(
-        std::make_shared<TSortOperator>(
-            std::make_shared<TFilterOperator>(
-                std::make_shared<TJoinOperator>(
-                    std::make_shared<TJoinOperator>(
+    TOperatorPtr root = NQumir::MakeIntrusive<TLimitOperator>(TestTypes(),
+        NQumir::MakeIntrusive<TSortOperator>(TestTypes(),
+            NQumir::MakeIntrusive<TFilterOperator>(TestTypes(),
+                NQumir::MakeIntrusive<TJoinOperator>(TestTypes(),
+                    NQumir::MakeIntrusive<TJoinOperator>(TestTypes(),
                         sourceA, sourceC, std::vector<TJoinKey>{}, EJoinType::Inner, nullptr),
                     sourceB, std::vector<TJoinKey>{}, EJoinType::Inner, nullptr),
-                std::make_shared<TBinaryExpr>(
+                NQumir::MakeIntrusive<TBinaryExpr>(
                     NQumir::TLocation{}, TOperator("=="),
-                    std::make_shared<TIdentExpr>(NQumir::TLocation{}, "aid"),
-                    std::make_shared<TIdentExpr>(NQumir::TLocation{}, "bid"))),
+                    NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "aid"),
+                    NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "bid"))),
             std::vector<TSortKey>{{"aval", ESortDirection::Asc, ESortNulls::Default}}),
         10);
 
-    QualifyColumns(root);
-    AnnotateTypes(root);
-    TConstFolder folder;
-    root = ReorderJoins(root, folder);
+    QualifyColumns(TestTypes(), root);
+    AnnotateTypes(TestTypes(), root);
+    TConstFolder folder(TestTypes());
+    root = ReorderJoins(TestTypes(), root, folder);
 
     auto limit = AsLimit(root);
     ASSERT_NE(limit, nullptr);
@@ -273,7 +274,7 @@ TEST(PushDown, SingleTableToLeafEqualityStaysAbove) {
     NQdb::TMockSource b({"bid", "bval"});
     std::map<std::string, ITable*> tables = {{"A", &a}, {"B", &b}};
 
-    TConstFolder folder;
+    TConstFolder folder(TestTypes());
     auto root = PushDownPredicates(BuildAnnotated(
         "(rel filter"
         "  (rel join (rel source \"A\" \"a\") (rel source \"B\" \"b\") () (inner))"
@@ -305,7 +306,7 @@ TEST(PushDown, PartitionPredicateThroughWindow) {
     NQdb::TMockSource t({"a", "b"});
     std::map<std::string, ITable*> tables = {{"T", &t}};
 
-    TConstFolder folder;
+    TConstFolder folder(TestTypes());
     auto root = PushDownPredicates(BuildAnnotated(
         "(rel filter"
         "  (rel window (rel source \"T\" \"t\") (partition a) (fn w_0 rank))"
@@ -347,7 +348,7 @@ TEST(PushDown, ProjectRewritesAndPushesPredicate) {
     NQdb::TMockSource a({"aid"});
     std::map<std::string, ITable*> tables = {{"A", &a}};
 
-    TConstFolder folder;
+    TConstFolder folder(TestTypes());
     auto root = PushDownPredicates(BuildAnnotated(
         "(rel filter"
         "  (rel project (rel source \"A\" \"a\") (x aid))"
@@ -355,7 +356,7 @@ TEST(PushDown, ProjectRewritesAndPushesPredicate) {
         tables), folder);
 
     ASSERT_EQ(AsFilter(root), nullptr);
-    auto project = dynamic_cast<const TProjectOperator*>(root.get());
+    auto project = dynamic_cast<const TProjectOperator*>(root.Get());
     ASSERT_NE(project, nullptr);
     auto filter = AsFilter(project->Input());
     ASSERT_NE(filter, nullptr);
@@ -375,7 +376,7 @@ TEST(PushDown, UnionAllPrunesConstantBranch) {
     NQdb::TMockSource b({"bid"});
     std::map<std::string, ITable*> tables = {{"A", &a}, {"B", &b}};
 
-    TConstFolder folder;
+    TConstFolder folder(TestTypes());
     auto root = PushDownPredicates(BuildAnnotated(
         "(rel filter"
         "  (rel union-all"
@@ -387,9 +388,9 @@ TEST(PushDown, UnionAllPrunesConstantBranch) {
     // Only the first branch matches tag==1; the union collapses to it, with no
     // residual filter and no union node left.
     ASSERT_EQ(AsFilter(root), nullptr);
-    auto project = dynamic_cast<const TProjectOperator*>(root.get());
+    auto project = dynamic_cast<const TProjectOperator*>(root.Get());
     ASSERT_NE(project, nullptr);
-    auto source = dynamic_cast<const TSourceOperator*>(project->Input().get());
+    auto source = dynamic_cast<const TSourceOperator*>(project->Input().Get());
     ASSERT_NE(source, nullptr);
     EXPECT_EQ(source->GetAlias(), "a");
 }
@@ -400,7 +401,7 @@ TEST(PushDown, UnionAllShrinksToMultipleSurvivingBranches) {
     NQdb::TMockSource c({"cid"});
     std::map<std::string, ITable*> tables = {{"A", &a}, {"B", &b}, {"C", &c}};
 
-    TConstFolder folder;
+    TConstFolder folder(TestTypes());
     auto root = PushDownPredicates(BuildAnnotated(
         "(rel filter"
         "  (rel union-all"
@@ -431,7 +432,7 @@ TEST(PushDown, UnionAllPrunesAllBranchesToEmpty) {
     NQdb::TMockSource b({"bid"});
     std::map<std::string, ITable*> tables = {{"A", &a}, {"B", &b}};
 
-    TConstFolder folder;
+    TConstFolder folder(TestTypes());
     auto root = PushDownPredicates(BuildAnnotated(
         "(rel filter"
         "  (rel union-all"

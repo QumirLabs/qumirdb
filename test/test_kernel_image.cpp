@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "mock_source.h"
+#include "test_types.h"
 
 #include <qdb/exec/aggregate_exec.h>
 #include <qdb/exec/join_exec.h>
@@ -56,7 +57,7 @@ TExprPtr Parse(const std::string& source)
 {
     std::istringstream input(source);
     NCore::TTokenStream tokens(input);
-    NCore::TParser parser;
+    NCore::TParser parser(TestTypes());
     auto parsed = parser.Parse(tokens);
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
@@ -64,11 +65,11 @@ TExprPtr Parse(const std::string& source)
     return std::move(*parsed);
 }
 
-TStructType KeyValueType()
+const TStructType& KeyValueType()
 {
-    return TStructType({
-        {"k", std::make_shared<TIntegerType>(TIntegerType::I64)},
-        {"v", std::make_shared<TIntegerType>(TIntegerType::I64)},
+    return *TestTypes().MakeStruct({
+        {"k", TestTypes().MakeInteger(TIntegerType::I64)},
+        {"v", TestTypes().MakeInteger(TIntegerType::I64)},
     });
 }
 
@@ -99,7 +100,7 @@ struct TKeyValueBatch {
 
 NKernel::TOperatorKernelSpec FilterSpec()
 {
-    return NKernel::BuildFilterKernelSpec(KeyValueType(), Parse("(&& (> v 2) (!= k 4))"));
+    return NKernel::BuildFilterKernelSpec(TestTypes(), KeyValueType(), Parse("(&& (> v 2) (!= k 4))"));
 }
 
 std::vector<uint8_t> RunFilter(TKernelCompiler::TFilterDispatch& dispatch)
@@ -113,10 +114,10 @@ std::vector<uint8_t> RunFilter(TKernelCompiler::TFilterDispatch& dispatch)
 
 NKernel::TOperatorKernelSpec ProjectSpec()
 {
-    const auto inputType = KeyValueType();
+    const auto& inputType = KeyValueType();
     std::vector<TExprPtr> exprs = {Parse("(+ (* k 10) v)")};
-    std::vector<TTypePtr> types = {NKernel::AnnotateExprType(exprs[0], inputType)};
-    return NKernel::BuildProjectKernelSpec(inputType, exprs, types);
+    std::vector<TTypePtr> types = {NKernel::AnnotateExprType(TestTypes(), exprs[0], inputType)};
+    return NKernel::BuildProjectKernelSpec(TestTypes(), inputType, exprs, types);
 }
 
 std::vector<int64_t> RunProject(const TKernelCompiler::TProjectDispatch& dispatch)
@@ -143,9 +144,9 @@ NKernel::TOperatorKernelSpec AggregateSpec()
     std::vector<TAggregateSpec> aggs = {{
         .Name = "s",
         .Func = "sum",
-        .Arg = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "v"),
+        .Arg = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "v"),
     }};
-    return NKernel::BuildAggregateKernelSpec(KeyValueType(), {"k"}, aggs);
+    return NKernel::BuildAggregateKernelSpec(TestTypes(), KeyValueType(), {"k"}, aggs);
 }
 
 std::map<int64_t, int64_t> RunAggregate(TAggregateKernels kernels)
@@ -175,16 +176,16 @@ const std::map<int64_t, int64_t> ExpectedSums = {{1, 40}, {2, 23}, {3, 41}, {4, 
 std::string CompileAggregateImage()
 {
     std::vector<TGeneratedKernel> kernels;
-    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
     compiler.CompileAggregate(AggregateSpec());
-    return SerializeKernelImage(CompileKernelImage(kernels));
+    return SerializeKernelImage(CompileKernelImage(kernels, TestTypes()));
 }
 
 // Regenerates the aggregate kernels unbound and loads the image into their slots.
 std::map<int64_t, int64_t> LoadAndRunAggregate(const std::string& bytes)
 {
     std::vector<TGeneratedKernel> kernels;
-    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
     auto aggregate = compiler.CompileAggregate(AggregateSpec());
     std::vector<std::shared_ptr<TKernelSlot>> slots;
     for (const auto& kernel : kernels) {
@@ -194,25 +195,25 @@ std::map<int64_t, int64_t> LoadAndRunAggregate(const std::string& bytes)
     return RunAggregate(std::move(aggregate));
 }
 
-TStructType LeftJoinType()
+const TStructType& LeftJoinType()
 {
-    return TStructType({
-        {"lk", std::make_shared<TIntegerType>(TIntegerType::I64)},
-        {"lv", std::make_shared<TIntegerType>(TIntegerType::I64)},
+    return *TestTypes().MakeStruct({
+        {"lk", TestTypes().MakeInteger(TIntegerType::I64)},
+        {"lv", TestTypes().MakeInteger(TIntegerType::I64)},
     });
 }
 
-TStructType RightJoinType()
+const TStructType& RightJoinType()
 {
-    return TStructType({
-        {"rk", std::make_shared<TIntegerType>(TIntegerType::I64)},
-        {"rv", std::make_shared<TIntegerType>(TIntegerType::I64)},
+    return *TestTypes().MakeStruct({
+        {"rk", TestTypes().MakeInteger(TIntegerType::I64)},
+        {"rv", TestTypes().MakeInteger(TIntegerType::I64)},
     });
 }
 
 NKernel::TOperatorKernelSpec JoinSpec()
 {
-    return NKernel::BuildJoinKernelSpec(
+    return NKernel::BuildJoinKernelSpec(TestTypes(),
         LeftJoinType(), RightJoinType(), {{"lk", "rk"}}, EJoinType::Inner);
 }
 
@@ -263,7 +264,7 @@ const std::vector<std::pair<int64_t, int64_t>> ExpectedJoinPairs =
 
 std::vector<std::shared_ptr<TKernelSlot>> LoadImageSlots(std::vector<TGeneratedKernel>& kernels)
 {
-    const auto bytes = SerializeKernelImage(CompileKernelImage(kernels));
+    const auto bytes = SerializeKernelImage(CompileKernelImage(kernels, TestTypes()));
     std::vector<std::shared_ptr<TKernelSlot>> slots;
     for (const auto& kernel : kernels) {
         slots.push_back(kernel.Slot);
@@ -287,7 +288,7 @@ std::pair<std::vector<uint64_t>, std::vector<uint64_t>> RunJoinHash(const TJoinH
 
 TTypePtr I64Type()
 {
-    return std::make_shared<TIntegerType>(TIntegerType::I64);
+    return TestTypes().MakeInteger(TIntegerType::I64);
 }
 
 std::vector<int64_t> ReadSortedColumn(const TRowSet& rows, size_t column)
@@ -369,7 +370,7 @@ std::pair<std::vector<int64_t>, std::vector<int64_t>> RunSortDirect(
     const TBatch&... batch)
 {
     std::vector<TGeneratedKernel> kernels;
-    const auto plan = BuildSortPlanData(inputType, keys, kernelName, topLimit, {.Sink = &kernels});
+    const auto plan = BuildSortPlanData(TestTypes(), inputType, keys, kernelName, topLimit, {.Types = SharedTestTypes(), .Sink = &kernels});
     if constexpr (sizeof...(batch) == 0) {
         return RunSort(plan, SlotsOf(kernels));
     } else {
@@ -401,10 +402,11 @@ std::vector<int64_t> RunWindow(const TKernelCompiler::TSortRadixCompositeDispatc
 }
 
 // Window operator over the key/value schema: running sum of v per k, ordered by v.
-std::shared_ptr<TWindowOperator> MakeWindowOperator(TMockSource& source)
+NQumir::TIntrusivePtr<TWindowOperator> MakeWindowOperator(TMockSource& source)
 {
-    return std::make_shared<TWindowOperator>(
-        std::make_shared<TSourceOperator>(Borrow(source), "data"),
+    return NQumir::MakeIntrusive<TWindowOperator>(
+        TestTypes(),
+        NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), "data"),
         std::vector<std::string>{"k"},
         std::vector<TSortKey>{{.Column = "v"}},
         std::nullopt,
@@ -418,7 +420,7 @@ std::vector<TSortRadixKeyInput> WindowKeys()
 
 TKernelCompiler::TSortRadixCompositeDispatch CompileWindowKernel(TKernelCompiler& compiler)
 {
-    const auto inputType = KeyValueType();
+    const auto& inputType = KeyValueType();
     const auto keys = WindowKeys();
     return compiler.CompileWindow(
         keys, inputType, {keys[0]}, {keys[1]},
@@ -429,13 +431,13 @@ TKernelCompiler::TSortRadixCompositeDispatch CompileWindowKernel(TKernelCompiler
 
 TEST(KernelImage, FilterRoundTrip)
 {
-    TKernelCompiler jit({});
+    TKernelCompiler jit({.Types = SharedTestTypes()});
     auto expected = jit.CompileFilter(FilterSpec());
 
     std::vector<TGeneratedKernel> kernels;
-    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
     auto dispatch = compiler.CompileFilter(FilterSpec());
-    const auto bytes = SerializeKernelImage(CompileKernelImage(kernels));
+    const auto bytes = SerializeKernelImage(CompileKernelImage(kernels, TestTypes()));
     ASSERT_EQ(kernels.size(), 1u);
     EXPECT_EQ(kernels[dispatch.Kernel].Slot, dispatch.Slot);
     // Load through the recorded kernel index, as a deserialized graph would.
@@ -451,7 +453,7 @@ TEST(KernelImage, FilterRoundTrip)
 TEST(KernelImage, FilterDispatchRecordsKernelIndex)
 {
     std::vector<TGeneratedKernel> kernels;
-    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
     auto first = compiler.CompileFilter(FilterSpec());
     auto second = compiler.CompileFilter(FilterSpec());
 
@@ -461,18 +463,18 @@ TEST(KernelImage, FilterDispatchRecordsKernelIndex)
     EXPECT_EQ(kernels[first.Kernel].Slot, first.Slot);
     EXPECT_EQ(kernels[second.Kernel].Slot, second.Slot);
 
-    TKernelCompiler unsunk({});
+    TKernelCompiler unsunk({.Types = SharedTestTypes()});
     EXPECT_EQ(unsunk.CompileFilter(FilterSpec()).Kernel, 0u);
 }
 
 TEST(KernelImage, ProjectAndAggregateHashBindFromImageSlots)
 {
-    TKernelCompiler jit({});
+    TKernelCompiler jit({.Types = SharedTestTypes()});
     const auto expectedProject = RunProject(jit.CompileProject(ProjectSpec()));
     const auto expectedHash = RunAggregateHash(jit.CompileAggregateHash(KeyValueType(), {"k"}));
 
     std::vector<TGeneratedKernel> kernels;
-    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
     auto project = compiler.CompileProject(ProjectSpec());
     auto hash = compiler.CompileAggregateHash(KeyValueType(), {"k"});
     ASSERT_EQ(kernels.size(), 2u);
@@ -481,7 +483,7 @@ TEST(KernelImage, ProjectAndAggregateHashBindFromImageSlots)
     EXPECT_EQ(kernels[project.Kernel].Slot, project.Slot);
     EXPECT_EQ(kernels[hash.Kernel].Slot, hash.Slot);
 
-    const auto bytes = SerializeKernelImage(CompileKernelImage(kernels));
+    const auto bytes = SerializeKernelImage(CompileKernelImage(kernels, TestTypes()));
     std::vector<std::shared_ptr<TKernelSlot>> slots;
     for (const auto& kernel : kernels) {
         slots.push_back(kernel.Slot);
@@ -496,7 +498,7 @@ TEST(KernelImage, ProjectAndAggregateHashBindFromImageSlots)
 
 TEST(KernelImage, AggregateRoundTrip)
 {
-    TKernelCompiler jit({});
+    TKernelCompiler jit({.Types = SharedTestTypes()});
     const auto expected = RunAggregate(jit.CompileAggregate(AggregateSpec()));
     EXPECT_EQ(expected, ExpectedSums);
     EXPECT_EQ(LoadAndRunAggregate(CompileAggregateImage()), expected);
@@ -504,11 +506,11 @@ TEST(KernelImage, AggregateRoundTrip)
 
 TEST(KernelImage, AggregateBindsFromImageSlot)
 {
-    TKernelCompiler jit({});
+    TKernelCompiler jit({.Types = SharedTestTypes()});
     const auto expected = RunAggregate(jit.CompileAggregate(AggregateSpec()));
 
     std::vector<TGeneratedKernel> kernels;
-    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
     // A leading filter shifts the aggregate kernel index.
     compiler.CompileFilter(FilterSpec());
     auto aggregate = compiler.CompileAggregate(AggregateSpec());
@@ -516,7 +518,7 @@ TEST(KernelImage, AggregateBindsFromImageSlot)
     EXPECT_EQ(aggregate.Kernel, 1u);
     EXPECT_EQ(kernels[aggregate.Kernel].Slot, aggregate.Slot);
 
-    const auto bytes = SerializeKernelImage(CompileKernelImage(kernels));
+    const auto bytes = SerializeKernelImage(CompileKernelImage(kernels, TestTypes()));
     std::vector<std::shared_ptr<TKernelSlot>> slots;
     for (const auto& kernel : kernels) {
         slots.push_back(kernel.Slot);
@@ -532,12 +534,12 @@ TEST(KernelImage, AggregateBindsFromImageSlot)
 
 TEST(KernelImage, JoinBindsFromImageSlot)
 {
-    TKernelCompiler jit({});
+    TKernelCompiler jit({.Types = SharedTestTypes()});
     TInnerJoinProcessor expectedProcessor(jit.CompileJoin(JoinSpec()));
     const auto expected = RunJoin(expectedProcessor);
 
     std::vector<TGeneratedKernel> kernels;
-    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
     compiler.CompileFilter(FilterSpec());
     auto join = compiler.CompileJoin(JoinSpec());
     ASSERT_EQ(kernels.size(), 2u);
@@ -553,13 +555,13 @@ TEST(KernelImage, JoinBindsFromImageSlot)
 TEST(KernelImage, RowJoinBindsFromImageSlots)
 {
     constexpr size_t probeHoldBytes = 1 << 20;
-    TKernelCompiler jit({});
+    TKernelCompiler jit({.Types = SharedTestTypes()});
     TRowJoinProcessor expectedProcessor(
         jit.CompileRowJoin(JoinSpec(), /*buildIsLeft=*/false), EJoinBuildSide::Right, probeHoldBytes);
     const auto expected = RunJoin(expectedProcessor);
 
     std::vector<TGeneratedKernel> kernels;
-    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
     compiler.CompileFilter(FilterSpec());
     auto join = compiler.CompileRowJoin(JoinSpec(), /*buildIsLeft=*/false);
     ASSERT_EQ(kernels.size(), 3u);
@@ -578,13 +580,13 @@ TEST(KernelImage, RowJoinBindsFromImageSlots)
 
 TEST(KernelImage, CrossJoinBindsFromImageSlot)
 {
-    const auto spec = NKernel::BuildCrossJoinKernelSpec(LeftJoinType(), RightJoinType());
-    TKernelCompiler jit({});
+    const auto spec = NKernel::BuildCrossJoinKernelSpec(TestTypes(), LeftJoinType(), RightJoinType());
+    TKernelCompiler jit({.Types = SharedTestTypes()});
     TCrossJoinProcessor expectedProcessor(jit.CompileCrossJoin(spec));
     const auto expected = RunJoin(expectedProcessor);
 
     std::vector<TGeneratedKernel> kernels;
-    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
     compiler.CompileFilter(FilterSpec());
     auto join = compiler.CompileCrossJoin(spec);
     ASSERT_EQ(kernels.size(), 2u);
@@ -599,11 +601,11 @@ TEST(KernelImage, CrossJoinBindsFromImageSlot)
 
 TEST(KernelImage, JoinHashBindsFromImageSlot)
 {
-    TKernelCompiler jit({});
+    TKernelCompiler jit({.Types = SharedTestTypes()});
     const auto expected = RunJoinHash(jit.CompileJoinHash(JoinSpec()));
 
     std::vector<TGeneratedKernel> kernels;
-    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
     compiler.CompileFilter(FilterSpec());
     auto hash = compiler.CompileJoinHash(JoinSpec());
     ASSERT_EQ(kernels.size(), 2u);
@@ -620,15 +622,15 @@ TEST(KernelImage, JoinHashBindsFromImageSlot)
 
 TEST(KernelImage, SortKernelsBindFromPlanDataAndImageSlots)
 {
-    const auto inputType = std::make_shared<TStructType>(KeyValueType());
+    const auto inputType = &KeyValueType();
     const std::vector<TSortKey> keys = {{.Column = "v"}};
     const auto expected = RunSortDirect(inputType, keys, "top-sort", 3);
 
     std::vector<TGeneratedKernel> kernels;
     // A leading filter shifts the kernel indexes.
-    TKernelCompiler(TKernelCompilerOptions{.Sink = &kernels, .BindNow = false}).CompileFilter(FilterSpec());
-    const auto plan = BuildSortPlanData(
-        inputType, keys, "top-sort", 3, {.Sink = &kernels, .BindNow = false});
+    TKernelCompiler(TKernelCompilerOptions{.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false}).CompileFilter(FilterSpec());
+    const auto plan = BuildSortPlanData(TestTypes(),
+        inputType, keys, "top-sort", 3, {.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
     ASSERT_EQ(kernels.size(), 4u);
     ASSERT_TRUE(plan.Top);
     EXPECT_EQ(plan.RadixKernel, 1u);
@@ -647,8 +649,8 @@ TEST(KernelImage, SortKernelsBindFromPlanDataAndImageSlots)
 
 TEST(KernelImage, NullableSortBindsFromPlanDataAndImageSlots)
 {
-    const auto nullableType = std::make_shared<TNullable>(I64Type());
-    const auto inputType = std::make_shared<TStructType>(TStructType({{"k", nullableType}, {"v", I64Type()}}));
+    const auto nullableType = MakeNullableType(TestTypes(), I64Type());
+    const auto inputType = TestTypes().MakeStruct(std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>>{{"k", nullableType}, {"v", I64Type()}});
     const std::vector<TSortKey> keys = {{.Column = "k"}};
     // Rows 1 and 3 have a null key.
     const auto batch = [] {
@@ -658,8 +660,8 @@ TEST(KernelImage, NullableSortBindsFromPlanDataAndImageSlots)
     const auto expected = RunSortDirect(inputType, keys, "nullable-sort", 3, batch());
 
     std::vector<TGeneratedKernel> kernels;
-    const auto plan = BuildSortPlanData(
-        inputType, keys, "nullable-sort", 3, {.Sink = &kernels, .BindNow = false});
+    const auto plan = BuildSortPlanData(TestTypes(),
+        inputType, keys, "nullable-sort", 3, {.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
     ASSERT_TRUE(plan.RadixNullable);
     ASSERT_TRUE(plan.Top);
     ASSERT_EQ(kernels.size(), 3u);
@@ -680,13 +682,13 @@ TEST(KernelImage, NullableSortBindsFromPlanDataAndImageSlots)
 
 TEST(KernelImage, PlainSortWithoutTopBindsFromPlanDataAndImageSlots)
 {
-    const auto inputType = std::make_shared<TStructType>(KeyValueType());
+    const auto inputType = &KeyValueType();
     const std::vector<TSortKey> keys = {{.Column = "v"}};
     const auto expected = RunSortDirect(inputType, keys, "plain-sort", std::nullopt);
 
     std::vector<TGeneratedKernel> kernels;
-    const auto plan = BuildSortPlanData(
-        inputType, keys, "plain-sort", std::nullopt, {.Sink = &kernels, .BindNow = false});
+    const auto plan = BuildSortPlanData(TestTypes(),
+        inputType, keys, "plain-sort", std::nullopt, {.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
     ASSERT_EQ(kernels.size(), 1u);
     EXPECT_FALSE(plan.Top);
     EXPECT_FALSE(plan.RadixNullable);
@@ -700,11 +702,11 @@ TEST(KernelImage, PlainSortWithoutTopBindsFromPlanDataAndImageSlots)
 
 TEST(KernelImage, WindowBindsFromImageSlot)
 {
-    TKernelCompiler jit({});
+    TKernelCompiler jit({.Types = SharedTestTypes()});
     const auto expected = RunWindow(CompileWindowKernel(jit));
 
     std::vector<TGeneratedKernel> kernels;
-    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
     compiler.CompileFilter(FilterSpec());
     auto window = CompileWindowKernel(compiler);
     ASSERT_EQ(kernels.size(), 2u);
@@ -721,9 +723,9 @@ TEST(KernelImage, WindowBindsFromPlanDataAndImageSlot)
 {
     TMockSource source({"k", "v"});
     auto window = MakeWindowOperator(source);
-    const auto inputType = StructTypeFromSchema(source.Schema());
+    const auto inputType = StructTypeFromSchema(TestTypes(), source.Schema(TestTypes()));
     std::vector<TGeneratedKernel> directKernels;
-    const auto direct = BuildWindowPlanData(*window, inputType, {.Sink = &directKernels});
+    const auto direct = BuildWindowPlanData(TestTypes(), *window, inputType, {.Types = SharedTestTypes(), .Sink = &directKernels});
     TWindowProcessor original(
         direct.Keys, direct.KeyColumns,
         MakeWindowKernel(BindSortRadixComposite(directKernels[direct.Kernel].Slot)));
@@ -731,8 +733,8 @@ TEST(KernelImage, WindowBindsFromPlanDataAndImageSlot)
 
     std::vector<TGeneratedKernel> kernels;
     // A leading filter shifts the kernel indexes.
-    TKernelCompiler(TKernelCompilerOptions{.Sink = &kernels, .BindNow = false}).CompileFilter(FilterSpec());
-    const auto plan = BuildWindowPlanData(*window, inputType, {.Sink = &kernels, .BindNow = false});
+    TKernelCompiler(TKernelCompilerOptions{.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false}).CompileFilter(FilterSpec());
+    const auto plan = BuildWindowPlanData(TestTypes(), *window, inputType, {.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
     ASSERT_EQ(kernels.size(), 2u);
     EXPECT_EQ(plan.Kernel, 1u);
     EXPECT_EQ(plan.Keys.size(), 2u);
@@ -749,7 +751,7 @@ TEST(KernelImage, WindowBindsFromPlanDataAndImageSlot)
 TEST(KernelImage, RuntimeFilterKernelBindsFromImageSlot)
 {
     std::vector<TGeneratedKernel> kernels;
-    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
     compiler.CompileFilter(FilterSpec());
     auto filter = compiler.CompileRuntimeFilter();
     ASSERT_EQ(kernels.size(), 2u);

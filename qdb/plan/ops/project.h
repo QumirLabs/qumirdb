@@ -36,7 +36,7 @@ class TProjectOperator : public IOperator {
 public:
     static constexpr const char* OpId = "project";
 
-    TProjectOperator(TOperatorPtr input, std::vector<TProjectionSpec> projections);
+    TProjectOperator(NQumir::NAst::TTypeFactory& types, TOperatorPtr input, std::vector<TProjectionSpec> projections);
 
     std::string_view RelName() const override { return OpId; }
     std::vector<TColumnReference> ColumnReferences() const override;
@@ -68,6 +68,6 @@ private:
 
 // projections: list of (output_name, expression_string) pairs
 std::expected<TOperatorPtr, NQumir::TError>
-MakeProject(TOperatorPtr input, std::vector<std::pair<std::string, std::string>> projections);
+MakeProject(NQumir::NAst::TTypeFactory& types, TOperatorPtr input, std::vector<std::pair<std::string, std::string>> projections);
 
 } // namespace NQdb

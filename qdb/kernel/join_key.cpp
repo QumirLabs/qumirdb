@@ -1,5 +1,7 @@
 #include <qdb/kernel/join_key.h>
 
+#include <qdb/plan/types/type_text.h>
+
 #include <qumir/error.h>
 
 #include <algorithm>
@@ -23,6 +25,7 @@ int32_t FindColumn(const TStructType& schema, const std::string& name, TTypePtr&
 } // namespace
 
 TJoinKeyDescriptor BuildJoinKeyDescriptor(
+    NQumir::NAst::TTypeFactory& types,
     const TStructType& leftType, const TStructType& rightType,
     const std::vector<std::pair<std::string, std::string>>& keys)
 {
@@ -37,8 +40,8 @@ TJoinKeyDescriptor BuildJoinKeyDescriptor(
     std::vector<std::pair<std::string, TTypePtr>> storedFields;
 
     for (const auto& [leftName, rightName] : keys) {
-        TTypePtr leftFieldType;
-        TTypePtr rightFieldType;
+        TTypePtr leftFieldType = nullptr;
+        TTypePtr rightFieldType = nullptr;
         const int32_t leftIndex = FindColumn(leftType, leftName, leftFieldType);
         const int32_t rightIndex = FindColumn(rightType, rightName, rightFieldType);
         if (leftIndex < 0) {
@@ -48,23 +51,23 @@ TJoinKeyDescriptor BuildJoinKeyDescriptor(
             throw NQumir::TError("join key descriptor: unknown right column '" + rightName + "'");
         }
 
-        const auto leftRep = RepresentKeyType(leftFieldType);
-        const auto rightRep = RepresentKeyType(rightFieldType);
+        const auto leftRep = RepresentKeyType(types, leftFieldType);
+        const auto rightRep = RepresentKeyType(types, rightFieldType);
         // Both sides must produce the same Key bytes to collide in one table.
-        if (leftRep.Inner->ToString() != rightRep.Inner->ToString()) {
+        if (leftRep.Inner != rightRep.Inner) {
             throw NQumir::TError(
                 "join key types incompatible: left '" + leftName + "' is " +
-                leftRep.Inner->ToString() + ", right '" + rightName + "' is " +
-                rightRep.Inner->ToString());
+                SqlTypeName(leftRep.Inner) + ", right '" + rightName + "' is " +
+                SqlTypeName(rightRep.Inner));
         }
 
         const bool nullable = leftRep.Nullable || rightRep.Nullable;
         const auto layout = leftRep.Layout;
         if (nullable) {
             lookupFields.emplace_back(
-                "valid_" + std::to_string(result.Fields.size()), std::make_shared<TBoolType>());
+                "valid_" + std::to_string(result.Fields.size()), types.Make<TBoolType>());
             storedFields.emplace_back(
-                "valid_" + std::to_string(result.Fields.size()), std::make_shared<TBoolType>());
+                "valid_" + std::to_string(result.Fields.size()), types.Make<TBoolType>());
             ++offset;
         }
         offset = AlignUp(offset, layout.Alignment);
@@ -103,13 +106,13 @@ TJoinKeyDescriptor BuildJoinKeyDescriptor(
     if (hasDistinctType) {
         result.LookupTypeName = result.TypeName + "_Lookup";
         result.StoredTypeName = result.TypeName + "_Stored";
-        result.LookupType = std::make_shared<TNamedType>(result.LookupTypeName,
-            std::make_shared<TStructType>(std::move(lookupFields)));
-        result.StoredType = std::make_shared<TNamedType>(result.StoredTypeName,
-            std::make_shared<TStructType>(std::move(storedFields)));
+        result.LookupType = types.MakeNamed(result.LookupTypeName,
+            types.MakeStruct(std::move(lookupFields)));
+        result.StoredType = types.MakeNamed(result.StoredTypeName,
+            types.MakeStruct(std::move(storedFields)));
     } else {
-        auto concrete = std::make_shared<TNamedType>(result.TypeName,
-            std::make_shared<TStructType>(std::move(storedFields)));
+        auto concrete = types.MakeNamed(result.TypeName,
+            types.MakeStruct(std::move(storedFields)));
         result.LookupType = concrete;
         result.StoredType = concrete;
     }

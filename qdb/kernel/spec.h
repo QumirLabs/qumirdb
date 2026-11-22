@@ -13,9 +13,10 @@
 #include <vector>
 
 namespace NQdb {
-class TExternalCatalogSnapshot;
 class TRuntimeContext;
 namespace NKernel {
+
+struct TAnnotationContext;
 
 enum class EOperatorKernelKind {
     NonCompute,
@@ -27,7 +28,7 @@ enum class EOperatorKernelKind {
 struct TKernelColumnRef {
     std::string Name;
     int32_t Index = -1;
-    NQumir::NAst::TTypePtr Type;
+    NQumir::NAst::TTypePtr Type = nullptr;
 };
 
 struct TKernelKeySpec {
@@ -65,7 +66,7 @@ struct TOperatorKernelSpec {
     EOperatorKernelKind Kind = EOperatorKernelKind::NonCompute;
     std::string OperatorName;
     std::vector<NQumir::NAst::TTypePtr> InputSchemas;
-    NQumir::NAst::TTypePtr OutputSchema;
+    NQumir::NAst::TTypePtr OutputSchema = nullptr;
     std::vector<TKernelColumnRef> ReferencedColumns;
     std::vector<NQumir::NAst::TExprPtr> Expressions;
     std::vector<TKernelKeySpec> Keys;
@@ -96,28 +97,32 @@ struct TOperatorKernelSpec {
 std::string_view KernelKindName(EOperatorKernelKind kind);
 
 TOperatorKernelSpec BuildFilterKernelSpec(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& inputType,
     const NQumir::NAst::TExprPtr& predicate,
     std::string entrypointName = "<kernel>",
-    const TExternalCatalogSnapshot* externalCatalog = nullptr,
+    const NKernel::TAnnotationContext* annotation = nullptr,
     TRuntimeContext* runtimeContext = nullptr);
 
 TOperatorKernelSpec BuildProjectKernelSpec(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& inputType,
     const std::vector<NQumir::NAst::TExprPtr>& computedExprs,
     const std::vector<NQumir::NAst::TTypePtr>& computedTypes,
     std::string entrypointName = "<project>",
-    const TExternalCatalogSnapshot* externalCatalog = nullptr,
+    const NKernel::TAnnotationContext* annotation = nullptr,
     TRuntimeContext* runtimeContext = nullptr);
 
 TOperatorKernelSpec BuildAggregateKernelSpec(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& inputType,
     const std::vector<std::string>& groupKeys,
     const std::vector<TAggregateSpec>& aggs,
-    const TExternalCatalogSnapshot* externalCatalog = nullptr,
+    const NKernel::TAnnotationContext* annotation = nullptr,
     std::vector<int64_t> emptyInputGroups = {});
 
 TOperatorKernelSpec BuildSortKernelSpec(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& inputType,
     const std::vector<TSortKey>& keys,
     std::string operatorName = "sort");
@@ -125,6 +130,7 @@ TOperatorKernelSpec BuildSortKernelSpec(
 // `markerName` names the marker column a LeftMark join appends to the left
 // columns; other join types do not use it.
 TOperatorKernelSpec BuildJoinKernelSpec(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& leftType,
     const NQumir::NAst::TStructType& rightType,
     const std::vector<TJoinKey>& keys,
@@ -135,6 +141,7 @@ TOperatorKernelSpec BuildJoinKernelSpec(
 // A keyless (nested-loop) join. The residual decides matches, so it is given
 // only to joins other than Inner, whose residual is a filter over the product.
 TOperatorKernelSpec BuildCrossJoinKernelSpec(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& leftType,
     const NQumir::NAst::TStructType& rightType,
     EJoinType type = EJoinType::Inner,

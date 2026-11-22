@@ -8,7 +8,7 @@
   "cases": {
     "null_then_bigint.sql": {"order": "unordered"},
     "bigint_then_null.sql": {"order": "unordered"},
-    "null_then_date.sql": {"order": "unordered"},
+    "null_then_date.sql": {"order": "unordered", "variants": ["single", "threaded"]},
     "null_then_varchar.sql": {"order": "unordered"},
     "varchar_then_null.sql": {"order": "unordered"},
     "columns_null_in_different_branches.sql": {"order": "unordered"},

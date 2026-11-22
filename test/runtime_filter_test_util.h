@@ -4,6 +4,8 @@
 
 #include <qdb/exec/runtime_context.h>
 #include <qdb/exec/runtime_filter.h>
+#include "test_types.h"
+
 #include <qdb/kernel/compiler.h>
 
 #include <cstdint>
@@ -20,7 +22,7 @@ class TRuntimeFilterTest : public testing::Test {
 protected:
     void SetUp() override {
         Context_ = std::make_shared<TRuntimeContext>();
-        Context_->RuntimeFilterKernels = TKernelCompiler().CompileRuntimeFilter().Slot;
+        Context_->RuntimeFilterKernels = TKernelCompiler({.Types = SharedTestTypes()}).CompileRuntimeFilter().Slot;
     }
 
     std::shared_ptr<TRuntimeContext> Context_;

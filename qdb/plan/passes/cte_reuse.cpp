@@ -30,22 +30,23 @@ struct TResolveState {
     TMaterializedMap Materialized;
 };
 
-TOperatorPtr Resolve(const TOperatorPtr& op, TResolveState& state);
+TOperatorPtr Resolve(NQumir::NAst::TTypeFactory& types, const TOperatorPtr& op, TResolveState& state);
 
-TOperatorPtr ResolveInline(const TCteDefinitionPtr& def, TResolveState& state) {
+TOperatorPtr ResolveInline(NQumir::NAst::TTypeFactory& types, const TCteDefinitionPtr& def, TResolveState& state) {
     auto it = state.Inlined.find(def.get());
     if (it == state.Inlined.end()) {
         // Resolve a clone so the canonical definition (its nested TCteRefs) stays
         // intact for the reuse phase.
         it = state.Inlined.emplace(
-            def.get(), Resolve(CloneOperator(def->Plan), state)).first;
+            def.get(), Resolve(types, CloneOperator(types, def->Plan), state)).first;
     }
-    return CloneOperator(it->second);
+    return CloneOperator(types, it->second);
 }
 
 // Narrows the spool to the union of columns demanded by all consumers, in the
 // producer's own field order.
 TOperatorPtr WrapBoundaryProjection(
+    NQumir::NAst::TTypeFactory& types,
     TOperatorPtr plan, const std::unordered_set<std::string>& required) {
     auto&& schema = plan->OutputColumns();
     if (!schema) {
@@ -66,7 +67,7 @@ TOperatorPtr WrapBoundaryProjection(
         }
         specs.push_back(TProjectionSpec{
             .Name = name,
-            .Expression = std::make_shared<TIdentExpr>(NQumir::TLocation{}, name),
+            .Expression = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, name),
         });
         fields.emplace_back(name, type);
     }
@@ -80,14 +81,14 @@ TOperatorPtr WrapBoundaryProjection(
         return plan;
     }
 
-    auto project = std::make_shared<TProjectOperator>(std::move(plan), std::move(specs));
-    project->Type = std::make_shared<TFunctionType>(
+    auto project = NQumir::MakeIntrusive<TProjectOperator>(types, std::move(plan), std::move(specs));
+    project->Type = types.MakeFunction(
         std::vector<TTypePtr>{project->Input()->OutputColumns()},
-        std::make_shared<TStructType>(std::move(fields)));
+        types.MakeStruct(std::move(fields)));
     return project;
 }
 
-TOperatorPtr ResolveMaterialized(const TCteDefinitionPtr& def, TResolveState& state) {
+TOperatorPtr ResolveMaterialized(NQumir::NAst::TTypeFactory& types, const TCteDefinitionPtr& def, TResolveState& state) {
     auto it = state.Materialized.find(def.get());
     TCteMaterializationPtr mat;
     if (it != state.Materialized.end()) {
@@ -96,13 +97,13 @@ TOperatorPtr ResolveMaterialized(const TCteDefinitionPtr& def, TResolveState& st
         mat = std::make_shared<TCteMaterialization>();
         state.Materialized.emplace(def.get(), mat);
         mat->Plan = WrapBoundaryProjection(
-            Resolve(CloneOperator(def->Plan), state),
+            types, Resolve(types, CloneOperator(types, def->Plan), state),
             state.Decisions.at(def.get()).RequiredOutputs);
     }
-    return std::make_shared<TCteConsumer>(def, mat);
+    return NQumir::MakeIntrusive<TCteConsumer>(types, def, mat);
 }
 
-TOperatorPtr Resolve(const TOperatorPtr& op, TResolveState& state) {
+TOperatorPtr Resolve(NQumir::NAst::TTypeFactory& types, const TOperatorPtr& op, TResolveState& state) {
     if (!op) {
         return op;
     }
@@ -110,14 +111,14 @@ TOperatorPtr Resolve(const TOperatorPtr& op, TResolveState& state) {
         auto def = maybeRef.Cast()->Def();
         switch (state.Decisions.at(def.get()).Mode) {
             case ECteReuseMode::Inline:
-                return ResolveInline(def, state);
+                return ResolveInline(types, def, state);
             case ECteReuseMode::Materialize:
-                return ResolveMaterialized(def, state);
+                return ResolveMaterialized(types, def, state);
         }
         std::unreachable();
     }
     for (auto& input : op->MutableInputs()) {
-        input = Resolve(input, state);
+        input = Resolve(types, input, state);
     }
     return op;
 }
@@ -226,7 +227,7 @@ TExprPtr TakePushablePredicate(
         *slots.front() = filter->Input();
         return filter->Predicate();
     }
-    auto* schema = static_cast<TStructType*>(def.OutputType.get());
+    auto* schema = static_cast<const TStructType*>(def.OutputType);
     if (!schema) {
         return nullptr;
     }
@@ -241,6 +242,7 @@ TExprPtr TakePushablePredicate(
 } // namespace
 
 void PushConsumerPredicatesIntoDefinitions(
+    NQumir::NAst::TTypeFactory& types,
     TOperatorPtr& main,
     const NKernel::TAnnotationContext& context,
     TConstFolder& folder)
@@ -260,8 +262,8 @@ void PushConsumerPredicatesIntoDefinitions(
             continue;
         }
         def.Plan = PushDownPredicates(
-            std::make_shared<TFilterOperator>(def.Plan, std::move(pushable)), folder);
-        AnnotateTypes(def.Plan, context);
+            NQumir::MakeIntrusive<TFilterOperator>(types, def.Plan, std::move(pushable)), folder);
+        AnnotateTypes(types, def.Plan, context);
         EstimateStats(def.Plan, folder);
     }
 }
@@ -280,9 +282,9 @@ TCteReuseDecisions ChooseCteReuse(const TCteUsageMap& usage) {
     return decisions;
 }
 
-TOperatorPtr ApplyCteReuse(TOperatorPtr plan, const TCteReuseDecisions& decisions) {
+TOperatorPtr ApplyCteReuse(NQumir::NAst::TTypeFactory& types, TOperatorPtr plan, const TCteReuseDecisions& decisions) {
     TResolveState state{.Decisions = decisions};
-    auto resolved = Resolve(std::move(plan), state);
+    auto resolved = Resolve(types, std::move(plan), state);
     AssignMaterializationRefCounts(resolved);
     return resolved;
 }

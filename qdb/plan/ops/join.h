@@ -47,7 +47,7 @@ public:
 
     // filter: optional residual predicate theta over the joined (left+right) row,
     // applied at the match point BEFORE a pair is emitted. nullptr if none.
-    TJoinOperator(TOperatorPtr left, TOperatorPtr right,
+    TJoinOperator(NQumir::NAst::TTypeFactory& types, TOperatorPtr left, TOperatorPtr right,
         std::vector<TJoinKey> keys, EJoinType type,
         NQumir::NAst::TExprPtr filter);
 
@@ -115,6 +115,7 @@ private:
 // Returns an error if both sides contribute columns and column names overlap
 // (no automatic prefixing/aliasing yet).
 std::expected<NQumir::NAst::TTypePtr, NQumir::TError> ComputeJoinOutputType(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TTypePtr& left,
     const NQumir::NAst::TTypePtr& right,
     EJoinType type);
@@ -122,7 +123,7 @@ std::expected<NQumir::NAst::TTypePtr, NQumir::TError> ComputeJoinOutputType(
 // keys: list of (leftCol, rightCol) pairs; must be non-empty.
 // filter: residual predicate expression string; empty for no residual.
 std::expected<TOperatorPtr, NQumir::TError>
-MakeJoin(TOperatorPtr left, TOperatorPtr right,
+MakeJoin(NQumir::NAst::TTypeFactory& types, TOperatorPtr left, TOperatorPtr right,
     std::vector<std::pair<std::string, std::string>> keys,
     EJoinType type,
     const std::string& filter = "");

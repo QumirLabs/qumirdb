@@ -16,7 +16,7 @@ namespace NQdb {
 struct TCteDefinition {
     uint32_t Id = 0;
     TOperatorPtr Plan;
-    NQumir::NAst::TTypePtr OutputType; // canonical struct schema, bare names
+    NQumir::NAst::TTypePtr OutputType = nullptr; // canonical struct schema, bare names
 };
 using TCteDefinitionPtr = std::shared_ptr<TCteDefinition>;
 
@@ -26,7 +26,7 @@ class TCteRef : public IOperator {
 public:
     static constexpr const char* OpId = "cte-ref";
 
-    explicit TCteRef(TCteDefinitionPtr def);
+    explicit TCteRef(NQumir::NAst::TTypeFactory& types, TCteDefinitionPtr def);
 
     std::string_view RelName() const override { return OpId; }
     std::vector<TColumnReference> ColumnReferences() const override { return {}; }

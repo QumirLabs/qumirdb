@@ -56,7 +56,7 @@ public:
         std::optional<std::vector<int>> rowGroups = std::nullopt,
         std::optional<std::unordered_set<std::string>> restrictedColumns = std::nullopt) const override;
 
-    const TSchema& Schema() const override;
+    TSchema Schema(NQumir::NAst::TTypeFactory& types) const override;
     const TStatsPtr Stats() const override;
     const std::string& Path() const override;
     std::unique_ptr<IRowLookupSource> MakeLookupSource() const override;
@@ -65,6 +65,7 @@ public:
     std::vector<NScheduler::TScanRowGroup> ScanRowGroups(
         const std::unordered_set<std::string>& columnNames) const;
     std::vector<NScheduler::TScanRowGroup> PruneRowGroups(
+        NQumir::NAst::TTypeFactory& types,
         const NQumir::NAst::TExprPtr& predicate,
         std::string_view sourceAlias,
         std::ostream* diagnostics = nullptr,
@@ -82,7 +83,7 @@ class TParquetSource : public ISource {
 public:
     ~TParquetSource();
 
-    const TSchema& Schema() const override;
+    TSchema Schema(NQumir::NAst::TTypeFactory& types) const override;
     const TStatsPtr Stats() const override;
     bool Next(TRowSet& rowSet) override;
 
@@ -118,9 +119,6 @@ private:
     std::vector<int> ReaderRowGroups_;
     size_t ReaderRowGroupIndex_ = 0;
     int64_t ReaderRowOffset_ = 0;
-    std::vector<std::string> Names_;
-    std::vector<TColumnSchema> Columns_;
-    TSchema Schema_;
 };
 
 } // namespace NQdb

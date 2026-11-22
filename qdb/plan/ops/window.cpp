@@ -21,33 +21,33 @@ namespace {
 // Ranking functions produce a non-null i64; aggregate-style functions mirror the
 // aggregate reducers (integer sum/max widen to i64, avg is f64 unless decimal),
 // carrying the argument's nullability.
-TTypePtr WindowResultType(const std::string& func, const TTypePtr& argType) {
+TTypePtr WindowResultType(NQumir::NAst::TTypeFactory& types, const std::string& func, const TTypePtr& argType) {
     if (func == "rank" || func == "row_number" || func == "dense_rank") {
-        return std::make_shared<TIntegerType>(); // i64, never null
+        return types.MakeInteger(); // i64, never null
     }
     if (!argType) {
         return argType;
     }
     const bool nullable = IsNullableType(argType);
     auto wrap = [&](TTypePtr type) -> TTypePtr {
-        return nullable ? std::make_shared<TNullable>(std::move(type)) : type;
+        return nullable ? MakeNullableType(types, std::move(type)) : type;
     };
     if (func == "avg") {
         if (IsDateType(UnwrapNullableType(argType))) {
             throw NQumir::TError("function avg(DATE) does not exist");
         }
-        return ComputeWindowAvgResultType(argType);
+        return ComputeWindowAvgResultType(types, argType);
     }
     if (func == "sum") {
-        return AggregateResultType(func, argType);
+        return AggregateResultType(types, func, argType);
     }
     // max: i64 state for every integer argument, else keep the arg type.
     auto inner = nullable ? UnwrapNullableType(argType) : argType;
     if (IsDateType(inner)) {
-        return wrap(std::make_shared<TDateType>(TIntegerType::I64));
+        return wrap(MakeDateType(types, TIntegerType::I64));
     }
     if (inner && inner->TypeName() == TIntegerType::TypeId) {
-        return wrap(std::make_shared<TIntegerType>());
+        return wrap(types.MakeInteger());
     }
     return argType;
 }
@@ -101,13 +101,13 @@ std::string_view FrameBoundKindName(EFrameBoundKind kind) {
     return "current-row";
 }
 
-TTypePtr ComputeWindowAvgResultType(const TTypePtr& argType) {
+TTypePtr ComputeWindowAvgResultType(NQumir::NAst::TTypeFactory& types, const TTypePtr& argType) {
     if (!argType) {
         return argType;
     }
     const bool nullable = IsNullableType(argType);
     auto wrap = [&](TTypePtr type) -> TTypePtr {
-        return nullable ? std::make_shared<TNullable>(std::move(type)) : type;
+        return nullable ? MakeNullableType(types, std::move(type)) : type;
     };
     if (auto spec = DecimalSpecOfValueType(UnwrapNullableType(argType))) {
         const int32_t intDigits = spec->Precision - spec->Scale;
@@ -115,28 +115,29 @@ TTypePtr ComputeWindowAvgResultType(const TTypePtr& argType) {
             spec->Scale + WindowAvgExtraScale,
             MaxDecimalPrecision - intDigits);
         const int32_t precision = intDigits + scale;
-        return wrap(std::make_shared<TDecimal>(precision, scale));
+        return wrap(MakeDecimalType(types, {precision, scale}));
     }
-    return wrap(std::make_shared<TFloatType>());
+    return wrap(types.MakeFloat());
 }
 
 TTypePtr ComputeWindowOutputType(
+    NQumir::NAst::TTypeFactory& types,
     const TTypePtr& inputSchema,
     const std::vector<TWindowFunc>& functions)
 {
-    auto* inputStruct = static_cast<TStructType*>(inputSchema.get());
+    auto* inputStruct = static_cast<const TStructType*>(inputSchema);
     std::vector<std::pair<std::string, TTypePtr>> outFields;
     if (inputStruct) {
         outFields = inputStruct->Fields; // pass every input column through
     }
     for (const auto& func : functions) {
         outFields.emplace_back(func.Name,
-            WindowResultType(func.Func, FuncArgType(inputStruct, func)));
+            WindowResultType(types, func.Func, FuncArgType(inputStruct, func)));
     }
-    return std::make_shared<TStructType>(std::move(outFields));
+    return types.MakeStruct(std::move(outFields));
 }
 
-TWindowOperator::TWindowOperator(TOperatorPtr input,
+TWindowOperator::TWindowOperator(NQumir::NAst::TTypeFactory& types, TOperatorPtr input,
     std::vector<std::string> partitionKeys,
     std::vector<TSortKey> orderKeys,
     std::optional<TWindowFrame> frame,
@@ -148,9 +149,9 @@ TWindowOperator::TWindowOperator(TOperatorPtr input,
     , Functions_(std::move(functions))
 {
     auto inputSchema = Input_->OutputColumns();
-    Type = std::make_shared<TFunctionType>(
+    Type = types.MakeFunction(
         std::vector<TTypePtr>{inputSchema},
-        ComputeWindowOutputType(inputSchema, Functions_));
+        ComputeWindowOutputType(types, inputSchema, Functions_));
 }
 
 std::vector<TColumnReference> TWindowOperator::ColumnReferences() const {

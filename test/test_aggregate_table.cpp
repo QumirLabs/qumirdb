@@ -6,6 +6,7 @@
 // planning rule that chooses between them.
 
 #include "qumirdb_source_module.h"
+#include "test_types.h"
 
 #include <qdb/exec/aggregate_exec.h>
 #include <qdb/exec/instrumentation/operator.h>
@@ -144,7 +145,7 @@ protected:
     void SetUp() override {
         std::vector<TExprPtr> functions;
         auto add = [&](const std::string& source, const std::string& name) {
-            auto library = NKernel::ParseFunctionLibrary(source, {"aht_update"});
+            auto library = NKernel::ParseFunctionLibrary(TestTypes(), source, {"aht_update"});
             ASSERT_TRUE(library) << name << ": " << library.error().ToString();
             functions.insert(functions.end(), library->begin(), library->end());
         };
@@ -162,8 +163,8 @@ protected:
         options.CoreInput = true;
         options.NativeCode = true;
         NTest::ConfigureQumirDbSourceModule(options);
-        Runner_ = std::make_unique<NQumir::TLLVMRunner>(options);
-        auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(functions));
+        Runner_ = std::make_unique<NQumir::TLLVMRunner>(options, nullptr, &NQdb::TestTypes());
+        auto program = NQumir::MakeIntrusive<TBlockExpr>(NQumir::TLocation{}, std::move(functions));
         NTest::AddQumirDbUse(program);
         std::string error;
         auto kernels = Runner_->CompileKernelAst(program, {
@@ -420,7 +421,7 @@ TAggregateSpec Agg(const std::string& name, const std::string& func, const std::
     return {
         .Name = name,
         .Func = func,
-        .Arg = arg.empty() ? nullptr : std::make_shared<TIdentExpr>(NQumir::TLocation{}, arg),
+        .Arg = arg.empty() ? nullptr : NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, arg),
     };
 }
 
@@ -594,9 +595,9 @@ TAggregateKernels CompileWithRows(
     const std::vector<std::string>& keys,
     const std::vector<TAggregateSpec>& aggs)
 {
-    auto spec = NKernel::BuildAggregateKernelSpec(input, keys, aggs);
+    auto spec = NKernel::BuildAggregateKernelSpec(TestTypes(), input, keys, aggs);
     spec.AggregateRowLayout = true;
-    return TKernelCompiler().CompileAggregate(spec);
+    return TKernelCompiler({.Types = SharedTestTypes()}).CompileAggregate(spec);
 }
 
 struct TRun {
@@ -611,7 +612,7 @@ TRun Aggregate(
     std::vector<TBatch>& batches,
     const std::vector<EValue>& outputs)
 {
-    static const auto measure = TKernelCompiler().CompileInstrumentation();
+    static const auto measure = TKernelCompiler({.Types = SharedTestTypes()}).CompileInstrumentation();
     TOperatorInstrumentation counters;
     counters.Kernel = measure;
     TAggregateProcessor processor(kernels, plan);
@@ -669,17 +670,17 @@ TRun CheckLayoutsAgree(
 }
 
 TEST_F(AggregateTable, EveryFixedWidthStateAgreesAcrossLayouts) {
-    auto i64 = std::make_shared<TIntegerType>();
-    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
-    TStructType input({
+    auto i64 = TestTypes().MakeInteger();
+    auto i32 = TestTypes().MakeInteger(TIntegerType::I32);
+    const auto& input = *TestTypes().MakeStruct({
         {"k", i64},
-        {"v", std::make_shared<TNullable>(i64)},
+        {"v", MakeNullableType(TestTypes(), i64)},
         {"w", i32},
-        {"f", std::make_shared<TNullable>(std::make_shared<TFloatType>())},
-        {"g", std::make_shared<TFloatType>()},
-        {"d", std::make_shared<TNullable>(std::make_shared<TDecimal>(28, 2))},
-        {"e", std::make_shared<TDecimal>(18, 0)},
-        {"b", std::make_shared<TNullable>(std::make_shared<TBoolType>())},
+        {"f", MakeNullableType(TestTypes(), TestTypes().MakeFloat())},
+        {"g", TestTypes().MakeFloat()},
+        {"d", MakeNullableType(TestTypes(), MakeDecimalType(TestTypes(), {28, 2}))},
+        {"e", MakeDecimalType(TestTypes(), {18, 0})},
+        {"b", MakeNullableType(TestTypes(), TestTypes().Make<TBoolType>())},
     });
     std::vector<TAggregateSpec> aggs = {
         Agg("c", "count"), Agg("cv", "count", "v"),
@@ -733,16 +734,16 @@ TEST_F(AggregateTable, EveryFixedWidthStateAgreesAcrossLayouts) {
 }
 
 TEST_F(AggregateTable, CompositeAndNullKeysAgreeAcrossLayouts) {
-    auto i64 = std::make_shared<TIntegerType>();
-    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
+    auto i64 = TestTypes().MakeInteger();
+    auto i32 = TestTypes().MakeInteger(TIntegerType::I32);
     // The decimal key comes first: after a nullable flag or a narrower key it
     // is misplaced in the key struct (#163).
-    TStructType input({
-        {"d", std::make_shared<TDecimal>(20, 0)},
-        {"a", std::make_shared<TNullable>(i64)},
+    const auto& input = *TestTypes().MakeStruct({
+        {"d", MakeDecimalType(TestTypes(), {20, 0})},
+        {"a", MakeNullableType(TestTypes(), i64)},
         {"b", i32},
-        {"f", std::make_shared<TFloatType>()},
-        {"t", std::make_shared<TNullable>(std::make_shared<TBoolType>())},
+        {"f", TestTypes().MakeFloat()},
+        {"t", MakeNullableType(TestTypes(), TestTypes().Make<TBoolType>())},
         {"v", i64},
     });
     std::vector<TAggregateSpec> aggs = {Agg("c", "count"), Agg("s", "sum", "v")};
@@ -779,8 +780,8 @@ TEST_F(AggregateTable, CompositeAndNullKeysAgreeAcrossLayouts) {
 }
 
 TEST_F(AggregateTable, MovesToRowsInsideABatch) {
-    auto i64 = std::make_shared<TIntegerType>();
-    TStructType input({{"k", i64}, {"v", i64}});
+    auto i64 = TestTypes().MakeInteger();
+    const auto& input = *TestTypes().MakeStruct({{"k", i64}, {"v", i64}});
     std::vector<TAggregateSpec> aggs = {
         Agg("c", "count"), Agg("s", "sum", "v"), Agg("n", "min", "v"), Agg("x", "max", "v"),
     };
@@ -827,10 +828,10 @@ TEST_F(AggregateTable, MovesToRowsInsideABatch) {
 }
 
 TEST_F(AggregateTable, RowLayoutAlignsKeysThatHoldADecimal) {
-    auto i64 = std::make_shared<TIntegerType>();
-    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
-    TStructType input({
-        {"d", std::make_shared<TDecimal>(20, 0)},
+    auto i64 = TestTypes().MakeInteger();
+    auto i32 = TestTypes().MakeInteger(TIntegerType::I32);
+    const auto& input = *TestTypes().MakeStruct({
+        {"d", MakeDecimalType(TestTypes(), {20, 0})},
         {"b", i32},
         {"k", i64},
     });
@@ -842,7 +843,7 @@ TEST_F(AggregateTable, RowLayoutAlignsKeysThatHoldADecimal) {
     for (const std::vector<std::string>& keys : std::vector<std::vector<std::string>>{
              {"d"}, {"d", "b"}, {"d", "b", "k"}})
     {
-        const auto key = NKernel::BuildAggregateKeyDescriptor(input, keys);
+        const auto key = NKernel::BuildAggregateKeyDescriptor(TestTypes(), input, keys);
         const auto rows = NKernel::BuildAggRowLayout(key, states, false);
         ASSERT_TRUE(rows);
         EXPECT_EQ(rows->KeyAlignment, 16);
@@ -854,7 +855,7 @@ TEST_F(AggregateTable, RowLayoutAlignsKeysThatHoldADecimal) {
         EXPECT_GE(rows->RowBytes, rows->StateOffset + 16);
     }
     const auto narrow = NKernel::BuildAggRowLayout(
-        NKernel::BuildAggregateKeyDescriptor(input, {"k", "b"}), states, false);
+        NKernel::BuildAggregateKeyDescriptor(TestTypes(), input, {"k", "b"}), states, false);
     ASSERT_TRUE(narrow);
     EXPECT_EQ(narrow->KeyOffset, 8);
     EXPECT_EQ(narrow->KeyStride, 16);
@@ -862,14 +863,14 @@ TEST_F(AggregateTable, RowLayoutAlignsKeysThatHoldADecimal) {
 }
 
 TEST_F(AggregateTable, RowLayoutReportsItsMemory) {
-    auto i64 = std::make_shared<TIntegerType>();
-    TStructType input({{"k", i64}, {"v", i64}});
+    auto i64 = TestTypes().MakeInteger();
+    const auto& input = *TestTypes().MakeStruct({{"k", i64}, {"v", i64}});
     const auto kernels = CompileWithRows(input, {"k"}, {Agg("c", "count"), Agg("s", "sum", "v")});
     // A hash word, the key and two state words.
     EXPECT_EQ(kernels.RowBytes, 32);
     EXPECT_EQ(kernels.StateWords, 2u);
     TOperatorInstrumentation counters;
-    counters.Kernel = TKernelCompiler().CompileInstrumentation();
+    counters.Kernel = TKernelCompiler({.Types = SharedTestTypes()}).CompileInstrumentation();
     TAggregateProcessor processor(kernels, {.Layout = EAggregateTableLayout::Row});
     processor.SetInstrumentation(&counters);
     TBatch batch({EValue::I64, EValue::I64});
@@ -896,11 +897,11 @@ std::set<std::string> ProgramFunctions(
     const std::vector<std::string>& keys,
     const std::optional<NKernel::TAggRowLayout>& rows)
 {
-    const auto key = NKernel::BuildAggregateKeyDescriptor(input, keys);
+    const auto key = NKernel::BuildAggregateKeyDescriptor(TestTypes(), input, keys);
     const auto layout = NKernel::BuildAggReducerLayout(
         {"count", "sum"}, {NKernel::TAggArg{}, NKernel::TAggArg{.ColumnIndex = 1}});
-    auto named = [](const char* name) { return std::make_shared<TNamedType>(name, nullptr); };
-    auto program = NKernel::BuildGenericAggregateFusedProgramAst(
+    auto named = [](const char* name) { return TestTypes().MakeNamed(name, nullptr); };
+    auto program = NKernel::BuildGenericAggregateFusedProgramAst(TestTypes(),
         input, key, layout, named("TColumn"), named("TRowSet"), named("HashTable"),
         false, {}, rows);
     EXPECT_TRUE(program) << program.error().ToString();
@@ -916,18 +917,18 @@ std::set<std::string> ProgramFunctions(
 }
 
 TEST_F(AggregateTable, RowLayoutNeedsTheSpecFlag) {
-    auto i64 = std::make_shared<TIntegerType>();
-    TStructType input({{"k", i64}, {"v", i64}});
+    auto i64 = TestTypes().MakeInteger();
+    const auto& input = *TestTypes().MakeStruct({{"k", i64}, {"v", i64}});
     const std::vector<TAggregateSpec> aggs = {Agg("c", "count"), Agg("s", "sum", "v")};
-    auto spec = NKernel::BuildAggregateKernelSpec(input, {"k"}, aggs);
+    auto spec = NKernel::BuildAggregateKernelSpec(TestTypes(), input, {"k"}, aggs);
     ASSERT_FALSE(spec.AggregateRowLayout);
-    const auto swiss = TKernelCompiler().CompileAggregate(spec);
+    const auto swiss = TKernelCompiler({.Types = SharedTestTypes()}).CompileAggregate(spec);
     EXPECT_EQ(swiss.RowBytes, 0);
     EXPECT_EQ(CompileWithRows(input, {"k"}, aggs).RowBytes, 32);
 
     // Without the flag, the program is the swiss table's alone.
     const auto rows = NKernel::BuildAggRowLayout(
-        NKernel::BuildAggregateKeyDescriptor(input, {"k"}),
+        NKernel::BuildAggregateKeyDescriptor(TestTypes(), input, {"k"}),
         NKernel::BuildAggReducerLayout(
             {"count", "sum"}, {NKernel::TAggArg{}, NKernel::TAggArg{.ColumnIndex = 1}}),
         false);
@@ -963,8 +964,8 @@ TEST_F(AggregateTable, RowLayoutNeedsTheSpecFlag) {
 // A string key is a 16-byte handle in the row (pointer and size), whose bytes
 // the owned arena holds in both layouts.
 TEST_F(AggregateTable, StringKeysAgreeAcrossLayouts) {
-    auto i64 = std::make_shared<TIntegerType>();
-    TStructType input({{"s", std::make_shared<TStringType>()}, {"v", i64}});
+    auto i64 = TestTypes().MakeInteger();
+    const auto& input = *TestTypes().MakeStruct({{"s", TestTypes().Make<TStringType>()}, {"v", i64}});
     std::vector<TAggregateSpec> aggs = {
         Agg("c", "count"), Agg("sv", "sum", "v"), Agg("nv", "min", "v"), Agg("xv", "max", "v"),
     };
@@ -998,11 +999,11 @@ TEST_F(AggregateTable, StringKeysAgreeAcrossLayouts) {
 }
 
 TEST_F(AggregateTable, CompositeAndNullStringKeysAgreeAcrossLayouts) {
-    auto i64 = std::make_shared<TIntegerType>();
-    auto string = std::make_shared<TStringType>();
-    TStructType input({
+    auto i64 = TestTypes().MakeInteger();
+    auto string = TestTypes().Make<TStringType>();
+    const auto& input = *TestTypes().MakeStruct({
         {"k", i64},
-        {"s", std::make_shared<TNullable>(string)},
+        {"s", MakeNullableType(TestTypes(), string)},
         {"t", string},
         {"v", i64},
     });
@@ -1035,13 +1036,13 @@ TEST_F(AggregateTable, CompositeAndNullStringKeysAgreeAcrossLayouts) {
 }
 
 TEST_F(AggregateTable, StringReducersAndEmptyInputGroupsKeepTheSwissTable) {
-    auto i64 = std::make_shared<TIntegerType>();
-    TStructType numbers({{"k", i64}, {"s", std::make_shared<TStringType>()}});
+    auto i64 = TestTypes().MakeInteger();
+    const auto& numbers = *TestTypes().MakeStruct({{"k", i64}, {"s", TestTypes().Make<TStringType>()}});
     EXPECT_EQ(CompileWithRows(numbers, {"k"}, {Agg("m", "min", "s")}).RowBytes, 0);
-    auto seeded = NKernel::BuildAggregateKernelSpec(
+    auto seeded = NKernel::BuildAggregateKernelSpec(TestTypes(),
         numbers, {"k"}, {Agg("c", "count")}, nullptr, {1});
     seeded.AggregateRowLayout = true;
-    const auto seededKernels = TKernelCompiler().CompileAggregate(seeded);
+    const auto seededKernels = TKernelCompiler({.Types = SharedTestTypes()}).CompileAggregate(seeded);
     EXPECT_EQ(seededKernels.RowBytes, 0);
     EXPECT_THROW(
         TAggregateProcessor(seededKernels, {.Layout = EAggregateTableLayout::Row}),
@@ -1061,8 +1062,8 @@ TEST_F(AggregateTable, StringReducersAndEmptyInputGroupsKeepTheSwissTable) {
 // The move sizes its entries for the groups the caller expects when that is
 // more than twice the groups it moves, so that they need not grow again.
 TEST_F(AggregateTable, ExpectRowGroupsSizesTheEntriesOfTheMove) {
-    auto i64 = std::make_shared<TIntegerType>();
-    TStructType input({{"k", i64}, {"v", i64}});
+    auto i64 = TestTypes().MakeInteger();
+    const auto& input = *TestTypes().MakeStruct({{"k", i64}, {"v", i64}});
     const auto kernels = CompileWithRows(input, {"k"}, {Agg("c", "count"), Agg("s", "sum", "v")});
     auto batchOf = [](int64_t from, int64_t to) {
         TBatch batch({EValue::I64, EValue::I64});
@@ -1086,7 +1087,7 @@ TEST_F(AggregateTable, ExpectRowGroupsSizesTheEntriesOfTheMove) {
          })
     {
         TOperatorInstrumentation counters;
-        counters.Kernel = TKernelCompiler().CompileInstrumentation();
+        counters.Kernel = TKernelCompiler({.Types = SharedTestTypes()}).CompileInstrumentation();
         TAggregateProcessor processor(kernels, {
             .InitialCapacity = 512, .RowSwitchGroups = 100, .RowExpectedGroups = expected});
         processor.SetInstrumentation(&counters);
@@ -1185,8 +1186,8 @@ TEST_F(AggregateTable, OverestimateStartsSwiss) {
 // The move sizes the row entries for the task's estimated groups, capped as
 // the swiss slots are and by the task's input rows.
 TEST_F(AggregateTable, MoveIsSizedFromTheEstimate) {
-    auto i64 = std::make_shared<TIntegerType>();
-    TStructType input({{"k", i64}, {"v", i64}});
+    auto i64 = TestTypes().MakeInteger();
+    const auto& input = *TestTypes().MakeStruct({{"k", i64}, {"v", i64}});
     const auto kernels = CompileWithRows(input, {"k"}, {Agg("c", "count"), Agg("s", "sum", "v")});
     using enum NScheduler::EAggregateTableKind;
     auto autoPlan = [&](const TAggregateTaskEstimate& estimate) {
@@ -1208,7 +1209,7 @@ TEST_F(AggregateTable, MoveIsSizedFromTheEstimate) {
     // The entries right after the move.
     auto movedCapacity = [&](const TAggregateTablePlan& plan) -> uint64_t {
         TOperatorInstrumentation counters;
-        counters.Kernel = TKernelCompiler().CompileInstrumentation();
+        counters.Kernel = TKernelCompiler({.Types = SharedTestTypes()}).CompileInstrumentation();
         TAggregateProcessor processor(kernels, plan);
         processor.SetInstrumentation(&counters);
         std::array<TColumn, 2> columns{};
@@ -1248,8 +1249,8 @@ TEST_F(AggregateTable, MoveIsSizedFromTheEstimate) {
 // no reads: auto keeps its table swiss, as sized on master, and row still
 // forces it into rows.
 TEST_F(AggregateTable, KeyOnlyAggregatesStaySwissUnderAuto) {
-    auto i64 = std::make_shared<TIntegerType>();
-    TStructType input({{"k", i64}});
+    auto i64 = TestTypes().MakeInteger();
+    const auto& input = *TestTypes().MakeStruct({{"k", i64}});
     const auto kernels = CompileWithRows(input, {"k"}, {});
     ASSERT_EQ(kernels.StateWords, 0u);
     ASSERT_EQ(kernels.RowBytes, 16);
@@ -1281,14 +1282,14 @@ TEST_F(AggregateTable, KeyOnlyAggregatesStaySwissUnderAuto) {
 // and each growth of the row entries after it, as the kernels counted them in
 // the table.
 TEST_F(AggregateTable, InstrumentationCountsTheMoveOnce) {
-    auto i64 = std::make_shared<TIntegerType>();
-    TStructType input({{"k", i64}, {"v", i64}});
+    auto i64 = TestTypes().MakeInteger();
+    const auto& input = *TestTypes().MakeStruct({{"k", i64}, {"v", i64}});
     const auto kernels = CompileWithRows(input, {"k"}, {Agg("c", "count"), Agg("s", "sum", "v")});
     auto dispatch = [&](THashTable& table, TRowSet* batch, int64_t arg, EAggregateKernelOp op) {
         return kernels.Dispatch(&table, batch, arg, static_cast<int64_t>(op));
     };
     TOperatorInstrumentation counters;
-    counters.Kernel = TKernelCompiler().CompileInstrumentation();
+    counters.Kernel = TKernelCompiler({.Types = SharedTestTypes()}).CompileInstrumentation();
     auto observe = [&](THashTable& table) {
         counters.ObserveHash(&table, 0, false, kernels.StringMetadataBuffers);
     };
@@ -1352,9 +1353,9 @@ TEST_F(AggregateTable, DISABLED_LayoutMicrobenchmark) {
     const size_t tasks = BenchTasks;
     const int64_t maxGroups = BenchMaxGroups;
     constexpr int64_t BatchRows = 16384;
-    auto i64 = std::make_shared<TIntegerType>();
-    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
-    TStructType input({{"k", i64}, {"j", i32}, {"v", i64}, {"w", i64}});
+    auto i64 = TestTypes().MakeInteger();
+    auto i32 = TestTypes().MakeInteger(TIntegerType::I32);
+    const auto& input = *TestTypes().MakeStruct({{"k", i64}, {"j", i32}, {"v", i64}, {"w", i64}});
     const std::map<int, std::vector<TAggregateSpec>> aggregates = {
         {1, {Agg("c", "count")}},
         {2, {Agg("c", "count"), Agg("s", "sum", "v")}},
@@ -1408,7 +1409,7 @@ TEST_F(AggregateTable, DISABLED_LayoutMicrobenchmark) {
                 };
                 auto runTask = [&](const TTask& task, const TAggregateTablePlan& plan) {
                     TOperatorInstrumentation counters;
-                    static const auto measure = TKernelCompiler().CompileInstrumentation();
+                    static const auto measure = TKernelCompiler({.Types = SharedTestTypes()}).CompileInstrumentation();
                     counters.Kernel = measure;
                     TAggregateProcessor processor(kernels, plan);
                     processor.SetInstrumentation(&counters);

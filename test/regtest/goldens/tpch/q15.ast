@@ -15,7 +15,7 @@
             (table lineitem)
           )
           (where
-            (&& (>= l_shipdate (: 9190 i32)) (< l_shipdate (: 9282 i32)))
+            (&& (>= l_shipdate (: 9190 <named DATE [i32]>)) (< l_shipdate (: 9282 <named DATE [i32]>)))
           )
           (group-by
             l_suppkey

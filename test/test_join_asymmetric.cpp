@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "mock_source.h"
 #include "plan_runner.h"
+#include "test_types.h"
 
 #include <qdb/exec/join_exec.h>
 #include <qdb/exec/planner_helpers.h>
@@ -39,11 +40,12 @@ using namespace NQumir::NAst::NLiterals;
 
 namespace {
 
-TTypePtr I64Type() { return std::make_shared<TIntegerType>(TIntegerType::I64); }
+TTypePtr I64Type() { return TestTypes().MakeInteger(TIntegerType::I64); }
 
-TTypePtr KeyValSchema(const std::string& key, const std::string& val) {
-    return std::make_shared<TStructType>(
-        std::vector<std::pair<std::string, TTypePtr>>{{key, I64Type()}, {val, I64Type()}});
+TTypePtr KeyValSchema(const std::string& key, const std::string& val, bool nullableKey = false) {
+    return TestTypes().MakeStruct(std::vector<std::pair<std::string, TTypePtr>>{
+        {key, nullableKey ? MakeNullableType(TestTypes(), I64Type()) : I64Type()},
+        {val, I64Type()}});
 }
 
 TRowSet KeyValBatch(int64_t* keys, int64_t* vals, int64_t rows, std::vector<TColumn>& cols) {
@@ -61,9 +63,9 @@ TJoinKernels CompileJoin(TKernelCompiler& compiler,
     const TTypePtr& leftType, const TTypePtr& rightType, EJoinType type,
     bool nullsEqual = false)
 {
-    auto spec = NKernel::BuildJoinKernelSpec(
-        static_cast<TStructType&>(*leftType),
-        static_cast<TStructType&>(*rightType),
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(),
+        static_cast<const TStructType&>(*leftType),
+        static_cast<const TStructType&>(*rightType),
         {{"lk", "rk", nullsEqual}}, type, nullptr);
     return compiler.CompileJoin(spec);
 }
@@ -84,8 +86,8 @@ std::vector<TOut2> RunSemiAnti(
     std::vector<int64_t> rk1 = {2}, rv1 = {300};
     std::vector<TColumn> lcols0, lcols1, rcols0, rcols1;
 
-    auto leftType = KeyValSchema("lk", "lv");
-    auto rightType = KeyValSchema("rk", "rv");
+    auto leftType = KeyValSchema("lk", "lv", nullableKeys);
+    auto rightType = KeyValSchema("rk", "rv", nullableKeys);
     auto leftBatch0 = KeyValBatch(lk0.data(), lv0.data(), 2, lcols0);
     auto leftBatch1 = KeyValBatch(lk1.data(), lv1.data(), 2, lcols1);
     auto rightBatch0 = KeyValBatch(rk0.data(), rv0.data(), 2, rcols0);
@@ -94,17 +96,13 @@ std::vector<TOut2> RunSemiAnti(
     uint8_t valid = 0b00000001;
     uint8_t invalid = 0;
     if (nullableKeys) {
-        static_cast<TStructType&>(*leftType).Fields[0].second =
-            std::make_shared<TNullable>(I64Type());
-        static_cast<TStructType&>(*rightType).Fields[0].second =
-            std::make_shared<TNullable>(I64Type());
         lcols0[0].Mask = &valid;
         lcols1[0].Mask = &valid;
         rcols0[0].Mask = &valid;
         rcols1[0].Mask = &invalid;
     }
 
-    TKernelCompiler compiler;
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
     auto kernels = CompileJoin(compiler, leftType, rightType, type, nullsEqual);
     TInnerJoinProcessor processor(std::move(kernels), type, buildSide);
 
@@ -179,7 +177,7 @@ std::vector<TOut4> RunAsymmetric(EJoinBuildSide buildSide) {
     auto rightBatch0 = KeyValBatch(rk0.data(), rv0.data(), 2, rcols0);
     auto rightBatch1 = KeyValBatch(rk1.data(), rv1.data(), 1, rcols1);
 
-    TKernelCompiler compiler;
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
     auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::Inner);
     TInnerJoinProcessor processor(std::move(kernels), EJoinType::Inner, buildSide);
 
@@ -249,8 +247,8 @@ class TFakeSource : public IOperator {
 public:
     static constexpr const char* OpId = "fake_source";
     explicit TFakeSource(std::vector<std::pair<std::string, TTypePtr>> fields) {
-        auto schema = std::make_shared<TStructType>(std::move(fields));
-        Type = std::make_shared<TFunctionType>(std::vector<TTypePtr>{}, schema);
+        auto schema = TestTypes().MakeStruct(std::move(fields));
+        Type = TestTypes().MakeFunction(std::vector<TTypePtr>{}, schema);
     }
     std::string_view RelName() const override { return OpId; }
     std::vector<TColumnReference> ColumnReferences() const override { return {}; }
@@ -265,23 +263,23 @@ TStatsPtr Rows(uint64_t n) {
 }
 
 TOperatorPtr JoinOfType(EJoinType type) {
-    auto left = std::make_shared<TFakeSource>(
+    auto left = NQumir::MakeIntrusive<TFakeSource>(
         std::vector<std::pair<std::string, TTypePtr>>{{"lk", I64Type()}, {"lv", I64Type()}});
-    auto right = std::make_shared<TFakeSource>(
+    auto right = NQumir::MakeIntrusive<TFakeSource>(
         std::vector<std::pair<std::string, TTypePtr>>{{"rk", I64Type()}, {"rv", I64Type()}});
-    auto join = MakeJoin(left, right, {{"lk", "rk"}}, type);
+    auto join = MakeJoin(TestTypes(), left, right, {{"lk", "rk"}}, type);
     EXPECT_TRUE(join.has_value()) << (join ? "" : join.error().ToString());
-    return std::static_pointer_cast<IOperator>(join.value_or(nullptr));
+    return NQumir::StaticPointerCast<IOperator>(join.value_or(nullptr));
 }
 
 TOperatorPtr InnerJoin() {
-    auto left = std::make_shared<TFakeSource>(
+    auto left = NQumir::MakeIntrusive<TFakeSource>(
         std::vector<std::pair<std::string, TTypePtr>>{{"lk", I64Type()}, {"lv", I64Type()}});
-    auto right = std::make_shared<TFakeSource>(
+    auto right = NQumir::MakeIntrusive<TFakeSource>(
         std::vector<std::pair<std::string, TTypePtr>>{{"rk", I64Type()}, {"rv", I64Type()}});
-    auto join = MakeJoin(left, right, {{"lk", "rk"}}, EJoinType::Inner);
+    auto join = MakeJoin(TestTypes(), left, right, {{"lk", "rk"}}, EJoinType::Inner);
     EXPECT_TRUE(join.has_value()) << (join ? "" : join.error().ToString());
-    return std::static_pointer_cast<IOperator>(join.value_or(nullptr));
+    return NQumir::StaticPointerCast<IOperator>(join.value_or(nullptr));
 }
 
 } // namespace
@@ -308,13 +306,13 @@ TStatsPtr RowsWithKeyNdv(uint64_t rows, const std::string& column,
 std::optional<TRuntimeFilterSpec> AttachTo(const TOperatorPtr& join) {
     uint32_t nextId = 1;
     AttachRuntimeFilters(join, nextId);
-    return static_cast<TJoinOperator*>(join.get())->RuntimeFilter();
+    return static_cast<TJoinOperator*>(join.Get())->RuntimeFilter();
 }
 
 TEST(AttachRuntimeFilters, EmitsFromTheSideWithFewerDistinctKeys) {
     auto join = JoinOfType(EJoinType::Inner);
     ASSERT_TRUE(join);
-    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto* j = static_cast<TJoinOperator*>(join.Get());
 
     j->Left()->Stats_ = RowsWithKeyNdv(400000, "lk", 400000);
     j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 10000);
@@ -335,7 +333,7 @@ TEST(AttachRuntimeFilters, EmitsFromTheSideWithFewerDistinctKeys) {
 TEST(AttachRuntimeFilters, JudgesDistinctKeysNotRows) {
     auto join = JoinOfType(EJoinType::Inner);
     ASSERT_TRUE(join);
-    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto* j = static_cast<TJoinOperator*>(join.Get());
 
     j->Left()->Stats_ = RowsWithKeyNdv(1000000, "lk", 1000000);
     j->Right()->Stats_ = RowsWithKeyNdv(50000000, "rk", 100);
@@ -356,7 +354,7 @@ TEST(AttachRuntimeFilters, JudgesDistinctKeysNotRows) {
 TEST(AttachRuntimeFilters, AccountsForForcedBuildAndNdvUncertainty) {
     auto join = JoinOfType(EJoinType::Inner);
     ASSERT_TRUE(join);
-    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto* j = static_cast<TJoinOperator*>(join.Get());
 
     j->Left()->Stats_ = RowsWithKeyNdv(50000, "lk", 50000);
     j->Right()->Stats_ = RowsWithKeyNdv(10000, "rk", 10000);
@@ -389,9 +387,9 @@ TEST(AttachRuntimeFilters, AccountsForForcedBuildAndNdvUncertainty) {
 TEST(AttachRuntimeFilters, PricesTheActualProbeBoundary) {
     auto join = JoinOfType(EJoinType::Inner);
     ASSERT_TRUE(join);
-    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto* j = static_cast<TJoinOperator*>(join.Get());
     auto source = j->Left();
-    auto filtered = MakeFilter(source, "(> lk 0)");
+    auto filtered = MakeFilter(TestTypes(), source, "(> lk 0)");
     ASSERT_TRUE(filtered.has_value());
     j->MutableLeft() = *filtered;
     source->Stats_ = RowsWithKeyNdv(10'000'000, "lk", 1'000'000);
@@ -423,9 +421,9 @@ TEST(AttachRuntimeFilters, PricesTheActualProbeBoundary) {
 TEST(AttachRuntimeFilters, UsesBoundaryNdvForWorkSavedBeforeJoin) {
     auto join = JoinOfType(EJoinType::Inner);
     ASSERT_TRUE(join);
-    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto* j = static_cast<TJoinOperator*>(join.Get());
     auto source = j->Left();
-    auto filtered = MakeFilter(source, "(> lk 0)");
+    auto filtered = MakeFilter(TestTypes(), source, "(> lk 0)");
     ASSERT_TRUE(filtered.has_value());
     j->MutableLeft() = *filtered;
     (*filtered)->Stats_ = RowsWithKeyNdv(1'000'000, "lk", 100'000);
@@ -449,7 +447,7 @@ TEST(AttachRuntimeFilters, UsesBoundaryNdvForWorkSavedBeforeJoin) {
 TEST(AttachRuntimeFilters, RowCountCapDoesNotMakeNdvExact) {
     auto join = JoinOfType(EJoinType::Inner);
     ASSERT_TRUE(join);
-    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto* j = static_cast<TJoinOperator*>(join.Get());
     j->Left()->Stats_ = RowsWithKeyNdv(100'000, "lk", 1'000'000, true);
     j->Right()->Stats_ = RowsWithKeyNdv(40'000, "rk", 10'000, true);
     EXPECT_FALSE(AttachTo(join))
@@ -459,9 +457,9 @@ TEST(AttachRuntimeFilters, RowCountCapDoesNotMakeNdvExact) {
 TEST(AttachRuntimeFilters, StopsAtComputedProjectKey) {
     auto join = JoinOfType(EJoinType::Inner);
     ASSERT_TRUE(join);
-    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto* j = static_cast<TJoinOperator*>(join.Get());
     auto source = j->Left();
-    auto projected = MakeProject(source,
+    auto projected = MakeProject(TestTypes(), source,
         {{"alias_key", "(+ lk 0)"}, {"lv", "lv"}});
     ASSERT_TRUE(projected.has_value());
     j->MutableLeft() = *projected;
@@ -482,14 +480,14 @@ TEST(AttachRuntimeFilters, StopsAtComputedProjectKey) {
 TEST(AttachRuntimeFilters, PricesUnionBranchesIndependently) {
     auto join = JoinOfType(EJoinType::Inner);
     ASSERT_TRUE(join);
-    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto* j = static_cast<TJoinOperator*>(join.Get());
     auto first = j->Left();
-    auto second = std::make_shared<TFakeSource>(
+    auto second = NQumir::MakeIntrusive<TFakeSource>(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"lk", I64Type()}, {"lv", I64Type()}});
-    auto filtered = MakeFilter(first, "(> lk 0)");
+    auto filtered = MakeFilter(TestTypes(), first, "(> lk 0)");
     ASSERT_TRUE(filtered.has_value());
-    auto un = std::make_shared<TUnionAllOperator>(
+    auto un = NQumir::MakeIntrusive<TUnionAllOperator>(TestTypes(),
         std::vector<TOperatorPtr>{*filtered, second});
     j->MutableLeft() = un;
     first->Stats_ = RowsWithKeyNdv(5'000'000, "lk", 1'000'000);
@@ -511,14 +509,14 @@ TEST(AttachRuntimeFilters, PricesUnionBranchesIndependently) {
 TEST(AttachRuntimeFilters, UnionChoosesEachBranchBySavedWork) {
     auto join = JoinOfType(EJoinType::Inner);
     ASSERT_TRUE(join);
-    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto* j = static_cast<TJoinOperator*>(join.Get());
     auto first = j->Left();
-    auto second = std::make_shared<TFakeSource>(
+    auto second = NQumir::MakeIntrusive<TFakeSource>(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"lk", I64Type()}, {"lv", I64Type()}});
-    auto filtered = MakeFilter(first, "(> lk 0)");
+    auto filtered = MakeFilter(TestTypes(), first, "(> lk 0)");
     ASSERT_TRUE(filtered.has_value());
-    auto un = std::make_shared<TUnionAllOperator>(
+    auto un = NQumir::MakeIntrusive<TUnionAllOperator>(TestTypes(),
         std::vector<TOperatorPtr>{*filtered, second});
     j->MutableLeft() = un;
     first->Stats_ = RowsWithKeyNdv(2'500'000, "lk", 1'000'000);
@@ -538,14 +536,14 @@ TEST(AttachRuntimeFilters, UnionChoosesEachBranchBySavedWork) {
 TEST(AttachRuntimeFilters, SharedStageAboveUnionIsCreditedOnce) {
     auto join = JoinOfType(EJoinType::Inner);
     ASSERT_TRUE(join);
-    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto* j = static_cast<TJoinOperator*>(join.Get());
     auto first = j->Left();
-    auto second = std::make_shared<TFakeSource>(
+    auto second = NQumir::MakeIntrusive<TFakeSource>(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"lk", I64Type()}, {"lv", I64Type()}});
-    auto un = std::make_shared<TUnionAllOperator>(
+    auto un = NQumir::MakeIntrusive<TUnionAllOperator>(TestTypes(),
         std::vector<TOperatorPtr>{first, second});
-    auto filtered = MakeFilter(un, "(> lk 0)");
+    auto filtered = MakeFilter(TestTypes(), un, "(> lk 0)");
     ASSERT_TRUE(filtered.has_value());
     j->MutableLeft() = *filtered;
     first->Stats_ = RowsWithKeyNdv(1'000'000, "lk", 50'000);
@@ -564,7 +562,7 @@ TEST(AttachRuntimeFilters, SharedStageAboveUnionIsCreditedOnce) {
 TEST(AttachRuntimeFilters, LeftOuterFiltersOnlyNullableRightInput) {
     auto join = JoinOfType(EJoinType::Left);
     ASSERT_TRUE(join);
-    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto* j = static_cast<TJoinOperator*>(join.Get());
     j->Left()->Stats_ = RowsWithKeyNdv(100'000, "lk", 10'000);
     j->Right()->Stats_ = RowsWithKeyNdv(1'000'000, "rk", 1'000'000);
 
@@ -588,9 +586,9 @@ TEST(AttachRuntimeFilters, LeftOuterFiltersOnlyNullableRightInput) {
 TEST(AttachRuntimeFilters, LeftOuterCrossesAggregateOnGroupKeys) {
     auto join = JoinOfType(EJoinType::Left);
     ASSERT_TRUE(join);
-    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto* j = static_cast<TJoinOperator*>(join.Get());
     auto source = j->Right();
-    auto grouped = MakeAggregate(source, {"rk"}, {{"total", "sum", "rv"}});
+    auto grouped = MakeAggregate(TestTypes(), source, {"rk"}, {{"total", "sum", "rv"}});
     ASSERT_TRUE(grouped.has_value());
     j->MutableRight() = *grouped;
     j->Left()->Stats_ = RowsWithKeyNdv(100'000, "lk", 10'000);
@@ -601,7 +599,7 @@ TEST(AttachRuntimeFilters, LeftOuterCrossesAggregateOnGroupKeys) {
     ASSERT_EQ(source->RuntimeFilterUses.size(), 1u);
     EXPECT_TRUE((*grouped)->RuntimeFilterUses.empty());
 
-    auto aggregate = std::static_pointer_cast<TAggregateOperator>(*grouped);
+    auto aggregate = NQumir::StaticPointerCast<TAggregateOperator>(*grouped);
     aggregate->MutableGroupingSets() = {{0}};
     ASSERT_TRUE(AttachTo(join));
     EXPECT_TRUE(source->RuntimeFilterUses.empty());
@@ -610,30 +608,30 @@ TEST(AttachRuntimeFilters, LeftOuterCrossesAggregateOnGroupKeys) {
 
 struct TLeftJoinChain {
     TOperatorPtr Outer;
-    std::shared_ptr<TJoinOperator> First;
+    NQumir::TIntrusivePtr<TJoinOperator> First;
     TOperatorPtr Third;
 };
 
 TLeftJoinChain MakeLeftJoinChain() {
-    auto left = std::make_shared<TFakeSource>(
+    auto left = NQumir::MakeIntrusive<TFakeSource>(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"lk", I64Type()}, {"lv", I64Type()}});
-    auto middle = std::make_shared<TFakeSource>(
+    auto middle = NQumir::MakeIntrusive<TFakeSource>(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"rk", I64Type()}, {"rv", I64Type()}});
-    auto third = std::make_shared<TFakeSource>(
+    auto third = NQumir::MakeIntrusive<TFakeSource>(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"ck", I64Type()}, {"cv", I64Type()}});
-    auto first = MakeJoin(left, middle, {{"lk", "rk"}}, EJoinType::Left);
+    auto first = MakeJoin(TestTypes(), left, middle, {{"lk", "rk"}}, EJoinType::Left);
     EXPECT_TRUE(first.has_value());
-    auto outer = MakeJoin(*first, third, {{"lk", "ck"}}, EJoinType::Left);
+    auto outer = MakeJoin(TestTypes(), *first, third, {{"lk", "ck"}}, EJoinType::Left);
     EXPECT_TRUE(outer.has_value());
     left->Stats_ = RowsWithKeyNdv(100'000, "lk", 10'000);
     middle->Stats_ = RowsWithKeyNdv(1'000'000, "rk", 1'000'000);
     (*first)->Stats_ = RowsWithKeyNdv(10'000'000, "lk", 10'000);
     third->Stats_ = RowsWithKeyNdv(1'000'000, "ck", 1'000'000);
     return {.Outer = *outer,
-        .First = std::static_pointer_cast<TJoinOperator>(*first),
+        .First = NQumir::StaticPointerCast<TJoinOperator>(*first),
         .Third = third};
 }
 
@@ -661,7 +659,7 @@ TEST(AttachRuntimeFilters, ReusesPreservedLeftKeyAcrossLeftJoins) {
 TEST(AttachRuntimeFilters, ReuseFollowsOnlyDirectKeyAliases) {
     for (const auto& expression : {"lk", "(+ lk 0)"}) {
         auto chain = MakeLeftJoinChain();
-        auto projected = MakeProject(chain.First,
+        auto projected = MakeProject(TestTypes(), chain.First,
             {{"mapped", expression}, {"lv", "lv"}});
         ASSERT_TRUE(projected.has_value());
         (*projected)->Stats_ = RowsWithKeyNdv(10'000'000, "mapped", 10'000);
@@ -707,19 +705,19 @@ TEST(AttachRuntimeFilters, PrefersExistingFilterToBuildingTheSameKeysAgain) {
 }
 
 TEST(AttachRuntimeFilters, ReuseMapsCompositeKeysInProducerOrder) {
-    auto left = std::make_shared<TFakeSource>(
+    auto left = NQumir::MakeIntrusive<TFakeSource>(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"a", I64Type()}, {"b", I64Type()}});
-    auto middle = std::make_shared<TFakeSource>(
+    auto middle = NQumir::MakeIntrusive<TFakeSource>(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"x", I64Type()}, {"y", I64Type()}});
-    auto third = std::make_shared<TFakeSource>(
+    auto third = NQumir::MakeIntrusive<TFakeSource>(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"u", I64Type()}, {"v", I64Type()}});
-    auto first = MakeJoin(left, middle,
+    auto first = MakeJoin(TestTypes(), left, middle,
         {{"a", "x"}, {"b", "y"}}, EJoinType::Left);
     ASSERT_TRUE(first.has_value());
-    auto outer = MakeJoin(*first, third,
+    auto outer = MakeJoin(TestTypes(), *first, third,
         {{"b", "v"}, {"a", "u"}}, EJoinType::Left);
     ASSERT_TRUE(outer.has_value());
     auto stats = [](uint64_t rows, const std::string& one,
@@ -744,20 +742,20 @@ TEST(AttachRuntimeFilters, ReuseMapsCompositeKeysInProducerOrder) {
 TEST(AttachRuntimeFilters, RejectsUnsafeManualOuterDirection) {
     auto join = JoinOfType(EJoinType::Left);
     ASSERT_TRUE(join);
-    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto* j = static_cast<TJoinOperator*>(join.Get());
     j->MutableRuntimeFilter() = TRuntimeFilterSpec{
         .Id = 7, .BuildSide = EJoinFilterSide::Right};
     EXPECT_THROW(PlaceRuntimeFilterConsumers(join), std::runtime_error);
 }
 
 TEST(AttachRuntimeFilters, RejectsResidualSemiManualFilter) {
-    auto left = std::make_shared<TFakeSource>(
+    auto left = NQumir::MakeIntrusive<TFakeSource>(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"lk", I64Type()}, {"lv", I64Type()}});
-    auto right = std::make_shared<TFakeSource>(
+    auto right = NQumir::MakeIntrusive<TFakeSource>(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"rk", I64Type()}, {"rv", I64Type()}});
-    auto join = MakeJoin(left, right, {{"lk", "rk"}},
+    auto join = MakeJoin(TestTypes(), left, right, {{"lk", "rk"}},
         EJoinType::LeftSemi, "(> rv 0)");
     ASSERT_TRUE(join.has_value());
     static_cast<TJoinOperator&>(**join).MutableRuntimeFilter() =
@@ -790,7 +788,7 @@ TEST(AttachRuntimeFilters, ClearsOrphanConsumerBindings) {
 TEST(AttachRuntimeFilters, SkipsUncappedUnknownAndUnsupportedJoins) {
     auto inner = JoinOfType(EJoinType::Inner);
     ASSERT_TRUE(inner);
-    auto* j = static_cast<TJoinOperator*>(inner.get());
+    auto* j = static_cast<TJoinOperator*>(inner.Get());
 
     j->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 40000);
     j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 40000);
@@ -811,7 +809,7 @@ TEST(AttachRuntimeFilters, SkipsUncappedUnknownAndUnsupportedJoins) {
     for (auto type : {EJoinType::LeftAnti, EJoinType::Left, EJoinType::Full}) {
         auto join = JoinOfType(type);
         ASSERT_TRUE(join) << JoinTypeName(type);
-        auto* other = static_cast<TJoinOperator*>(join.get());
+        auto* other = static_cast<TJoinOperator*>(join.Get());
         other->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 40000);
         other->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 100);
         EXPECT_FALSE(AttachTo(join).has_value()) << JoinTypeName(type);
@@ -821,12 +819,12 @@ TEST(AttachRuntimeFilters, SkipsUncappedUnknownAndUnsupportedJoins) {
 TEST(AttachRuntimeFilters, AdmitsLargeFilteredBuilds) {
     auto join = JoinOfType(EJoinType::Inner);
     ASSERT_TRUE(join);
-    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto* j = static_cast<TJoinOperator*>(join.Get());
     j->Left()->Stats_ = RowsWithKeyNdv(80000000, "lk", 80000000);
     j->Right()->Stats_ = RowsWithKeyNdv(30000000, "rk", 30000000);
     EXPECT_FALSE(AttachTo(join).has_value());
 
-    auto filtered = MakeFilter(j->Right(), "(> rk 0)");
+    auto filtered = MakeFilter(TestTypes(), j->Right(), "(> rk 0)");
     ASSERT_TRUE(filtered.has_value());
     j->MutableRight() = *filtered;
     j->Right()->Stats_ = RowsWithKeyNdv(30000000, "rk", 30000000);
@@ -847,9 +845,9 @@ TEST(AttachRuntimeFilters, AdmitsLargeFilteredBuilds) {
 TEST(AttachRuntimeFilters, FilteredBuildCanCompensateForUnknownNdv) {
     auto join = JoinOfType(EJoinType::LeftSemi);
     ASSERT_TRUE(join);
-    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto* j = static_cast<TJoinOperator*>(join.Get());
     j->Left()->Stats_ = Rows(150000000);
-    auto filtered = MakeFilter(j->Right(), "(> rk 0)");
+    auto filtered = MakeFilter(TestTypes(), j->Right(), "(> rk 0)");
     ASSERT_TRUE(filtered.has_value());
     j->MutableRight() = *filtered;
     j->Right()->Stats_ = Rows(75000000);
@@ -861,7 +859,7 @@ TEST(AttachRuntimeFilters, FilteredBuildCanCompensateForUnknownNdv) {
 TEST(AttachRuntimeFilters, SemiPublishesOnlyFromTheRight) {
     auto join = JoinOfType(EJoinType::LeftSemi);
     ASSERT_TRUE(join);
-    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto* j = static_cast<TJoinOperator*>(join.Get());
 
     j->Left()->Stats_ = RowsWithKeyNdv(400000, "lk", 400000);
     j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 10000);
@@ -875,10 +873,10 @@ TEST(AttachRuntimeFilters, SemiPublishesOnlyFromTheRight) {
 
     j->Left()->Stats_ = RowsWithKeyNdv(400000, "lk", 400000);
     j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 10000);
-    j->MutableFilter() = std::make_shared<TBinaryExpr>(
+    j->MutableFilter() = NQumir::MakeIntrusive<TBinaryExpr>(
         NQumir::TLocation{}, TOperator("!="),
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
+        NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "lv"),
+        NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "rv"));
     EXPECT_FALSE(AttachTo(join).has_value());
 }
 
@@ -887,8 +885,8 @@ TEST(AttachRuntimeFilters, IdsComeFromTheCallersAllocator) {
     auto second = JoinOfType(EJoinType::Inner);
     ASSERT_TRUE(first);
     ASSERT_TRUE(second);
-    for (auto* j : {static_cast<TJoinOperator*>(first.get()),
-                    static_cast<TJoinOperator*>(second.get())}) {
+    for (auto* j : {static_cast<TJoinOperator*>(first.Get()),
+                    static_cast<TJoinOperator*>(second.Get())}) {
         j->Left()->Stats_ = RowsWithKeyNdv(400000, "lk", 400000);
         j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 10000);
     }
@@ -896,8 +894,8 @@ TEST(AttachRuntimeFilters, IdsComeFromTheCallersAllocator) {
     uint32_t nextId = 1;
     AttachRuntimeFilters(first, nextId);
     AttachRuntimeFilters(second, nextId);
-    EXPECT_EQ(static_cast<TJoinOperator*>(first.get())->RuntimeFilter()->Id, 1u);
-    EXPECT_EQ(static_cast<TJoinOperator*>(second.get())->RuntimeFilter()->Id, 2u);
+    EXPECT_EQ(static_cast<TJoinOperator*>(first.Get())->RuntimeFilter()->Id, 1u);
+    EXPECT_EQ(static_cast<TJoinOperator*>(second.Get())->RuntimeFilter()->Id, 2u);
 }
 
 class SemiAntiOrientation : public testing::TestWithParam<EJoinType> {};
@@ -960,15 +958,15 @@ TEST_P(SemiAntiOrientation, LeftBuildMarksOnlyPairsTheResidualAccepts) {
         KeyValBatch(rk1.data(), rv1.data(), 3, rcols1),
     };
 
-    auto residual = std::make_shared<TBinaryExpr>(
+    auto residual = NQumir::MakeIntrusive<TBinaryExpr>(
         NQumir::TLocation{}, "!="_op,
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
-    auto spec = NKernel::BuildJoinKernelSpec(
-        static_cast<TStructType&>(*leftType),
-        static_cast<TStructType&>(*rightType),
+        NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "lv"),
+        NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "rv"));
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(),
+        static_cast<const TStructType&>(*leftType),
+        static_cast<const TStructType&>(*rightType),
         {{"lk", "rk"}}, type, residual);
-    TKernelCompiler compiler;
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
     TInnerJoinProcessor processor(compiler.CompileJoin(spec), type, EJoinBuildSide::Left);
 
     auto fetch = [](std::deque<TRowSet>& batches) {
@@ -1016,7 +1014,7 @@ TEST(ChooseJoinBuildSide, SemiAntiBuildsTheSmallerSide) {
         SCOPED_TRACE(JoinTypeName(type));
         auto join = JoinOfType(type);
         ASSERT_TRUE(join);
-        auto* j = static_cast<TJoinOperator*>(join.get());
+        auto* j = static_cast<TJoinOperator*>(join.Get());
 
         j->Left()->Stats_ = Rows(big);
         j->Right()->Stats_ = Rows(small);
@@ -1042,15 +1040,15 @@ TEST(ChooseJoinBuildSide, SemiAntiWithResidualBuildsLeft) {
         SCOPED_TRACE(JoinTypeName(type));
         auto join = JoinOfType(type);
         ASSERT_TRUE(join);
-        auto* j = static_cast<TJoinOperator*>(join.get());
+        auto* j = static_cast<TJoinOperator*>(join.Get());
         j->Left()->Stats_ = Rows(1000000);
         j->Right()->Stats_ = Rows(1);
         ASSERT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Right);
 
-        j->MutableFilter() = std::make_shared<TBinaryExpr>(
+        j->MutableFilter() = NQumir::MakeIntrusive<TBinaryExpr>(
             NQumir::TLocation{}, "!="_op,
-            std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
-            std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
+            NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "lv"),
+            NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "rv"));
         EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Left);
         j->Left()->Stats_ = nullptr;
         EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Left);
@@ -1065,7 +1063,7 @@ TEST(ChooseJoinBuildSide, PicksSmallerSideWhenRatioMet) {
 
     auto join = InnerJoin();
     ASSERT_TRUE(join);
-    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto* j = static_cast<TJoinOperator*>(join.Get());
 
     j->Left()->Stats_ = Rows(big);
     j->Right()->Stats_ = Rows(small);
@@ -1084,7 +1082,7 @@ TEST(ChooseJoinBuildSide, OuterBuildsTheSmallerSide) {
         SCOPED_TRACE(JoinTypeName(type));
         auto join = JoinOfType(type);
         ASSERT_TRUE(join);
-        auto* j = static_cast<TJoinOperator*>(join.get());
+        auto* j = static_cast<TJoinOperator*>(join.Get());
         const bool isLeft = type == EJoinType::Left;
         const auto& preserved = isLeft ? j->Left() : j->Right();
         const auto& other = isLeft ? j->Right() : j->Left();
@@ -1107,7 +1105,7 @@ TEST(ChooseJoinBuildSide, OuterBuildsTheSmallerSide) {
 
     auto full = JoinOfType(EJoinType::Full);
     ASSERT_TRUE(full);
-    auto* f = static_cast<TJoinOperator*>(full.get());
+    auto* f = static_cast<TJoinOperator*>(full.Get());
     f->Left()->Stats_ = Rows(1);
     f->Right()->Stats_ = Rows(1000);
     EXPECT_EQ(ChooseJoinBuildSide(*f, LegacyTable), EJoinBuildSide::Auto);
@@ -1121,17 +1119,17 @@ TEST(ChooseJoinBuildSide, OuterWithResidualBuildsThePreservedSide) {
         SCOPED_TRACE(JoinTypeName(type));
         auto join = JoinOfType(type);
         ASSERT_TRUE(join);
-        auto* j = static_cast<TJoinOperator*>(join.get());
+        auto* j = static_cast<TJoinOperator*>(join.Get());
         const bool isLeft = type == EJoinType::Left;
         (isLeft ? j->Left() : j->Right())->Stats_ = Rows(1000);
         (isLeft ? j->Right() : j->Left())->Stats_ = Rows(10);
         ASSERT_EQ(ChooseJoinBuildSide(*j, LegacyTable),
             isLeft ? EJoinBuildSide::Right : EJoinBuildSide::Left);
 
-        j->MutableFilter() = std::make_shared<TBinaryExpr>(
+        j->MutableFilter() = NQumir::MakeIntrusive<TBinaryExpr>(
             NQumir::TLocation{}, "<"_op,
-            std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
-            std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
+            NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "lv"),
+            NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "rv"));
         EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable),
             isLeft ? EJoinBuildSide::Left : EJoinBuildSide::Right);
 
@@ -1147,7 +1145,7 @@ TEST(ChooseJoinBuildSide, OuterWithResidualBuildsThePreservedSide) {
 TEST(ChooseJoinBuildSide, OuterWithRuntimeFilterBuildsItsProducerSide) {
     auto join = JoinOfType(EJoinType::Left);
     ASSERT_TRUE(join);
-    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto* j = static_cast<TJoinOperator*>(join.Get());
     j->Left()->Stats_ = Rows(1000);
     j->Right()->Stats_ = Rows(10);
     ASSERT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Right);
@@ -1160,7 +1158,7 @@ TEST(ChooseJoinBuildSide, OuterWithRuntimeFilterBuildsItsProducerSide) {
 TEST(ChooseJoinBuildSide, AutoWhenBalancedOrStatsMissing) {
     auto join = InnerJoin();
     ASSERT_TRUE(join);
-    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto* j = static_cast<TJoinOperator*>(join.Get());
 
     // Equal sizes: ratio (>1) is never met.
     j->Left()->Stats_ = Rows(1000);
@@ -1179,7 +1177,7 @@ TEST(ChooseJoinBuildSide, RowTableBuildsTheSmallerSideAtAnyRatio) {
     const auto row = NScheduler::EJoinTableKind::Row;
     auto join = InnerJoin();
     ASSERT_TRUE(join);
-    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto* j = static_cast<TJoinOperator*>(join.Get());
 
     j->Left()->Stats_ = Rows(1200);
     j->Right()->Stats_ = Rows(1000);
@@ -1197,10 +1195,10 @@ TEST(ChooseJoinBuildSide, RowTableBuildsTheSmallerSideAtAnyRatio) {
     EXPECT_EQ(ChooseJoinBuildSide(*j, row), EJoinBuildSide::Auto);
 
     j->Right()->Stats_ = Rows(1200);
-    j->MutableFilter() = std::make_shared<TBinaryExpr>(
+    j->MutableFilter() = NQumir::MakeIntrusive<TBinaryExpr>(
         NQumir::TLocation{}, "<"_op,
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
+        NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "lv"),
+        NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "rv"));
     EXPECT_EQ(ChooseJoinBuildSide(*j, row), EJoinBuildSide::Auto);
 }
 
@@ -1299,9 +1297,9 @@ private:
 class OuterStreamJoin : public testing::Test {
 protected:
     TJoinKernels Compile(EJoinType type, const TExprPtr& residual = nullptr) {
-        auto spec = NKernel::BuildJoinKernelSpec(
-            static_cast<TStructType&>(*LeftType_),
-            static_cast<TStructType&>(*RightType_),
+        auto spec = NKernel::BuildJoinKernelSpec(TestTypes(),
+            static_cast<const TStructType&>(*LeftType_),
+            static_cast<const TStructType&>(*RightType_),
             {{"lk", "rk", false}}, type, residual);
         return Compiler_.CompileJoin(spec);
     }
@@ -1358,9 +1356,9 @@ protected:
     std::vector<TOuterRow> RunRowTable(
         EJoinType type, const TSideRows& leftRows, const TSideRows& rightRows)
     {
-        auto spec = NKernel::BuildJoinKernelSpec(
-            static_cast<TStructType&>(*LeftType_),
-            static_cast<TStructType&>(*RightType_),
+        auto spec = NKernel::BuildJoinKernelSpec(TestTypes(),
+            static_cast<const TStructType&>(*LeftType_),
+            static_cast<const TStructType&>(*RightType_),
             {{"lk", "rk", false}}, type);
         const auto buildSide = type == EJoinType::Left
             ? EJoinBuildSide::Right
@@ -1418,13 +1416,13 @@ protected:
         return rows;
     }
 
-    TKernelCompiler Compiler_;
-    TTypePtr LeftType_ = std::make_shared<TStructType>(
+    TKernelCompiler Compiler_{{.Types = SharedTestTypes()}};
+    TTypePtr LeftType_ = TestTypes().MakeStruct(
         std::vector<std::pair<std::string, TTypePtr>>{
-            {"lk", std::make_shared<TNullable>(I64Type())}, {"lv", I64Type()}});
-    TTypePtr RightType_ = std::make_shared<TStructType>(
+            {"lk", MakeNullableType(TestTypes(), I64Type())}, {"lv", I64Type()}});
+    TTypePtr RightType_ = TestTypes().MakeStruct(
         std::vector<std::pair<std::string, TTypePtr>>{
-            {"rk", std::make_shared<TNullable>(I64Type())}, {"rv", I64Type()}});
+            {"rk", MakeNullableType(TestTypes(), I64Type())}, {"rv", I64Type()}});
 };
 
 } // namespace
@@ -1568,10 +1566,10 @@ TEST_F(OuterStreamJoin, FullResidualMarksBothSidesInAnyArrivalOrder) {
         {{1, 10}, {1, 30}, {2, 20}}, {{3, 40}, {std::nullopt, 50}, {1, 5}}};
     const TSideRows rightRows = {
         {{1, 15}, {1, 5}}, {{2, 25}, {std::nullopt, 60}, {4, 1}, {1, 3}}};
-    const auto residual = std::make_shared<TBinaryExpr>(
+    const auto residual = NQumir::MakeIntrusive<TBinaryExpr>(
         NQumir::TLocation{}, "<"_op,
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
+        NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "lv"),
+        NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "rv"));
 
     std::vector<TOuterRow> expected;
     std::vector<bool> rightMatched;
@@ -1673,12 +1671,12 @@ TEST(OuterStreamJoinPlan, MatchesGeneralPathAcrossPartitions) {
             KeyValBatch(rk.data(), rv.data(), 200, rc0),
             KeyValBatch(rk.data() + 200, rv.data() + 200, 200, rc1),
             KeyValBatch(rk.data() + 400, rv.data() + 400, 200, rc2)});
-        auto join = std::make_shared<TJoinOperator>(
-            std::make_shared<TSourceOperator>(Borrow(left), "L"),
-            std::make_shared<TSourceOperator>(Borrow(right), "R"),
+        auto join = NQumir::MakeIntrusive<TJoinOperator>(TestTypes(),
+            NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(left), "L"),
+            NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(right), "R"),
             std::vector<TJoinKey>{{"lk", "rk"}}, type, nullptr);
         TOperatorPtr root = join;
-        AnnotateTypes(root);
+        AnnotateTypes(TestTypes(), root);
 
         const bool isLeft = type == EJoinType::Left;
         if (streaming) {

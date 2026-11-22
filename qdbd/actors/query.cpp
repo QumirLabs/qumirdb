@@ -61,8 +61,7 @@ struct TQueryState {
     // Lowered on the request, split once the compute actors are known.
     std::optional<NScheduler::TLoweredPlan> Lowered;
     NScheduler::TSealedTaskGraph Sealed;
-    // The sink keeps a reference to the schema, the schema a span of the columns.
-    std::vector<TColumnSchema> Columns;
+    // The sink keeps a reference to the schema.
     TSchema Schema;
     std::ostringstream Out;
     std::unique_ptr<TCsvSink> Sink;
@@ -168,7 +167,7 @@ struct TBaseBehavior {
     // The rows leave the graph through a remote sink to this actor.
     void Lower(const NCompiler::TPreparedQuery& query) {
         auto& lowered = State->Lowered.emplace(NScheduler::LowerPlanToGraph(
-            query.Plan, State->Settings, nullptr, query.Annotation.ExternalCatalog));
+            query.Plan, query.Types, State->Settings, nullptr, &query.Annotation));
         lowered.Graph->MarkExternal(NScheduler::AttachRemoteSink(lowered), ResultSinkId);
         std::string error;
         State->Sealed = lowered.Graph->Seal(&error);
@@ -176,9 +175,8 @@ struct TBaseBehavior {
             throw std::runtime_error(error);
         }
         for (const auto& [name, type] : static_cast<const NQumir::NAst::TStructType&>(*lowered.OutputType).Fields) {
-            State->Columns.push_back({.Name = name, .Type = type});
+            State->Schema.Columns.push_back({.Name = name, .Type = type});
         }
-        State->Schema = TSchema{State->Columns};
         State->Sink = std::make_unique<TCsvSink>(State->Schema, State->Out);
     }
 
@@ -194,7 +192,7 @@ struct TBaseBehavior {
         State->Timing.KernelBuild += Seconds(buildStart);
         const auto jitStart = TClock::now();
         const auto image = SerializeKernelImage(CompileKernelImage(
-            lowered.Kernels, State->Settings.Kernel.Backend, State->Settings.Jit.CacheDir));
+            lowered.Kernels, *lowered.Types, State->Settings.Kernel.Backend, State->Settings.Jit.CacheDir));
         State->Timing.JitLLVM = Seconds(jitStart);
         std::vector<TTaskGraphMessage> messages(fragments.size());
         for (size_t i = 0; i < fragments.size(); ++i) {

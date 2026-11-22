@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "mock_source.h"
+#include "test_types.h"
 
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/cte_ref.h>
@@ -22,19 +23,19 @@ std::string PlanningError(std::string_view sql) {
     TMockSource t({"x", "y"});
     std::istringstream in{std::string(sql)};
     NSql::TTokenStream ts(in);
-    NSql::TParser parser;
+    NSql::TParser parser(TestTypes());
     auto parsed = parser.Parse(ts);
     if (!parsed) {
         return parsed.error().ToString();
     }
-    auto plan = BuildPlan(parsed.value(), [&](std::string_view table)
+    auto plan = BuildPlan(TestTypes(), parsed.value(), [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         if (table == "t") {
-            return std::make_shared<TSourceOperator>(Borrow(t), std::string(table));
+            return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(t), std::string(table));
         }
         if (table == "opaque") {
-            return std::make_shared<TCteRef>(std::make_shared<TCteDefinition>());
+            return NQumir::MakeIntrusive<TCteRef>(types, std::make_shared<TCteDefinition>());
         }
         return std::unexpected(NQumir::TError("unknown table: " + std::string(table)));
     });

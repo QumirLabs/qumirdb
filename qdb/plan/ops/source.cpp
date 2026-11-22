@@ -12,13 +12,14 @@ namespace NQdb {
 namespace {
 
 NQumir::NAst::TTypePtr SourceOutputType(
-    const ITable& table,
+    NQumir::NAst::TTypeFactory& types,
+    const TSchema& schema,
     const std::string& alias,
     bool emitRowId)
 {
     using namespace NQumir::NAst;
     std::vector<std::pair<std::string, TTypePtr>> fields;
-    auto& columns = table.Schema().Columns;
+    const auto& columns = schema.Columns;
     fields.reserve(columns.size() + (emitRowId ? 1 : 0));
     for (const auto& col : columns) {
         auto name = std::string(col.Name);
@@ -28,42 +29,45 @@ NQumir::NAst::TTypePtr SourceOutputType(
         const std::string rowIdName(InternalRowIdColumnName);
         fields.emplace_back(
             alias.empty() ? rowIdName : alias + "." + rowIdName,
-            std::make_shared<TIntegerType>(TIntegerType::U64));
+            types.MakeInteger(TIntegerType::U64));
     }
-    return std::make_shared<TStructType>(std::move(fields));
+    return types.MakeStruct(std::move(fields));
 }
 
 } // namespace
 
-NQumir::NAst::TTypePtr StructTypeFromSchema(const TSchema& schema) {
+NQumir::NAst::TTypePtr StructTypeFromSchema(NQumir::NAst::TTypeFactory& types, const TSchema& schema) {
     std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> fields;
     fields.reserve(schema.Columns.size());
     for (const auto& col : schema.Columns) {
         fields.emplace_back(std::string(col.Name), col.Type);
     }
-    return std::make_shared<NQumir::NAst::TStructType>(std::move(fields));
+    return types.MakeStruct(std::move(fields));
 }
 
-TSourceOperator::TSourceOperator(std::shared_ptr<const ITable> table, std::string path)
+TSourceOperator::TSourceOperator(NQumir::NAst::TTypeFactory& types, std::shared_ptr<const ITable> table, std::string path)
     : Table_(std::move(table))
+    , TableSchema_(Table_->Schema(types))
     , SourcePath_(std::move(path))
 {
-    Type = std::make_shared<NQumir::NAst::TFunctionType>(
+    Type = types.MakeFunction(
         std::vector<NQumir::NAst::TTypePtr>{},
-        StructTypeFromSchema(Table_->Schema()));
+        StructTypeFromSchema(types, TableSchema_));
 }
 
-void TSourceOperator::SetAlias(std::string alias) {
+void TSourceOperator::SetAlias(NQumir::NAst::TTypeFactory& types, std::string alias) {
     Alias_ = std::move(alias);
-    if (auto* fun = static_cast<NQumir::NAst::TFunctionType*>(Type.get())) {
-        fun->ReturnType = SourceOutputType(*Table_, Alias_, EmitRowId_);
+    if (auto* fun = static_cast<const NQumir::NAst::TFunctionType*>(Type)) {
+        Type = types.MakeFunction(
+            std::vector(fun->ParamTypes), SourceOutputType(types, TableSchema_, Alias_, EmitRowId_));
     }
 }
 
-void TSourceOperator::EnableRowId() {
+void TSourceOperator::EnableRowId(NQumir::NAst::TTypeFactory& types) {
     EmitRowId_ = true;
-    if (auto* fun = static_cast<NQumir::NAst::TFunctionType*>(Type.get())) {
-        fun->ReturnType = SourceOutputType(*Table_, Alias_, true);
+    if (auto* fun = static_cast<const NQumir::NAst::TFunctionType*>(Type)) {
+        Type = types.MakeFunction(
+            std::vector(fun->ParamTypes), SourceOutputType(types, TableSchema_, Alias_, true));
     }
 }
 

@@ -10,7 +10,7 @@ class TLimitOperator : public IOperator {
 public:
     static constexpr const char* OpId = "limit";
 
-    TLimitOperator(TOperatorPtr input, int64_t limit, int64_t offset = 0);
+    TLimitOperator(NQumir::NAst::TTypeFactory& types, TOperatorPtr input, int64_t limit, int64_t offset = 0);
 
     std::string_view RelName() const override { return OpId; }
     std::vector<TColumnReference> ColumnReferences() const override { return {}; }

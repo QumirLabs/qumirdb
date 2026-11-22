@@ -56,7 +56,7 @@ class TWindowOperator : public IOperator {
 public:
     static constexpr const char* OpId = "window";
 
-    TWindowOperator(TOperatorPtr input,
+    TWindowOperator(NQumir::NAst::TTypeFactory& types, TOperatorPtr input,
         std::vector<std::string> partitionKeys,
         std::vector<TSortKey> orderKeys,
         std::optional<TWindowFrame> frame,
@@ -137,6 +137,7 @@ private:
 // from Func/Arg). Reused by the constructor and by AnnotateTypes after column
 // pruning narrows the input schema.
 NQumir::NAst::TTypePtr ComputeWindowOutputType(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TTypePtr& inputSchema,
     const std::vector<TWindowFunc>& functions);
 
@@ -149,6 +150,7 @@ inline constexpr int32_t WindowAvgExtraScale = 4;
 // nullability; any other numeric argument yields f64. Shared by the logical type
 // (WindowResultType) and the exec lowering so the schema and kernel agree.
 NQumir::NAst::TTypePtr ComputeWindowAvgResultType(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TTypePtr& argType);
 
 std::string_view WindowFrameModeName(EWindowFrameMode mode);

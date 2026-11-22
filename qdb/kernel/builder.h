@@ -26,7 +26,7 @@ public:
 private:
     std::string Name_;
     std::vector<NQumir::NAst::TParam> Params_;
-    NQumir::NAst::TTypePtr RetType_;
+    NQumir::NAst::TTypePtr RetType_ = nullptr;
     std::vector<NQumir::NAst::TExprPtr> Stmts_;
 };
 
@@ -37,11 +37,11 @@ NQumir::NAst::TExprPtr Block(std::vector<NQumir::NAst::TExprPtr> stmts);
 NQumir::NAst::TExprPtr Var(std::string name, NQumir::NAst::TTypePtr type);
 NQumir::NAst::TExprPtr Assign(std::string name, NQumir::NAst::TExprPtr value);
 
-NQumir::NAst::TExprPtr Int(int64_t v);
-NQumir::NAst::TExprPtr TypedInt(int64_t v, NQumir::NAst::TTypePtr type);
-NQumir::NAst::TExprPtr Float(double v);
-NQumir::NAst::TExprPtr Bool(bool v);
-NQumir::NAst::TExprPtr String(std::string v);
+NQumir::NAst::TExprPtr Int(NQumir::NAst::TTypeFactory& types, int64_t v);
+NQumir::NAst::TExprPtr TypedInt(NQumir::NAst::TTypeFactory& types, int64_t v, NQumir::NAst::TTypePtr type);
+NQumir::NAst::TExprPtr Float(NQumir::NAst::TTypeFactory& types, double v);
+NQumir::NAst::TExprPtr Bool(NQumir::NAst::TTypeFactory& types, bool v);
+NQumir::NAst::TExprPtr String(NQumir::NAst::TTypeFactory& types, std::string v);
 
 NQumir::NAst::TExprPtr Bin(NQumir::NAst::TOperator op, NQumir::NAst::TExprPtr l, NQumir::NAst::TExprPtr r);
 NQumir::NAst::TExprPtr Add(NQumir::NAst::TExprPtr l, NQumir::NAst::TExprPtr r);
@@ -51,7 +51,7 @@ NQumir::NAst::TExprPtr Div(NQumir::NAst::TExprPtr l, NQumir::NAst::TExprPtr r);
 
 NQumir::NAst::TExprPtr Call(std::string name, std::vector<NQumir::NAst::TExprPtr> args = {});
 NQumir::NAst::TExprPtr Cast(NQumir::NAst::TExprPtr expr, NQumir::NAst::TTypePtr type);
-NQumir::NAst::TExprPtr NullPtr(NQumir::NAst::TTypePtr type);
+NQumir::NAst::TExprPtr NullPtr(NQumir::NAst::TTypeFactory& types, NQumir::NAst::TTypePtr type);
 NQumir::NAst::TExprPtr Unary(NQumir::NAst::TOperator op, NQumir::NAst::TExprPtr value);
 NQumir::NAst::TExprPtr If(NQumir::NAst::TExprPtr cond, NQumir::NAst::TExprPtr thenBody, NQumir::NAst::TExprPtr elseBody = nullptr);
 

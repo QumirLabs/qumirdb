@@ -17,13 +17,13 @@
 namespace NQdb {
 
 struct IOperator;
-using TOperatorPtr = std::shared_ptr<IOperator>;
+using TOperatorPtr = NQumir::TIntrusivePtr<IOperator>;
 
 // A column read by an operator's own keys or expressions. Ident is the
 // expression node that names the column; a key is a plain name and has none.
 struct TColumnReference {
     std::string Name;
-    std::shared_ptr<NQumir::NAst::TIdentExpr> Ident;
+    NQumir::TIntrusivePtr<NQumir::NAst::TIdentExpr> Ident;
 };
 
 struct TRuntimeFilterUseSpec {
@@ -75,14 +75,14 @@ struct IOperator : NQumir::NAst::TExpr {
 
     // Output schema: TFunctionType::ReturnType.
     NQumir::NAst::TConcreteTypePtr<NQumir::NAst::TStructType> OutputColumns() const {
-        auto* functionType = static_cast<NQumir::NAst::TFunctionType*>(Type.get());
+        auto* functionType = static_cast<const NQumir::NAst::TFunctionType*>(Type);
         return NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(functionType->ReturnType).Cast();
     }
 
     // Required input schema: TFunctionType::ParamTypes[0].
     // Null for source (no upstream operator) and before typing pass.
     NQumir::NAst::TConcreteTypePtr<NQumir::NAst::TStructType> RequiredColumns() const {
-        auto* fun = static_cast<NQumir::NAst::TFunctionType*>(Type.get());
+        auto* fun = static_cast<const NQumir::NAst::TFunctionType*>(Type);
         return fun->ParamTypes.empty() ? nullptr : NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(fun->ParamTypes[0]).Cast();
     }
 
@@ -127,12 +127,12 @@ struct TMaybeOp {
         : Op(node
             && std::string_view(IOperator::NodeId) == node->NodeName()
             && std::string_view(T::OpId) == node->RelName()
-            ? std::static_pointer_cast<T>(std::move(node))
+            ? NQumir::StaticPointerCast<T>(std::move(node))
             : nullptr)
     {}
 
-    std::shared_ptr<T> Cast() const {
-        return std::static_pointer_cast<T>(Op);
+    NQumir::TIntrusivePtr<T> Cast() const {
+        return NQumir::StaticPointerCast<T>(Op);
     }
 
     TOperatorPtr Op;

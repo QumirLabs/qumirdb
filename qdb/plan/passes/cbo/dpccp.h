@@ -30,6 +30,7 @@ constexpr size_t MaxRelations = 12;
 // and its residual are the `residuals` that read columns of both inputs and of
 // no other relation. Residuals do not connect leaves.
 TOperatorPtr DpccpJoinOrder(
+    NQumir::NAst::TTypeFactory& types,
     const std::vector<TOperatorPtr>& leaves,
     const std::vector<TJoinEdge>& edges,
     const std::vector<NQumir::NAst::TExprPtr>& residuals,

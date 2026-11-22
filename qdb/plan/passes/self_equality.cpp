@@ -1,6 +1,7 @@
 #include <qdb/plan/passes/self_equality.h>
 
 #include <qdb/plan/ops/filter.h>
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/nullable.h>
 
 namespace NQdb {
@@ -30,7 +31,7 @@ TExprPtr Simplify(const TExprPtr& expr, const TStructType& schema) {
         if (left == binary->Left && right == binary->Right) {
             return expr;
         }
-        return std::make_shared<TBinaryExpr>(
+        return NQumir::MakeIntrusive<TBinaryExpr>(
             binary->Location, binary->Operator, std::move(left), std::move(right));
     }
     if (binary->Operator != "=="_op) {
@@ -50,18 +51,18 @@ TExprPtr Simplify(const TExprPtr& expr, const TStructType& schema) {
             continue;
         }
         // NaN != NaN, so a float column does not equal itself on every row.
-        if (TMaybeType<TFloatType>(UnwrapNamedType(UnwrapNullableType(type)))) {
+        if (TMaybeType<TFloatType>(UnwrapNamedValueType(UnwrapNullableType(type)))) {
             return expr;
         }
         if (!IsNullableType(type)) {
             return nullptr;
         }
         // NULL = NULL is unknown, which the filter drops like FALSE.
-        return std::make_shared<TUnaryExpr>(
+        return NQumir::MakeIntrusive<TUnaryExpr>(
             binary->Location, "!"_op,
-            std::make_shared<TCallExpr>(
+            NQumir::MakeIntrusive<TCallExpr>(
                 binary->Location,
-                std::make_shared<TIdentExpr>(binary->Location, "qdb_is_null"),
+                NQumir::MakeIntrusive<TIdentExpr>(binary->Location, "qdb_is_null"),
                 std::vector<TExprPtr>{binary->Left}));
     }
     return expr;

@@ -23,6 +23,8 @@
 #include <utility>
 #include <vector>
 
+#include "test_types.h"
+
 using namespace NQdb;
 using namespace NQumir::NAst;
 
@@ -31,7 +33,7 @@ namespace {
 TExprPtr Parse(const std::string& source) {
     std::istringstream input(source);
     NCore::TTokenStream tokens(input);
-    NCore::TParser parser;
+    NCore::TParser parser(TestTypes());
     auto parsed = parser.Parse(tokens);
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
@@ -39,10 +41,10 @@ TExprPtr Parse(const std::string& source) {
     return std::move(*parsed);
 }
 
-TStructType KeyValueType() {
-    return TStructType({
-        {"k", std::make_shared<TIntegerType>(TIntegerType::I64)},
-        {"v", std::make_shared<TIntegerType>(TIntegerType::I64)},
+const TStructType& KeyValueType() {
+    return *TestTypes().MakeStruct({
+        {"k", TestTypes().MakeInteger(TIntegerType::I64)},
+        {"v", TestTypes().MakeInteger(TIntegerType::I64)},
     });
 }
 
@@ -67,8 +69,8 @@ struct TKeyValueBatch {
 };
 
 std::vector<uint8_t> RunFilter(EKernelBackend backend) {
-    TKernelCompiler compiler({.Backend = backend});
-    auto dispatch = compiler.CompileFilter(NKernel::BuildFilterKernelSpec(
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Backend = backend});
+    auto dispatch = compiler.CompileFilter(NKernel::BuildFilterKernelSpec(TestTypes(),
         KeyValueType(), Parse("(&& (> v 2) (!= k 4))")));
     TKeyValueBatch batch{.Keys = {1, 2, 3, 4, 5}, .Values = {5, 1, 3, 9, 2}};
     std::vector<uint8_t> selection(batch.Keys.size());
@@ -78,12 +80,12 @@ std::vector<uint8_t> RunFilter(EKernelBackend backend) {
 }
 
 std::vector<int64_t> RunProject(EKernelBackend backend) {
-    const auto inputType = KeyValueType();
+    const auto& inputType = KeyValueType();
     std::vector<TExprPtr> exprs = {Parse("(+ (* k 10) v)")};
-    std::vector<TTypePtr> types = {NKernel::AnnotateExprType(exprs[0], inputType)};
-    TKernelCompiler compiler({.Backend = backend});
+    std::vector<TTypePtr> types = {NKernel::AnnotateExprType(TestTypes(), exprs[0], inputType)};
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Backend = backend});
     auto dispatch = compiler.CompileProject(
-        NKernel::BuildProjectKernelSpec(inputType, exprs, types));
+        NKernel::BuildProjectKernelSpec(TestTypes(), inputType, exprs, types));
     TKeyValueBatch batch{.Keys = {1, 2, 3}, .Values = {7, 8, 9}};
     auto rowSet = batch.RowSet();
     std::vector<int64_t> output(batch.Keys.size());
@@ -96,10 +98,10 @@ TAggregateKernels CompileSumByKey(EKernelBackend backend) {
     std::vector<TAggregateSpec> aggs = {{
         .Name = "s",
         .Func = "sum",
-        .Arg = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "v"),
+        .Arg = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "v"),
     }};
-    TKernelCompiler compiler({.Backend = backend});
-    return compiler.CompileAggregate(NKernel::BuildAggregateKernelSpec(KeyValueType(), {"k"}, aggs));
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Backend = backend});
+    return compiler.CompileAggregate(NKernel::BuildAggregateKernelSpec(TestTypes(), KeyValueType(), {"k"}, aggs));
 }
 
 // Update over two batches, then finish; the result keyed by group.
@@ -198,8 +200,8 @@ TEST(KernelVm, AggregateMigratesAndOutputOutlivesExecutionState) {
 
 // Workers may each run the same program; their instances are independent.
 TEST(KernelVm, ContextsShareOneProgram) {
-    TKernelCompiler compiler({.Backend = EKernelBackend::Vm});
-    auto dispatch = compiler.CompileFilter(NKernel::BuildFilterKernelSpec(
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Backend = EKernelBackend::Vm});
+    auto dispatch = compiler.CompileFilter(NKernel::BuildFilterKernelSpec(TestTypes(),
         KeyValueType(), Parse("(> v 2)")));
     TKeyValueBatch batch{.Keys = {1, 2}, .Values = {3, 1}};
     TExecutionState state(1);
@@ -221,10 +223,10 @@ TEST(KernelVm, ContextsShareOneProgram) {
 
 TEST(KernelVm, KernelProgramHasNoModuleConstructor) {
     std::vector<TGeneratedKernel> kernels;
-    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
-    compiler.CompileAggregate(NKernel::BuildAggregateKernelSpec(KeyValueType(), {"k"}, {}));
-    compiler.CompileFilter(NKernel::BuildFilterKernelSpec(KeyValueType(), Parse("(> v 2)")));
-    FinalizeKernels(kernels, EKernelBackend::Vm);
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
+    compiler.CompileAggregate(NKernel::BuildAggregateKernelSpec(TestTypes(), KeyValueType(), {"k"}, {}));
+    compiler.CompileFilter(NKernel::BuildFilterKernelSpec(TestTypes(), KeyValueType(), Parse("(> v 2)")));
+    FinalizeKernels(kernels, SharedTestTypes(), EKernelBackend::Vm);
     ASSERT_TRUE(kernels.front().Slot->Vm);
     // Kernels hold no module state, so an instance needs no constructor run.
     EXPECT_EQ(kernels.front().Slot->Vm->Module.ModuleConstructorFunctionId, -1);
@@ -234,11 +236,11 @@ TEST(KernelVm, KernelProgramHasNoModuleConstructor) {
 
 TEST(KernelVm, RefinalizingForAnotherBackendThrows) {
     std::vector<TGeneratedKernel> kernels;
-    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
-    compiler.CompileFilter(NKernel::BuildFilterKernelSpec(KeyValueType(), Parse("(> v 2)")));
-    FinalizeKernels(kernels, EKernelBackend::Vm);
-    EXPECT_NO_THROW(FinalizeKernels(kernels, EKernelBackend::Vm));
-    EXPECT_THROW(FinalizeKernels(kernels, EKernelBackend::Llvm), std::logic_error);
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
+    compiler.CompileFilter(NKernel::BuildFilterKernelSpec(TestTypes(), KeyValueType(), Parse("(> v 2)")));
+    FinalizeKernels(kernels, SharedTestTypes(), EKernelBackend::Vm);
+    EXPECT_NO_THROW(FinalizeKernels(kernels, SharedTestTypes(), EKernelBackend::Vm));
+    EXPECT_THROW(FinalizeKernels(kernels, SharedTestTypes(), EKernelBackend::Llvm), std::logic_error);
 }
 
 int main(int argc, char** argv) {

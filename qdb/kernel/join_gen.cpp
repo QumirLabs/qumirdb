@@ -4,8 +4,11 @@
 #include <qdb/kernel/builder.h>
 #include <qdb/kernel/column_value.h>
 #include <qdb/kernel/gen.h>
+#include <qdb/modules/qumirdb.h>
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
+#include <qdb/plan/types/type_text.h>
 
 #include <qumir/error.h>
 
@@ -17,12 +20,10 @@ using namespace NQumir::NAst;
 
 namespace {
 
-TTypePtr NamedType(const std::string& name) {
-    return std::make_shared<TNamedType>(name, nullptr);
-}
+using NQumir::NRegistry::QumirDbNamedType;
 
-TTypePtr ColumnPointerType(const TTypePtr& columnType, const TTypePtr& rowSetType) {
-    auto rowSetStruct = TMaybeType<TStructType>(UnwrapNamedType(rowSetType));
+TTypePtr ColumnPointerType(NQumir::NAst::TTypeFactory& types, const TTypePtr& columnType, const TTypePtr& rowSetType) {
+    auto rowSetStruct = TMaybeType<TStructType>(UnwrapNamedValueType(rowSetType));
     if (rowSetStruct) {
         for (const auto& [name, type] : rowSetStruct.Cast()->Fields) {
             if (name == "Columns") {
@@ -30,16 +31,16 @@ TTypePtr ColumnPointerType(const TTypePtr& columnType, const TTypePtr& rowSetTyp
             }
         }
     }
-    return std::make_shared<TPointerType>(columnType ? columnType : NamedType("TColumn"));
+    return types.MakePointer(columnType ? columnType : QumirDbNamedType(types, "TColumn"));
 }
 
-TTypePtr PointerPointeeOr(const TTypePtr& pointerType, const TTypePtr& fallback) {
+TTypePtr PointerPointeeOr(NQumir::NAst::TTypeFactory& types, const TTypePtr& pointerType, const TTypePtr& fallback) {
     if (auto pointer = TMaybeType<TPointerType>(pointerType)) {
         return pointer.Cast()->PointeeType;
     }
     return fallback
         ? fallback
-        : NamedType("TColumn");
+        : QumirDbNamedType(types, "TColumn");
 }
 
 TAggregateKeyDescriptor JoinKeyAggregateShim(const TJoinKeyDescriptor& key) {
@@ -83,6 +84,7 @@ struct TKeyReadAst {
 
 template <typename TKeyDescriptor>
 TKeyReadAst GenKeyReadAst(
+    NQumir::NAst::TTypeFactory& types,
     const TKeyDescriptor& key,
     const std::string& rowVar,
     const std::string& temporaryPrefix,
@@ -93,10 +95,10 @@ TKeyReadAst GenKeyReadAst(
     keyFields.reserve(key.Fields.size());
     for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
         auto logicalType = key.Fields[fieldIndex].IsNullable
-            ? std::make_shared<TNullable>(key.Fields[fieldIndex].Type)
+            ? MakeNullableType(types, key.Fields[fieldIndex].Type)
             : key.Fields[fieldIndex].Type;
         keyFields.push_back(BuildColumnValueAst(
-            "key_column_" + std::to_string(fieldIndex),
+            types, "key_column_" + std::to_string(fieldIndex),
             rowVar,
             temporaryPrefix + std::to_string(fieldIndex),
             std::move(logicalType),
@@ -104,7 +106,7 @@ TKeyReadAst GenKeyReadAst(
     }
     auto namedKey = TMaybeType<TNamedType>(key.LookupType);
     auto keyStruct = namedKey
-        ? TMaybeType<TStructType>(namedKey.Cast()->UnderlyingType)
+        ? TMaybeType<TStructType>(namedKey.Cast()->UnderlyingType())
         : TMaybeType<TStructType>(key.LookupType);
     if (!keyStruct) {
         throw NQumir::TError("join key must be a struct");
@@ -128,7 +130,7 @@ TKeyReadAst GenKeyReadAst(
             std::make_move_iterator(keyField.Setup.end()));
     }
     result.Value =
-        std::make_shared<TStructConstructExpr>(loc, key.LookupType, std::move(structFields));
+        NQumir::MakeIntrusive<TStructConstructExpr>(loc, key.LookupType, std::move(structFields));
     return result;
 }
 
@@ -138,12 +140,12 @@ std::vector<NQumir::NAst::TExprPtr> GenKeyTypeDecls(const TAggregateKeyDescripto
     NQumir::TLocation loc{};
     std::vector<NQumir::NAst::TExprPtr> stmts;
     if (!key.LookupTypeName.empty()) {
-        stmts.push_back(std::make_shared<TTypeDeclStmt>(loc, key.LookupType));
+        stmts.push_back(NQumir::MakeIntrusive<TTypeDeclStmt>(loc, key.LookupType));
     }
     if (!key.StoredTypeName.empty()) {
-        stmts.push_back(std::make_shared<TTypeDeclStmt>(loc, key.StoredType));
+        stmts.push_back(NQumir::MakeIntrusive<TTypeDeclStmt>(loc, key.StoredType));
     } else if (TMaybeType<TNamedType>(key.KeyType)) {
-        stmts.push_back(std::make_shared<TTypeDeclStmt>(loc, key.KeyType));
+        stmts.push_back(NQumir::MakeIntrusive<TTypeDeclStmt>(loc, key.KeyType));
     }
     return stmts;
 }
@@ -152,13 +154,13 @@ std::vector<NQumir::NAst::TExprPtr> GenJoinKeyTypeDecls(const TJoinKeyDescriptor
     return GenKeyTypeDecls(JoinKeyAggregateShim(key));
 }
 
-std::vector<NQumir::NAst::TExprPtr> GenJoinKeyOpsFunDecls(const TJoinKeyDescriptor& key) {
-    auto functions = GenKeyOperationFunDecls(JoinKeyAggregateShim(key));
+std::vector<NQumir::NAst::TExprPtr> GenJoinKeyOpsFunDecls(NQumir::NAst::TTypeFactory& types, const TJoinKeyDescriptor& key) {
+    auto functions = GenKeyOperationFunDecls(types, JoinKeyAggregateShim(key));
     auto addValidity = [&](const TTypePtr& type) {
         namespace Oz = NOz;
         // Hash table equality groups NULL keys together. Reject NULL components
         // for ordinary equality, while allowing NULL-equal keys for set membership.
-        TExprPtr valid = Oz::Bool(true);
+        TExprPtr valid = Oz::Bool(types, true);
         for (size_t i = 0; i < key.Fields.size(); ++i) {
             if (key.Fields[i].IsNullable && !key.Fields[i].NullsEqual) {
                 valid = Oz::Bin(
@@ -169,7 +171,7 @@ std::vector<NQumir::NAst::TExprPtr> GenJoinKeyOpsFunDecls(const TJoinKeyDescript
         }
         Oz::TFunBuilder builder("jt_key_valid");
         builder.Param("key", type)
-            .Return(std::make_shared<TBoolType>())
+            .Return(types.Make<TBoolType>())
             .Stmt(Oz::Return(std::move(valid)));
         functions.push_back(std::move(builder).Build());
     };
@@ -180,11 +182,12 @@ std::vector<NQumir::NAst::TExprPtr> GenJoinKeyOpsFunDecls(const TJoinKeyDescript
     return functions;
 }
 
-std::vector<NQumir::NAst::TExprPtr> GenJoinKeyOwnershipFunDecls(const TJoinKeyDescriptor& key) {
-    return GenKeyOwnershipFunDecls(JoinKeyAggregateShim(key));
+std::vector<NQumir::NAst::TExprPtr> GenJoinKeyOwnershipFunDecls(NQumir::NAst::TTypeFactory& types, const TJoinKeyDescriptor& key) {
+    return GenKeyOwnershipFunDecls(types, JoinKeyAggregateShim(key));
 }
 
 NQumir::NAst::TExprPtr GenJoinInsertKeyOnlyAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     const std::string& funcName,
     NQumir::NAst::TTypePtr columnType,
@@ -195,17 +198,17 @@ NQumir::NAst::TExprPtr GenJoinInsertKeyOnlyAst(
 {
     NQumir::TLocation loc{};
 
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
-    auto boolType = std::make_shared<TBoolType>();
-    auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
-    auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
+    auto i64Type = types.MakeInteger();
+    auto u8Type = types.MakeInteger(TIntegerType::U8);
+    auto boolType = types.Make<TBoolType>();
+    auto ptrU8Type = types.MakePointer(u8Type);
+    auto ptrI64Type = types.MakePointer(i64Type);
 
     auto ident = [&](const std::string& name) -> TExprPtr {
-        return std::make_shared<TIdentExpr>(loc, name);
+        return NQumir::MakeIntrusive<TIdentExpr>(loc, name);
     };
     auto number = [&](int64_t value, TTypePtr type) -> TExprPtr {
-        auto result = std::make_shared<TNumberExpr>(loc, value);
+        auto result = NQumir::MakeIntrusive<TNumberExpr>(loc, value, types);
         result->Type = std::move(type);
         return result;
     };
@@ -213,49 +216,49 @@ NQumir::NAst::TExprPtr GenJoinInsertKeyOnlyAst(
         return number(value, i64Type);
     };
     auto binary = [&](const char* op, TExprPtr left, TExprPtr right) -> TExprPtr {
-        return std::make_shared<TBinaryExpr>(loc, TOperator(op), std::move(left), std::move(right));
+        return NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator(op), std::move(left), std::move(right));
     };
     auto call = [&](const std::string& name, std::vector<TExprPtr> args) -> TExprPtr {
-        return std::make_shared<TCallExpr>(loc, ident(name), std::move(args));
+        return NQumir::MakeIntrusive<TCallExpr>(loc, ident(name), std::move(args));
     };
     auto cast = [&](TExprPtr expr, TTypePtr type) -> TExprPtr {
-        return std::make_shared<TCastExpr>(loc, std::move(expr), std::move(type));
+        return NQumir::MakeIntrusive<TCastExpr>(loc, std::move(expr), std::move(type));
     };
     auto assign = [&](const std::string& name, TExprPtr value) -> TExprPtr {
-        return std::make_shared<TAssignExpr>(loc, name, std::move(value));
+        return NQumir::MakeIntrusive<TAssignExpr>(loc, name, std::move(value));
     };
     auto var = [&](const std::string& name, TTypePtr type) -> TExprPtr {
-        return std::make_shared<TVarStmt>(loc, name, std::move(type));
+        return NQumir::MakeIntrusive<TVarStmt>(loc, name, std::move(type));
     };
     auto block = [&](std::vector<TExprPtr> stmts) -> TExprPtr {
-        return std::make_shared<TBlockExpr>(loc, std::move(stmts));
+        return NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(stmts));
     };
     auto field = [&](const std::string& object, const std::string& name) -> TExprPtr {
-        return std::make_shared<TFieldAccessExpr>(loc, ident(object), name);
+        return NQumir::MakeIntrusive<TFieldAccessExpr>(loc, ident(object), name);
     };
 
-    auto hashTableRefType = std::make_shared<TReferenceType>(AsNamed("HashTable", hashTableType));
-    auto rowSetRefType = std::make_shared<TReferenceType>(AsNamed("TRowSet", rowSetType));
+    auto hashTableRefType = types.MakeReference(AsNamed(types, "HashTable", hashTableType));
+    auto rowSetRefType = types.MakeReference(AsNamed(types, "TRowSet", rowSetType));
     auto pairBufferRefType =
-        std::make_shared<TReferenceType>(AsNamed("PairBuffer", pairBufferType));
+        types.MakeReference(AsNamed(types, "PairBuffer", pairBufferType));
 
     // Same ABI prefix as GenJoinProcessAst.
     std::vector<TParam> params = {
-        std::make_shared<TVarStmt>(loc, "own", hashTableRefType),
-        std::make_shared<TVarStmt>(loc, "opp", hashTableRefType),
-        std::make_shared<TVarStmt>(loc, "batch", rowSetRefType),
-        std::make_shared<TVarStmt>(loc, "key_columns", ptrI64Type),
-        std::make_shared<TVarStmt>(loc, "batch_idx", i64Type),
-        std::make_shared<TVarStmt>(loc, "pairs", pairBufferRefType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "own", hashTableRefType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "opp", hashTableRefType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "batch", rowSetRefType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "key_columns", ptrI64Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "batch_idx", i64Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "pairs", pairBufferRefType),
     };
 
-    auto ptrColumnType = ColumnPointerType(columnType, rowSetType);
-    auto columnValueType = PointerPointeeOr(ptrColumnType, columnType);
+    auto ptrColumnType = ColumnPointerType(types, columnType, rowSetType);
+    auto columnValueType = PointerPointeeOr(types, ptrColumnType, columnType);
     auto columnAt = [&](size_t fieldIndex) -> TExprPtr {
-        return std::make_shared<TIndexExpr>(
+        return NQumir::MakeIntrusive<TIndexExpr>(
             loc,
             ident("cols"),
-            std::make_shared<TIndexExpr>(
+            NQumir::MakeIntrusive<TIndexExpr>(
                 loc,
                 ident("key_columns"),
                 numI64(static_cast<int64_t>(fieldIndex))));
@@ -279,12 +282,12 @@ NQumir::NAst::TExprPtr GenJoinInsertKeyOnlyAst(
     body.push_back(var("i", i64Type));
     body.push_back(assign("i", numI64(0)));
 
-    auto keyRead = GenKeyReadAst(key, "i", "key_value_", stringViewType);
+    auto keyRead = GenKeyReadAst(types, key, "i", "key_value_", stringViewType);
 
     body.push_back(var("stored_witness", key.StoredType));
-    body.push_back(assign("stored_witness", ZeroValueExpr(key.StoredType)));
+    body.push_back(assign("stored_witness", ZeroValueExpr(types, key.StoredType)));
 
-    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
+    auto u64Type = types.MakeInteger(TIntegerType::U64);
     auto insertCall = call(
         "jt_insert_slot_only",
         {
@@ -302,10 +305,10 @@ NQumir::NAst::TExprPtr GenJoinInsertKeyOnlyAst(
     process.push_back(var("key_value", key.LookupType));
     process.push_back(assign("key_value", std::move(keyRead.Value)));
     process.push_back(
-        std::make_shared<TIfExpr>(
+        NQumir::MakeIntrusive<TIfExpr>(
             loc,
-            std::make_shared<TUnaryExpr>(loc, TOperator("!"), std::move(insertCall)),
-            block({std::make_shared<TReturnExpr>(loc, number(0, boolType))}),
+            NQumir::MakeIntrusive<TUnaryExpr>(loc, TOperator("!"), std::move(insertCall)),
+            block({NQumir::MakeIntrusive<TReturnExpr>(loc, number(0, boolType))}),
             nullptr));
 
     auto selected = binary(
@@ -313,29 +316,30 @@ NQumir::NAst::TExprPtr GenJoinInsertKeyOnlyAst(
         ident("selection_is_null"),
         binary(
             "!=",
-            std::make_shared<TIndexExpr>(loc, ident("selection"), ident("i")),
+            NQumir::MakeIntrusive<TIndexExpr>(loc, ident("selection"), ident("i")),
             number(0, u8Type)));
     auto loop = block({
-        std::make_shared<TIfExpr>(loc, std::move(selected), block(std::move(process)), nullptr),
+        NQumir::MakeIntrusive<TIfExpr>(loc, std::move(selected), block(std::move(process)), nullptr),
         assign("i", binary("+", ident("i"), numI64(1))),
     });
     body.push_back(
-        std::make_shared<TWhileStmtExpr>(
+        NQumir::MakeIntrusive<TWhileStmtExpr>(
             loc,
             binary("<", ident("i"), ident("n")),
             std::move(loop)));
-    body.push_back(std::make_shared<TReturnExpr>(loc, number(1, boolType)));
+    body.push_back(NQumir::MakeIntrusive<TReturnExpr>(loc, number(1, boolType)));
 
-    return std::make_shared<TFunDecl>(
+    return NQumir::MakeIntrusive<TFunDecl>(
         loc,
         funcName,
         std::vector<TGenericParam>{},
         std::move(params),
-        std::make_shared<TBlockExpr>(loc, std::move(body)),
+        NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(body)),
         boolType);
 }
 
 NQumir::NAst::TExprPtr GenJoinFinalizeSemiAntiAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     bool isAnti,
     const std::string& funcName,
@@ -344,15 +348,15 @@ NQumir::NAst::TExprPtr GenJoinFinalizeSemiAntiAst(
 {
     NQumir::TLocation loc{};
 
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto boolType = std::make_shared<TBoolType>();
-    auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
+    auto i64Type = types.MakeInteger();
+    auto boolType = types.Make<TBoolType>();
+    auto ptrI64Type = types.MakePointer(i64Type);
 
     auto ident = [&](const std::string& name) -> TExprPtr {
-        return std::make_shared<TIdentExpr>(loc, name);
+        return NQumir::MakeIntrusive<TIdentExpr>(loc, name);
     };
     auto number = [&](int64_t value, TTypePtr type) -> TExprPtr {
-        auto result = std::make_shared<TNumberExpr>(loc, value);
+        auto result = NQumir::MakeIntrusive<TNumberExpr>(loc, value, types);
         result->Type = std::move(type);
         return result;
     };
@@ -360,41 +364,41 @@ NQumir::NAst::TExprPtr GenJoinFinalizeSemiAntiAst(
         return number(value, i64Type);
     };
     auto binary = [&](const char* op, TExprPtr left, TExprPtr right) -> TExprPtr {
-        return std::make_shared<TBinaryExpr>(loc, TOperator(op), std::move(left), std::move(right));
+        return NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator(op), std::move(left), std::move(right));
     };
     auto call = [&](const std::string& name, std::vector<TExprPtr> args) -> TExprPtr {
-        return std::make_shared<TCallExpr>(loc, ident(name), std::move(args));
+        return NQumir::MakeIntrusive<TCallExpr>(loc, ident(name), std::move(args));
     };
     auto cast = [&](TExprPtr expr, TTypePtr type) -> TExprPtr {
-        return std::make_shared<TCastExpr>(loc, std::move(expr), std::move(type));
+        return NQumir::MakeIntrusive<TCastExpr>(loc, std::move(expr), std::move(type));
     };
     auto assign = [&](const std::string& name, TExprPtr value) -> TExprPtr {
-        return std::make_shared<TAssignExpr>(loc, name, std::move(value));
+        return NQumir::MakeIntrusive<TAssignExpr>(loc, name, std::move(value));
     };
     auto var = [&](const std::string& name, TTypePtr type) -> TExprPtr {
-        return std::make_shared<TVarStmt>(loc, name, std::move(type));
+        return NQumir::MakeIntrusive<TVarStmt>(loc, name, std::move(type));
     };
     auto block = [&](std::vector<TExprPtr> stmts) -> TExprPtr {
-        return std::make_shared<TBlockExpr>(loc, std::move(stmts));
+        return NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(stmts));
     };
     auto field = [&](const std::string& object, const std::string& name) -> TExprPtr {
-        return std::make_shared<TFieldAccessExpr>(loc, ident(object), name);
+        return NQumir::MakeIntrusive<TFieldAccessExpr>(loc, ident(object), name);
     };
     auto index = [&](TExprPtr arr, TExprPtr idx) -> TExprPtr {
-        return std::make_shared<TIndexExpr>(loc, std::move(arr), std::move(idx));
+        return NQumir::MakeIntrusive<TIndexExpr>(loc, std::move(arr), std::move(idx));
     };
 
-    auto hashTableRefType = std::make_shared<TReferenceType>(AsNamed("HashTable", hashTableType));
+    auto hashTableRefType = types.MakeReference(AsNamed(types, "HashTable", hashTableType));
     auto pairBufferRefType =
-        std::make_shared<TReferenceType>(AsNamed("PairBuffer", pairBufferType));
+        types.MakeReference(AsNamed(types, "PairBuffer", pairBufferType));
 
     // Key pointer types for GroupKeys (own) and Keys (opp)
-    auto ptrKeyType = std::make_shared<TPointerType>(key.KeyType);
+    auto ptrKeyType = types.MakePointer(key.KeyType);
 
     std::vector<TParam> params = {
-        std::make_shared<TVarStmt>(loc, "own", hashTableRefType),
-        std::make_shared<TVarStmt>(loc, "opp", hashTableRefType),
-        std::make_shared<TVarStmt>(loc, "pairs", pairBufferRefType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "own", hashTableRefType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "opp", hashTableRefType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "pairs", pairBufferRefType),
     };
 
     std::vector<TExprPtr> body;
@@ -402,7 +406,7 @@ NQumir::NAst::TExprPtr GenJoinFinalizeSemiAntiAst(
     body.push_back(var("own_gkeys", ptrKeyType));
     body.push_back(assign("own_gkeys", cast(field("own", "GroupKeys"), ptrKeyType)));
     // own_aggs = own.AggBuffers
-    auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
+    auto ptrPtrI64Type = types.MakePointer(ptrI64Type);
     body.push_back(var("own_aggs", ptrPtrI64Type));
     body.push_back(assign("own_aggs", field("own", "AggBuffers")));
     // own_counts = own_aggs[0], own_datas = own_aggs[2]
@@ -429,10 +433,10 @@ NQumir::NAst::TExprPtr GenJoinFinalizeSemiAntiAst(
                 numI64(-1),
             });
         drainBody.push_back(
-            std::make_shared<TIfExpr>(
+            NQumir::MakeIntrusive<TIfExpr>(
                 loc,
-                std::make_shared<TUnaryExpr>(loc, TOperator("!"), std::move(pushCall)),
-                block({std::make_shared<TReturnExpr>(loc, number(0, boolType))}),
+                NQumir::MakeIntrusive<TUnaryExpr>(loc, TOperator("!"), std::move(pushCall)),
+                block({NQumir::MakeIntrusive<TReturnExpr>(loc, number(0, boolType))}),
                 nullptr));
         drainBody.push_back(assign("k", binary("+", ident("k"), numI64(1))));
     }
@@ -467,8 +471,8 @@ NQumir::NAst::TExprPtr GenJoinFinalizeSemiAntiAst(
                 binary("!=", ident("opp_slot"), numI64(-1)))));
         // emit_condition: SEMI -> found; ANTI -> !found
         TExprPtr emitCond = isAnti
-            ? std::static_pointer_cast<TExpr>(
-                std::make_shared<TUnaryExpr>(loc, TOperator("!"), ident("found")))
+            ? NQumir::StaticPointerCast<TExpr>(
+                NQumir::MakeIntrusive<TUnaryExpr>(loc, TOperator("!"), ident("found")))
             : ident("found");
         // if emit_condition: drain bucket
         std::vector<TExprPtr> emitBody;
@@ -481,13 +485,13 @@ NQumir::NAst::TExprPtr GenJoinFinalizeSemiAntiAst(
             emitBody.push_back(var("k", i64Type));
             emitBody.push_back(assign("k", numI64(0)));
             emitBody.push_back(
-                std::make_shared<TWhileStmtExpr>(
+                NQumir::MakeIntrusive<TWhileStmtExpr>(
                     loc,
                     binary("<", ident("k"), ident("bcount")),
                     block(std::vector<TExprPtr>(drainBody))));
         }
         slotBody.push_back(
-            std::make_shared<TIfExpr>(
+            NQumir::MakeIntrusive<TIfExpr>(
                 loc,
                 std::move(emitCond),
                 block(std::move(emitBody)),
@@ -496,18 +500,18 @@ NQumir::NAst::TExprPtr GenJoinFinalizeSemiAntiAst(
     }
 
     body.push_back(
-        std::make_shared<TWhileStmtExpr>(
+        NQumir::MakeIntrusive<TWhileStmtExpr>(
             loc,
             binary("<", ident("slot"), field("own", "Size")),
             block(std::move(slotBody))));
-    body.push_back(std::make_shared<TReturnExpr>(loc, number(1, boolType)));
+    body.push_back(NQumir::MakeIntrusive<TReturnExpr>(loc, number(1, boolType)));
 
-    return std::make_shared<TFunDecl>(
+    return NQumir::MakeIntrusive<TFunDecl>(
         loc,
         funcName,
         std::vector<TGenericParam>{},
         std::move(params),
-        std::make_shared<TBlockExpr>(loc, std::move(body)),
+        NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(body)),
         boolType);
 }
 
@@ -523,6 +527,7 @@ enum class EJoinBatchMode {
 };
 
 NQumir::NAst::TExprPtr GenJoinBatchAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     bool isLeft,
     const std::string& funcName,
@@ -539,20 +544,20 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
 {
     NQumir::TLocation loc{};
 
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
-    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
-    auto boolType = std::make_shared<TBoolType>();
-    auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
-    auto ptrU64Type = std::make_shared<TPointerType>(u64Type);
-    auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
-    auto ptrI8Type = std::make_shared<TPointerType>(std::make_shared<TIntegerType>(TIntegerType::I8));
+    auto i64Type = types.MakeInteger();
+    auto u8Type = types.MakeInteger(TIntegerType::U8);
+    auto u64Type = types.MakeInteger(TIntegerType::U64);
+    auto boolType = types.Make<TBoolType>();
+    auto ptrU8Type = types.MakePointer(u8Type);
+    auto ptrU64Type = types.MakePointer(u64Type);
+    auto ptrI64Type = types.MakePointer(i64Type);
+    auto ptrI8Type = types.MakePointer(types.MakeInteger(TIntegerType::I8));
 
     auto ident = [&](const std::string& name) -> TExprPtr {
-        return std::make_shared<TIdentExpr>(loc, name);
+        return NQumir::MakeIntrusive<TIdentExpr>(loc, name);
     };
     auto number = [&](int64_t value, TTypePtr type) -> TExprPtr {
-        auto result = std::make_shared<TNumberExpr>(loc, value);
+        auto result = NQumir::MakeIntrusive<TNumberExpr>(loc, value, types);
         result->Type = std::move(type);
         return result;
     };
@@ -560,54 +565,54 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
         return number(value, i64Type);
     };
     auto binary = [&](const char* op, TExprPtr left, TExprPtr right) -> TExprPtr {
-        return std::make_shared<TBinaryExpr>(loc, TOperator(op), std::move(left), std::move(right));
+        return NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator(op), std::move(left), std::move(right));
     };
     auto call = [&](const std::string& name, std::vector<TExprPtr> args) -> TExprPtr {
-        return std::make_shared<TCallExpr>(loc, ident(name), std::move(args));
+        return NQumir::MakeIntrusive<TCallExpr>(loc, ident(name), std::move(args));
     };
     auto cast = [&](TExprPtr expr, TTypePtr type) -> TExprPtr {
-        return std::make_shared<TCastExpr>(loc, std::move(expr), std::move(type));
+        return NQumir::MakeIntrusive<TCastExpr>(loc, std::move(expr), std::move(type));
     };
     auto assign = [&](const std::string& name, TExprPtr value) -> TExprPtr {
-        return std::make_shared<TAssignExpr>(loc, name, std::move(value));
+        return NQumir::MakeIntrusive<TAssignExpr>(loc, name, std::move(value));
     };
     auto var = [&](const std::string& name, TTypePtr type) -> TExprPtr {
-        return std::make_shared<TVarStmt>(loc, name, std::move(type));
+        return NQumir::MakeIntrusive<TVarStmt>(loc, name, std::move(type));
     };
     auto block = [&](std::vector<TExprPtr> stmts) -> TExprPtr {
-        return std::make_shared<TBlockExpr>(loc, std::move(stmts));
+        return NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(stmts));
     };
     auto field = [&](const std::string& object, const std::string& name) -> TExprPtr {
-        return std::make_shared<TFieldAccessExpr>(loc, ident(object), name);
+        return NQumir::MakeIntrusive<TFieldAccessExpr>(loc, ident(object), name);
     };
 
-    auto hashTableRefType = std::make_shared<TReferenceType>(AsNamed("HashTable", hashTableType));
-    auto rowSetRefType = std::make_shared<TReferenceType>(AsNamed("TRowSet", rowSetType));
-    auto rowSetPtrType = std::make_shared<TPointerType>(AsNamed("TRowSet", rowSetType));
+    auto hashTableRefType = types.MakeReference(AsNamed(types, "HashTable", hashTableType));
+    auto rowSetRefType = types.MakeReference(AsNamed(types, "TRowSet", rowSetType));
+    auto rowSetPtrType = types.MakePointer(AsNamed(types, "TRowSet", rowSetType));
     auto pairBufferRefType =
-        std::make_shared<TReferenceType>(AsNamed("PairBuffer", pairBufferType));
+        types.MakeReference(AsNamed(types, "PairBuffer", pairBufferType));
     std::vector<TParam> params;
     if (mode == EJoinBatchMode::ProbeInsert || mode == EJoinBatchMode::InsertOnly) {
-        params.push_back(std::make_shared<TVarStmt>(loc, "own", hashTableRefType));
-        params.push_back(std::make_shared<TVarStmt>(loc, "opp", hashTableRefType));
+        params.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "own", hashTableRefType));
+        params.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "opp", hashTableRefType));
     } else {
-        params.push_back(std::make_shared<TVarStmt>(loc, "build", hashTableRefType));
+        params.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "build", hashTableRefType));
     }
-    params.push_back(std::make_shared<TVarStmt>(loc, "batch", rowSetRefType));
-    params.push_back(std::make_shared<TVarStmt>(loc, "key_columns", ptrI64Type));
-    params.push_back(std::make_shared<TVarStmt>(loc, "batch_idx", i64Type));
-    params.push_back(std::make_shared<TVarStmt>(loc, "pairs", pairBufferRefType));
-    params.push_back(std::make_shared<TVarStmt>(loc, "left_store", rowSetPtrType));
-    params.push_back(std::make_shared<TVarStmt>(loc, "right_store", rowSetPtrType));
-    params.push_back(std::make_shared<TVarStmt>(loc, "arena", ptrI8Type));
+    params.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "batch", rowSetRefType));
+    params.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "key_columns", ptrI64Type));
+    params.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "batch_idx", i64Type));
+    params.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "pairs", pairBufferRefType));
+    params.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "left_store", rowSetPtrType));
+    params.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "right_store", rowSetPtrType));
+    params.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "arena", ptrI8Type));
 
-    auto ptrColumnType = ColumnPointerType(columnType, rowSetType);
-    auto columnValueType = PointerPointeeOr(ptrColumnType, columnType);
+    auto ptrColumnType = ColumnPointerType(types, columnType, rowSetType);
+    auto columnValueType = PointerPointeeOr(types, ptrColumnType, columnType);
     auto columnAt = [&](size_t fieldIndex) -> TExprPtr {
-        return std::make_shared<TIndexExpr>(
+        return NQumir::MakeIntrusive<TIndexExpr>(
             loc,
             ident("cols"),
-            std::make_shared<TIndexExpr>(
+            NQumir::MakeIntrusive<TIndexExpr>(
                 loc,
                 ident("key_columns"),
                 numI64(static_cast<int64_t>(fieldIndex))));
@@ -631,7 +636,7 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
     // The stored_witness value only binds the StoredKey template type at the
     // generic dual-key call sites; a zero value works for every mode.
     body.push_back(var("stored_witness", key.StoredType));
-    body.push_back(assign("stored_witness", ZeroValueExpr(key.StoredType)));
+    body.push_back(assign("stored_witness", ZeroValueExpr(types, key.StoredType)));
     if (mode == EJoinBatchMode::MarkJoinProbe) {
         // The marker of every unmatched row depends on whether the complete right
         // set contains NULL, so that is looked up once per batch. The zero
@@ -639,7 +644,7 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
         body.push_back(var("build_has_null", boolType));
         body.push_back(assign(
             "build_has_null",
-            call("mj_set_has_null", {ident("build"), ZeroValueExpr(key.StoredType)})));
+            call("mj_set_has_null", {ident("build"), ZeroValueExpr(types, key.StoredType)})));
     }
     if (hasPrecomputedHash) {
         body.push_back(var("hash_ptr", ptrU64Type));
@@ -648,7 +653,7 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
     body.push_back(var("i", i64Type));
     body.push_back(assign("i", numI64(0)));
 
-    auto keyRead = GenKeyReadAst(key, "i", "key_value_", stringViewType);
+    auto keyRead = GenKeyReadAst(types, key, "i", "key_value_", stringViewType);
 
     // own_row_id = (batch_idx << 32) | (i & 0xffffffff)
     auto ownRowId = binary(
@@ -666,13 +671,13 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
         // a single-batch (view) output; the rarer multi-batch gather path leaves
         // it null, so fall back to rh_hash per row.
         keyValueSetup.push_back(
-            std::make_shared<TIfExpr>(
+            NQumir::MakeIntrusive<TIfExpr>(
                 loc,
                 binary("!=", cast(ident("hash_ptr"), i64Type), numI64(0)),
                 block({
                     assign(
                         "hash_value",
-                        std::make_shared<TIndexExpr>(loc, ident("hash_ptr"), ident("i"))),
+                        NQumir::MakeIntrusive<TIndexExpr>(loc, ident("hash_ptr"), ident("i"))),
                 }),
                 block(
                     {assign("hash_value", cast(call("rh_hash", {ident("key_value")}), u64Type))})));
@@ -783,10 +788,10 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
         std::make_move_iterator(keyValueSetup.end()));
     // if (!jt_emit_and_insert(...)) return false;
     process.push_back(
-        std::make_shared<TIfExpr>(
+        NQumir::MakeIntrusive<TIfExpr>(
             loc,
-            std::make_shared<TUnaryExpr>(loc, TOperator("!"), std::move(emitCall)),
-            block({std::make_shared<TReturnExpr>(loc, number(0, boolType))}),
+            NQumir::MakeIntrusive<TUnaryExpr>(loc, TOperator("!"), std::move(emitCall)),
+            block({NQumir::MakeIntrusive<TReturnExpr>(loc, number(0, boolType))}),
             nullptr));
 
     auto selected = binary(
@@ -794,25 +799,25 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
         ident("selection_is_null"),
         binary(
             "!=",
-            std::make_shared<TIndexExpr>(loc, ident("selection"), ident("i")),
+            NQumir::MakeIntrusive<TIndexExpr>(loc, ident("selection"), ident("i")),
             number(0, u8Type)));
     auto loop = block({
-        std::make_shared<TIfExpr>(loc, std::move(selected), block(std::move(process)), nullptr),
+        NQumir::MakeIntrusive<TIfExpr>(loc, std::move(selected), block(std::move(process)), nullptr),
         assign("i", binary("+", ident("i"), numI64(1))),
     });
     body.push_back(
-        std::make_shared<TWhileStmtExpr>(
+        NQumir::MakeIntrusive<TWhileStmtExpr>(
             loc,
             binary("<", ident("i"), ident("n")),
             std::move(loop)));
-    body.push_back(std::make_shared<TReturnExpr>(loc, number(1, boolType)));
+    body.push_back(NQumir::MakeIntrusive<TReturnExpr>(loc, number(1, boolType)));
 
-    auto function = std::make_shared<TFunDecl>(
+    auto function = NQumir::MakeIntrusive<TFunDecl>(
         loc,
         funcName,
         std::vector<TGenericParam>{},
         std::move(params),
-        std::make_shared<TBlockExpr>(loc, std::move(body)),
+        NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(body)),
         boolType);
     return function;
 }
@@ -820,6 +825,7 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
 } // namespace
 
 NQumir::NAst::TExprPtr GenJoinProcessAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     bool isLeft,
     const std::string& funcName,
@@ -832,7 +838,7 @@ NQumir::NAst::TExprPtr GenJoinProcessAst(
     bool markMatched)
 {
     return GenJoinBatchAst(
-        key,
+        types, key,
         isLeft,
         funcName,
         std::move(columnType),
@@ -847,6 +853,7 @@ NQumir::NAst::TExprPtr GenJoinProcessAst(
 }
 
 NQumir::NAst::TExprPtr GenJoinInsertRowsOnlyAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     bool isLeft,
     const std::string& funcName,
@@ -858,7 +865,7 @@ NQumir::NAst::TExprPtr GenJoinInsertRowsOnlyAst(
     bool hasPrecomputedHash)
 {
     return GenJoinBatchAst(
-        key,
+        types, key,
         isLeft,
         funcName,
         std::move(columnType),
@@ -871,6 +878,7 @@ NQumir::NAst::TExprPtr GenJoinInsertRowsOnlyAst(
 }
 
 NQumir::NAst::TExprPtr GenJoinProbeAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     bool isLeft,
     const std::string& funcName,
@@ -883,7 +891,7 @@ NQumir::NAst::TExprPtr GenJoinProbeAst(
     bool markMatched)
 {
     return GenJoinBatchAst(
-        key,
+        types, key,
         isLeft,
         funcName,
         std::move(columnType),
@@ -898,6 +906,7 @@ NQumir::NAst::TExprPtr GenJoinProbeAst(
 }
 
 NQumir::NAst::TExprPtr GenJoinProbeSemiAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     bool isAnti,
     const std::string& funcName,
@@ -909,7 +918,7 @@ NQumir::NAst::TExprPtr GenJoinProbeSemiAst(
     bool hasPrecomputedHash)
 {
     return GenJoinBatchAst(
-        key,
+        types, key,
         /*isLeft=*/true,
         funcName,
         std::move(columnType),
@@ -923,6 +932,7 @@ NQumir::NAst::TExprPtr GenJoinProbeSemiAst(
 }
 
 NQumir::NAst::TExprPtr GenMarkJoinProbeAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     const std::string& funcName,
     NQumir::NAst::TTypePtr columnType,
@@ -933,7 +943,7 @@ NQumir::NAst::TExprPtr GenMarkJoinProbeAst(
     bool hasPrecomputedHash)
 {
     return GenJoinBatchAst(
-        key,
+        types, key,
         /*isLeft=*/true,
         funcName,
         std::move(columnType),
@@ -946,6 +956,7 @@ NQumir::NAst::TExprPtr GenMarkJoinProbeAst(
 }
 
 NQumir::NAst::TExprPtr GenJoinProbeMarkAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     bool keyDecides,
     const std::string& funcName,
@@ -957,7 +968,7 @@ NQumir::NAst::TExprPtr GenJoinProbeMarkAst(
     bool hasPrecomputedHash)
 {
     return GenJoinBatchAst(
-        key,
+        types, key,
         /*isLeft=*/false,
         funcName,
         std::move(columnType),
@@ -973,6 +984,7 @@ NQumir::NAst::TExprPtr GenJoinProbeMarkAst(
 }
 
 NQumir::NAst::TExprPtr GenJoinDispatchAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     EJoinType type,
     bool hasResidual,
@@ -982,24 +994,24 @@ NQumir::NAst::TExprPtr GenJoinDispatchAst(
 {
     namespace Oz = NKernel::NOz;
 
-    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto boolType = std::make_shared<TBoolType>();
-    auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
-    auto ptrI8Type = std::make_shared<TPointerType>(std::make_shared<TIntegerType>(TIntegerType::I8));
-    auto hashTableRefType = std::make_shared<TReferenceType>(AsNamed("HashTable", hashTableType));
-    auto rowSetRefType = std::make_shared<TReferenceType>(AsNamed("TRowSet", rowSetType));
-    auto rowSetPtrType = std::make_shared<TPointerType>(AsNamed("TRowSet", rowSetType));
+    auto i64Type = types.MakeInteger(TIntegerType::I64);
+    auto boolType = types.Make<TBoolType>();
+    auto ptrI64Type = types.MakePointer(i64Type);
+    auto ptrI8Type = types.MakePointer(types.MakeInteger(TIntegerType::I8));
+    auto hashTableRefType = types.MakeReference(AsNamed(types, "HashTable", hashTableType));
+    auto rowSetRefType = types.MakeReference(AsNamed(types, "TRowSet", rowSetType));
+    auto rowSetPtrType = types.MakePointer(AsNamed(types, "TRowSet", rowSetType));
     auto pairBufferRefType =
-        std::make_shared<TReferenceType>(AsNamed("PairBuffer", pairBufferType));
+        types.MakeReference(AsNamed(types, "PairBuffer", pairBufferType));
 
     auto number = [&](int64_t value) -> TExprPtr {
-        return Oz::TypedInt(value, i64Type);
+        return Oz::TypedInt(types, value, i64Type);
     };
     auto opIs = [&](int64_t op) -> TExprPtr {
         return Oz::Bin(TOperator("=="), Oz::Ident("op"), number(op));
     };
     auto boolReturn = [&](bool value) -> TExprPtr {
-        return Oz::Return(Oz::Bool(value));
+        return Oz::Return(Oz::Bool(types, value));
     };
     const int64_t keySize = static_cast<int64_t>(key.Size);
     const bool isSemiAnti = type == EJoinType::LeftSemi || type == EJoinType::LeftAnti;
@@ -1069,7 +1081,7 @@ NQumir::NAst::TExprPtr GenJoinDispatchAst(
         }
         // A residual needs right rows, which the key-only right table lacks.
         if (isSemiAnti && hasResidual) {
-            return Oz::Bool(false);
+            return Oz::Bool(types, false);
         }
         if (isSemiAnti) {
             return Oz::Call(
@@ -1100,7 +1112,7 @@ NQumir::NAst::TExprPtr GenJoinDispatchAst(
     };
     auto streamRight = [&]() {
         if (isMark) {
-            return Oz::Bool(false);
+            return Oz::Bool(types, false);
         }
         // A SEMI/ANTI join that built its left side marks the left rows the
         // right stream matches.
@@ -1148,7 +1160,7 @@ NQumir::NAst::TExprPtr GenJoinDispatchAst(
     // needs the right rows, so it streams them against the left side instead.
     auto updateRight = [&]() -> TExprPtr {
         if (isSemiAnti && hasResidual) {
-            return Oz::Bool(false);
+            return Oz::Bool(types, false);
         }
         if (isSemiAnti || isMark) {
             return insertRightKeyOnly();
@@ -1249,10 +1261,10 @@ NQumir::NAst::TExprPtr GenJoinDispatchAst(
                     TOperator("&&"),
                     Oz::Call(
                         "jt_emit_by_mark",
-                        {Oz::Ident("left"), number(1), Oz::Bool(false), Oz::Ident("pairs")}),
+                        {Oz::Ident("left"), number(1), Oz::Bool(types, false), Oz::Ident("pairs")}),
                     Oz::Call(
                         "jt_emit_by_mark",
-                        {Oz::Ident("right"), number(0), Oz::Bool(false), Oz::Ident("pairs")})));
+                        {Oz::Ident("right"), number(0), Oz::Bool(types, false), Oz::Ident("pairs")})));
         }
         if (isSemiAnti) {
             return Oz::Return(
@@ -1288,7 +1300,7 @@ NQumir::NAst::TExprPtr GenJoinDispatchAst(
                     {
                         Oz::Ident("left"),
                         Oz::Ident("right"),
-                        ZeroValueExpr(key.StoredType),
+                        ZeroValueExpr(types, key.StoredType),
                         Oz::Ident("pairs"),
                     }));
         }
@@ -1309,7 +1321,7 @@ NQumir::NAst::TExprPtr GenJoinDispatchAst(
                 {
                     Oz::Ident(buildIsLeft ? "left" : "right"),
                     number(buildIsLeft ? 1 : 0),
-                    Oz::Bool(type == EJoinType::LeftSemi),
+                    Oz::Bool(types, type == EJoinType::LeftSemi),
                     Oz::Ident("pairs"),
                 }));
     };
@@ -1346,20 +1358,21 @@ NQumir::NAst::TExprPtr GenJoinDispatchAst(
 }
 
 NQumir::NAst::TExprPtr GenCrossJoinDispatchAst(
+    NQumir::NAst::TTypeFactory& types,
     EJoinType type,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr pairBufferType)
 {
     namespace Oz = NKernel::NOz;
 
-    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto boolType = std::make_shared<TBoolType>();
+    auto i64Type = types.MakeInteger(TIntegerType::I64);
+    auto boolType = types.Make<TBoolType>();
     auto u8PtrType =
-        std::make_shared<TPointerType>(std::make_shared<TIntegerType>(TIntegerType::U8));
-    auto ptrI8Type = std::make_shared<TPointerType>(std::make_shared<TIntegerType>(TIntegerType::I8));
-    auto rowSetPtrType = std::make_shared<TPointerType>(AsNamed("TRowSet", rowSetType));
+        types.MakePointer(types.MakeInteger(TIntegerType::U8));
+    auto ptrI8Type = types.MakePointer(types.MakeInteger(TIntegerType::I8));
+    auto rowSetPtrType = types.MakePointer(AsNamed(types, "TRowSet", rowSetType));
     auto pairBufferRefType =
-        std::make_shared<TReferenceType>(AsNamed("PairBuffer", pairBufferType));
+        types.MakeReference(AsNamed(types, "PairBuffer", pairBufferType));
 
     const bool keepsUnmatchedLeft =
         type == EJoinType::Left || type == EJoinType::Full || type == EJoinType::LeftAnti;
@@ -1372,7 +1385,7 @@ NQumir::NAst::TExprPtr GenCrossJoinDispatchAst(
     }
 
     auto opIs = [&](int64_t op) -> TExprPtr {
-        return Oz::Bin(TOperator("=="), Oz::Ident("op"), Oz::TypedInt(op, i64Type));
+        return Oz::Bin(TOperator("=="), Oz::Ident("op"), Oz::TypedInt(types, op, i64Type));
     };
     TExprPtr emitUnmatchedRight = keepsUnmatchedRight
         ? Oz::Call(
@@ -1383,7 +1396,7 @@ NQumir::NAst::TExprPtr GenCrossJoinDispatchAst(
                 Oz::Ident("right_matched"),
                 Oz::Ident("pairs"),
             })
-        : Oz::Bool(true);
+        : Oz::Bool(types, true);
 
     Oz::TFunBuilder builder("xj_dispatch");
     builder.Param("left_store", rowSetPtrType)
@@ -1410,19 +1423,20 @@ NQumir::NAst::TExprPtr GenCrossJoinDispatchAst(
                                 Oz::Ident("right_matched"),
                                 Oz::Ident("pairs"),
                                 Oz::Ident("arena"),
-                                Oz::Bool(emitsPairs),
-                                Oz::Bool(type == EJoinType::LeftSemi),
-                                Oz::Bool(keepsUnmatchedLeft),
-                                Oz::Bool(keepsUnmatchedRight),
+                                Oz::Bool(types, emitsPairs),
+                                Oz::Bool(types, type == EJoinType::LeftSemi),
+                                Oz::Bool(types, keepsUnmatchedLeft),
+                                Oz::Bool(types, keepsUnmatchedRight),
                             })),
                 })))
         .Stmt(Oz::If(opIs(2), Oz::Block({Oz::Return(std::move(emitUnmatchedRight))})))
-        .Stmt(Oz::Return(Oz::Bool(false)));
+        .Stmt(Oz::Return(Oz::Bool(types, false)));
 
     return std::move(builder).Build();
 }
 
 NQumir::NAst::TExprPtr GenKeyHashBatchAst(
+    NQumir::NAst::TTypeFactory& types,
     const TAggregateKeyDescriptor& key,
     const std::string& funcName,
     NQumir::NAst::TTypePtr columnType,
@@ -1431,20 +1445,20 @@ NQumir::NAst::TExprPtr GenKeyHashBatchAst(
 {
     NQumir::TLocation loc{};
 
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
-    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
-    auto boolType = std::make_shared<TBoolType>();
-    auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
-    auto ptrU64Type = std::make_shared<TPointerType>(u64Type);
-    auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
-    auto ptrLookupKeyType = std::make_shared<TPointerType>(key.LookupType);
+    auto i64Type = types.MakeInteger();
+    auto u8Type = types.MakeInteger(TIntegerType::U8);
+    auto u64Type = types.MakeInteger(TIntegerType::U64);
+    auto boolType = types.Make<TBoolType>();
+    auto ptrU8Type = types.MakePointer(u8Type);
+    auto ptrU64Type = types.MakePointer(u64Type);
+    auto ptrI64Type = types.MakePointer(i64Type);
+    auto ptrLookupKeyType = types.MakePointer(key.LookupType);
 
     auto ident = [&](const std::string& name) -> TExprPtr {
-        return std::make_shared<TIdentExpr>(loc, name);
+        return NQumir::MakeIntrusive<TIdentExpr>(loc, name);
     };
     auto number = [&](int64_t value, TTypePtr type) -> TExprPtr {
-        auto result = std::make_shared<TNumberExpr>(loc, value);
+        auto result = NQumir::MakeIntrusive<TNumberExpr>(loc, value, types);
         result->Type = std::move(type);
         return result;
     };
@@ -1452,42 +1466,42 @@ NQumir::NAst::TExprPtr GenKeyHashBatchAst(
         return number(value, i64Type);
     };
     auto binary = [&](const char* op, TExprPtr left, TExprPtr right) -> TExprPtr {
-        return std::make_shared<TBinaryExpr>(loc, TOperator(op), std::move(left), std::move(right));
+        return NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator(op), std::move(left), std::move(right));
     };
     auto cast = [&](TExprPtr expr, TTypePtr type) -> TExprPtr {
-        return std::make_shared<TCastExpr>(loc, std::move(expr), std::move(type));
+        return NQumir::MakeIntrusive<TCastExpr>(loc, std::move(expr), std::move(type));
     };
     auto call = [&](const std::string& name, std::vector<TExprPtr> args) -> TExprPtr {
-        return std::make_shared<TCallExpr>(loc, ident(name), std::move(args));
+        return NQumir::MakeIntrusive<TCallExpr>(loc, ident(name), std::move(args));
     };
     auto assign = [&](const std::string& name, TExprPtr value) -> TExprPtr {
-        return std::make_shared<TAssignExpr>(loc, name, std::move(value));
+        return NQumir::MakeIntrusive<TAssignExpr>(loc, name, std::move(value));
     };
     auto var = [&](const std::string& name, TTypePtr type) -> TExprPtr {
-        return std::make_shared<TVarStmt>(loc, name, std::move(type));
+        return NQumir::MakeIntrusive<TVarStmt>(loc, name, std::move(type));
     };
     auto block = [&](std::vector<TExprPtr> stmts) -> TExprPtr {
-        return std::make_shared<TBlockExpr>(loc, std::move(stmts));
+        return NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(stmts));
     };
     auto field = [&](const std::string& object, const std::string& name) -> TExprPtr {
-        return std::make_shared<TFieldAccessExpr>(loc, ident(object), name);
+        return NQumir::MakeIntrusive<TFieldAccessExpr>(loc, ident(object), name);
     };
 
-    auto rowSetRefType = std::make_shared<TReferenceType>(AsNamed("TRowSet", rowSetType));
+    auto rowSetRefType = types.MakeReference(AsNamed(types, "TRowSet", rowSetType));
     std::vector<TParam> params{
-        std::make_shared<TVarStmt>(loc, "batch", rowSetRefType),
-        std::make_shared<TVarStmt>(loc, "hashes", ptrU64Type),
-        std::make_shared<TVarStmt>(loc, "key_columns", ptrI64Type),
-        std::make_shared<TVarStmt>(loc, "key_type_witness", ptrLookupKeyType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "batch", rowSetRefType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "hashes", ptrU64Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "key_columns", ptrI64Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "key_type_witness", ptrLookupKeyType),
     };
 
-    auto ptrColumnType = ColumnPointerType(columnType, rowSetType);
-    auto columnValueType = PointerPointeeOr(ptrColumnType, columnType);
+    auto ptrColumnType = ColumnPointerType(types, columnType, rowSetType);
+    auto columnValueType = PointerPointeeOr(types, ptrColumnType, columnType);
     auto columnAt = [&](size_t fieldIndex) -> TExprPtr {
-        return std::make_shared<TIndexExpr>(
+        return NQumir::MakeIntrusive<TIndexExpr>(
             loc,
             ident("cols"),
-            std::make_shared<TIndexExpr>(
+            NQumir::MakeIntrusive<TIndexExpr>(
                 loc,
                 ident("key_columns"),
                 numI64(static_cast<int64_t>(fieldIndex))));
@@ -1511,7 +1525,7 @@ NQumir::NAst::TExprPtr GenKeyHashBatchAst(
     body.push_back(var("i", i64Type));
     body.push_back(assign("i", numI64(0)));
 
-    auto keyRead = GenKeyReadAst(key, "i", "hash_key_value_", stringViewType);
+    auto keyRead = GenKeyReadAst(types, key, "i", "hash_key_value_", stringViewType);
 
     std::vector<TExprPtr> process;
     process.insert(
@@ -1519,7 +1533,7 @@ NQumir::NAst::TExprPtr GenKeyHashBatchAst(
         std::make_move_iterator(keyRead.Setup.begin()),
         std::make_move_iterator(keyRead.Setup.end()));
     process.push_back(
-        std::make_shared<TArrayAssignExpr>(
+        NQumir::MakeIntrusive<TArrayAssignExpr>(
             loc,
             "hashes",
             std::vector<TExprPtr>{ident("i")},
@@ -1531,27 +1545,27 @@ NQumir::NAst::TExprPtr GenKeyHashBatchAst(
         ident("selection_is_null"),
         binary(
             "!=",
-            std::make_shared<TIndexExpr>(loc, ident("selection"), ident("i")),
+            NQumir::MakeIntrusive<TIndexExpr>(loc, ident("selection"), ident("i")),
             number(0, u8Type)));
     auto loop = block({
-        std::make_shared<TIfExpr>(loc, std::move(selected), block(std::move(process)), nullptr),
+        NQumir::MakeIntrusive<TIfExpr>(loc, std::move(selected), block(std::move(process)), nullptr),
         assign("i", binary("+", ident("i"), numI64(1))),
     });
     body.push_back(
-        std::make_shared<TWhileStmtExpr>(
+        NQumir::MakeIntrusive<TWhileStmtExpr>(
             loc,
             binary("<", ident("i"), ident("n")),
             std::move(loop)));
-    body.push_back(std::make_shared<TReturnExpr>(loc, number(1, boolType)));
+    body.push_back(NQumir::MakeIntrusive<TReturnExpr>(loc, number(1, boolType)));
 
-    auto function = std::make_shared<TFunDecl>(
+    auto function = NQumir::MakeIntrusive<TFunDecl>(
         loc,
         funcName,
         std::vector<TGenericParam>{},
         std::move(params),
-        std::make_shared<TBlockExpr>(loc, std::move(body)),
+        NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(body)),
         boolType);
-    function->Type = std::make_shared<TFunctionType>(
+    function->Type = types.MakeFunction(
         std::vector<TTypePtr>{rowSetRefType, ptrU64Type, ptrI64Type, ptrLookupKeyType},
         boolType);
     function->Cacheable = true;
@@ -1559,6 +1573,7 @@ NQumir::NAst::TExprPtr GenKeyHashBatchAst(
 }
 
 NQumir::NAst::TExprPtr GenJoinHashBatchAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     const std::string& funcName,
     NQumir::NAst::TTypePtr columnType,
@@ -1566,7 +1581,7 @@ NQumir::NAst::TExprPtr GenJoinHashBatchAst(
     NQumir::NAst::TTypePtr stringViewType)
 {
     return GenKeyHashBatchAst(
-        JoinKeyAggregateShim(key),
+        types, JoinKeyAggregateShim(key),
         funcName,
         columnType,
         rowSetType,
@@ -1574,62 +1589,64 @@ NQumir::NAst::TExprPtr GenJoinHashBatchAst(
 }
 
 NQumir::NAst::TExprPtr GenKeyHashEntrypointAst(
+    NQumir::NAst::TTypeFactory& types,
     const TAggregateKeyDescriptor& key,
     const std::string& funcName,
     const std::string& batchFuncName,
     NQumir::NAst::TTypePtr rowSetType)
 {
     NQumir::TLocation loc{};
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
-    auto boolType = std::make_shared<TBoolType>();
-    auto ptrU64Type = std::make_shared<TPointerType>(u64Type);
-    auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
-    auto ptrLookupKeyType = std::make_shared<TPointerType>(key.LookupType);
-    auto rowSetRefType = std::make_shared<TReferenceType>(AsNamed("TRowSet", rowSetType));
+    auto i64Type = types.MakeInteger();
+    auto u64Type = types.MakeInteger(TIntegerType::U64);
+    auto boolType = types.Make<TBoolType>();
+    auto ptrU64Type = types.MakePointer(u64Type);
+    auto ptrI64Type = types.MakePointer(i64Type);
+    auto ptrLookupKeyType = types.MakePointer(key.LookupType);
+    auto rowSetRefType = types.MakeReference(AsNamed(types, "TRowSet", rowSetType));
 
     std::vector<TParam> params{
-        std::make_shared<TVarStmt>(loc, "batch", rowSetRefType),
-        std::make_shared<TVarStmt>(loc, "hashes", ptrU64Type),
-        std::make_shared<TVarStmt>(loc, "key_columns", ptrI64Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "batch", rowSetRefType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "hashes", ptrU64Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "key_columns", ptrI64Type),
     };
-    auto zero = std::make_shared<TNumberExpr>(loc, int64_t{0});
+    auto zero = NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t{0}, types);
     zero->Type = i64Type;
-    auto witness = std::make_shared<TCastExpr>(loc, std::move(zero), ptrLookupKeyType);
-    auto call = std::make_shared<TCallExpr>(
+    auto witness = NQumir::MakeIntrusive<TCastExpr>(loc, std::move(zero), ptrLookupKeyType);
+    auto call = NQumir::MakeIntrusive<TCallExpr>(
         loc,
-        std::make_shared<TIdentExpr>(loc, batchFuncName),
+        NQumir::MakeIntrusive<TIdentExpr>(loc, batchFuncName),
         std::vector<TExprPtr>{
-            std::make_shared<TIdentExpr>(loc, "batch"),
-            std::make_shared<TIdentExpr>(loc, "hashes"),
-            std::make_shared<TIdentExpr>(loc, "key_columns"),
+            NQumir::MakeIntrusive<TIdentExpr>(loc, "batch"),
+            NQumir::MakeIntrusive<TIdentExpr>(loc, "hashes"),
+            NQumir::MakeIntrusive<TIdentExpr>(loc, "key_columns"),
             std::move(witness),
         });
-    auto body = std::make_shared<TBlockExpr>(
+    auto body = NQumir::MakeIntrusive<TBlockExpr>(
         loc,
         std::vector<TExprPtr>{
-            std::make_shared<TReturnExpr>(loc, std::move(call)),
+            NQumir::MakeIntrusive<TReturnExpr>(loc, std::move(call)),
         });
-    auto function = std::make_shared<TFunDecl>(
+    auto function = NQumir::MakeIntrusive<TFunDecl>(
         loc,
         funcName,
         std::vector<TGenericParam>{},
         std::move(params),
         std::move(body),
         boolType);
-    function->Type = std::make_shared<TFunctionType>(
+    function->Type = types.MakeFunction(
         std::vector<TTypePtr>{rowSetRefType, ptrU64Type, ptrI64Type},
         boolType);
     return function;
 }
 
 NQumir::NAst::TExprPtr GenJoinHashEntrypointAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     const std::string& funcName,
     NQumir::NAst::TTypePtr rowSetType)
 {
     return GenKeyHashEntrypointAst(
-        JoinKeyAggregateShim(key),
+        types, JoinKeyAggregateShim(key),
         funcName,
         "jt_hash_batch",
         std::move(rowSetType));
@@ -1650,24 +1667,25 @@ struct TJoinOutputColumn {
 
     bool IsLeft = true;
     int32_t SrcColIdx = 0;
-    NQumir::NAst::TTypePtr Type;
-    NQumir::NAst::TTypePtr StorageType;
+    NQumir::NAst::TTypePtr Type = nullptr;
+    NQumir::NAst::TTypePtr StorageType = nullptr;
     EKind Kind = EKind::Fixed;
     int64_t FixedWidth = 0;
 };
 
 std::vector<TJoinOutputColumn> BuildJoinOutputColumns(
+    NQumir::NAst::TTypeFactory& types,
     const TStructType& leftType,
     const TStructType& rightType,
     EJoinOutputColumns output)
 {
-    auto classify = [](const TTypePtr& type, TJoinOutputColumn& col) {
+    auto classify = [&types](const TTypePtr& type, TJoinOutputColumn& col) {
         if (IsDecimal128Type(type)) {
             col.Kind = TJoinOutputColumn::EKind::BinInt;
             return;
         }
-        auto inner = PhysicalValueType(type);
-        if (TMaybeType<TIntegerType>(inner) || TMaybeType<TFloatType>(inner)) {
+        auto inner = PhysicalValueType(types, type);
+        if (MaybeIntegerType(inner) || TMaybeType<TFloatType>(inner)) {
             col.StorageType = inner;
             col.FixedWidth = FixedValueWidth(type);
         } else if (TMaybeType<TBoolType>(inner)) {
@@ -1677,7 +1695,7 @@ std::vector<TJoinOutputColumn> BuildJoinOutputColumns(
         } else {
             throw NQumir::TError(
                 "GenJoinMaterializeAst: cannot materialize column of type " +
-                (type ? type->ToString() : std::string("<null>")));
+                SqlTypeName(type));
         }
     };
 
@@ -1707,6 +1725,7 @@ std::vector<TJoinOutputColumn> BuildJoinOutputColumns(
 } // namespace
 
 NQumir::NAst::TExprPtr GenJoinMaterializeAst(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& leftType,
     const NQumir::NAst::TStructType& rightType,
     EJoinOutputColumns output,
@@ -1719,7 +1738,7 @@ NQumir::NAst::TExprPtr GenJoinMaterializeAst(
 
     (void)stringViewType;
 
-    const auto columns = BuildJoinOutputColumns(leftType, rightType, output);
+    const auto columns = BuildJoinOutputColumns(types, leftType, rightType, output);
     const int64_t columnCount = static_cast<int64_t>(columns.size());
     int64_t ownedPtrCount = 1; // columns, recorded by jm_begin
     for (const auto& column : columns) {
@@ -1728,15 +1747,15 @@ NQumir::NAst::TExprPtr GenJoinMaterializeAst(
             : 2;
     }
 
-    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto ptrColumnType = ColumnPointerType(columnType, rowSetType);
-    auto rowSetRefType = std::make_shared<TReferenceType>(AsNamed("TRowSet", rowSetType));
-    auto rowSetPtrType = std::make_shared<TPointerType>(AsNamed("TRowSet", rowSetType));
+    auto i64Type = types.MakeInteger(TIntegerType::I64);
+    auto ptrColumnType = ColumnPointerType(types, columnType, rowSetType);
+    auto rowSetRefType = types.MakeReference(AsNamed(types, "TRowSet", rowSetType));
+    auto rowSetPtrType = types.MakePointer(AsNamed(types, "TRowSet", rowSetType));
     auto pairBufferRefType =
-        std::make_shared<TReferenceType>(AsNamed("PairBuffer", pairBufferType));
+        types.MakeReference(AsNamed(types, "PairBuffer", pairBufferType));
 
     auto number = [&](int64_t value) -> TExprPtr {
-        return Oz::TypedInt(value, i64Type);
+        return Oz::TypedInt(types, value, i64Type);
     };
     auto outputColumn = [&](size_t index) -> TExprPtr {
         return Oz::Index("columns", number(static_cast<int64_t>(index)));
@@ -1797,7 +1816,7 @@ NQumir::NAst::TExprPtr GenJoinMaterializeAst(
             args.push_back(number(ownerIndex++));
             args.push_back(number(ownerIndex++));
             args.push_back(number(column.FixedWidth));
-            args.push_back(Oz::Cast(number(0), std::make_shared<TPointerType>(column.StorageType)));
+            args.push_back(Oz::Cast(number(0), types.MakePointer(column.StorageType)));
             builder.Stmt(Oz::Call("jt_materialize_fixed_column", std::move(args)));
             break;
         case TJoinOutputColumn::EKind::Bool:
@@ -1848,6 +1867,7 @@ namespace {
 
 // Byte size and alignment of one payload column in a build row.
 void ClassifyRowJoinColumn(
+    NQumir::NAst::TTypeFactory& types,
     const TTypePtr& type,
     TRowJoinColumn& col,
     int64_t& size,
@@ -1859,8 +1879,8 @@ void ClassifyRowJoinColumn(
         alignment = 16;
         return;
     }
-    auto inner = PhysicalValueType(type);
-    if (TMaybeType<TIntegerType>(inner) || TMaybeType<TFloatType>(inner)) {
+    auto inner = PhysicalValueType(types, type);
+    if (MaybeIntegerType(inner) || TMaybeType<TFloatType>(inner)) {
         col.Kind = TRowJoinColumn::EKind::Fixed;
         col.StorageType = inner;
         col.FixedWidth = FixedValueWidth(type);
@@ -1877,7 +1897,7 @@ void ClassifyRowJoinColumn(
     } else {
         throw NQumir::TError(
             "BuildRowJoinLayout: cannot store column of type " +
-            (type ? type->ToString() : std::string("<null>")));
+            SqlTypeName(type));
     }
 }
 
@@ -1888,20 +1908,21 @@ int64_t AlignUpI64(int64_t value, int64_t alignment) {
 // Batch prologue shared by append and probe: n, selection, cols, the key
 // columns (cols[key_columns[k]]) and, when present, the precomputed hashes.
 void GenBatchPrologue(
+    NQumir::NAst::TTypeFactory& types,
     Oz::TFunBuilder& builder,
     const TJoinKeyDescriptor& key,
-    const TRowJoinGenTypes& types,
+    const TRowJoinGenTypes& joinTypes,
     bool hasPrecomputedHash)
 {
-    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
-    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
-    auto boolType = std::make_shared<TBoolType>();
-    auto ptrColumnType = ColumnPointerType(types.Column, types.RowSet);
-    auto columnValueType = PointerPointeeOr(ptrColumnType, types.Column);
+    auto i64Type = types.MakeInteger(TIntegerType::I64);
+    auto u8Type = types.MakeInteger(TIntegerType::U8);
+    auto u64Type = types.MakeInteger(TIntegerType::U64);
+    auto boolType = types.Make<TBoolType>();
+    auto ptrColumnType = ColumnPointerType(types, joinTypes.Column, joinTypes.RowSet);
+    auto columnValueType = PointerPointeeOr(types, ptrColumnType, joinTypes.Column);
     builder.Var("n", i64Type)
         .Assign("n", Oz::Field("batch", "RowCount"))
-        .Var("selection", std::make_shared<TPointerType>(u8Type))
+        .Var("selection", types.MakePointer(u8Type))
         .Assign("selection", Oz::Field("batch", "Selection"))
         .Var("cols", ptrColumnType)
         .Assign("cols", Oz::Field("batch", "Columns"))
@@ -1911,7 +1932,7 @@ void GenBatchPrologue(
             Oz::Bin(
                 TOperator("=="),
                 Oz::Cast(Oz::Ident("selection"), i64Type),
-                Oz::TypedInt(0, i64Type)));
+                Oz::TypedInt(types, 0, i64Type)));
     for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
         const std::string name = "key_column_" + std::to_string(fieldIndex);
         builder.Var(name, columnValueType)
@@ -1921,19 +1942,19 @@ void GenBatchPrologue(
                     "cols",
                     Oz::Index(
                         "key_columns",
-                        Oz::TypedInt(static_cast<int64_t>(fieldIndex), i64Type))));
+                        Oz::TypedInt(types, static_cast<int64_t>(fieldIndex), i64Type))));
     }
     if (hasPrecomputedHash) {
-        builder.Var("hash_ptr", std::make_shared<TPointerType>(u64Type))
+        builder.Var("hash_ptr", types.MakePointer(u64Type))
             .Assign("hash_ptr", Oz::Field("batch", "Hash"));
     }
 }
 
 // hash_value = hash_ptr ? hash_ptr[row] : rh_hash(key_value), as u64.
 std::vector<TExprPtr>
-GenHashValue(const std::string& rowVar, const std::string& keyVar, bool hasPrecomputedHash) {
-    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
+GenHashValue(NQumir::NAst::TTypeFactory& types, const std::string& rowVar, const std::string& keyVar, bool hasPrecomputedHash) {
+    auto i64Type = types.MakeInteger(TIntegerType::I64);
+    auto u64Type = types.MakeInteger(TIntegerType::U64);
     std::vector<TExprPtr> stmts;
     stmts.push_back(Oz::Var("hash_value", u64Type));
     auto computed = Oz::Cast(Oz::Call("rh_hash", {Oz::Ident(keyVar)}), u64Type);
@@ -1944,7 +1965,7 @@ GenHashValue(const std::string& rowVar, const std::string& keyVar, bool hasPreco
                 Oz::Bin(
                     TOperator("!="),
                     Oz::Cast(Oz::Ident("hash_ptr"), i64Type),
-                    Oz::TypedInt(0, i64Type)),
+                    Oz::TypedInt(types, 0, i64Type)),
                 Oz::Block({Oz::Assign("hash_value", Oz::Index("hash_ptr", Oz::Ident(rowVar)))}),
                 Oz::Block({Oz::Assign("hash_value", std::move(computed))})));
     } else {
@@ -1953,32 +1974,33 @@ GenHashValue(const std::string& rowVar, const std::string& keyVar, bool hasPreco
     return stmts;
 }
 
-TExprPtr RowSelected(const std::string& rowVar) {
-    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
+TExprPtr RowSelected(NQumir::NAst::TTypeFactory& types, const std::string& rowVar) {
+    auto u8Type = types.MakeInteger(TIntegerType::U8);
     return Oz::Bin(
         TOperator("||"),
         Oz::Ident("selection_is_null"),
         Oz::Bin(
             TOperator("!="),
             Oz::Index("selection", Oz::Ident(rowVar)),
-            Oz::TypedInt(0, u8Type)));
+            Oz::TypedInt(types, 0, u8Type)));
 }
 
 // (cast (+ (cast row i64) offset) <ptr T>)
-TExprPtr RowFieldPointer(const std::string& rowVar, int64_t offset, const TTypePtr& pointeeType) {
-    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
+TExprPtr RowFieldPointer(NQumir::NAst::TTypeFactory& types, const std::string& rowVar, int64_t offset, const TTypePtr& pointeeType) {
+    auto i64Type = types.MakeInteger(TIntegerType::I64);
     return Oz::Cast(
-        Oz::Add(Oz::Cast(Oz::Ident(rowVar), i64Type), Oz::TypedInt(offset, i64Type)),
-        std::make_shared<TPointerType>(pointeeType));
+        Oz::Add(Oz::Cast(Oz::Ident(rowVar), i64Type), Oz::TypedInt(types, offset, i64Type)),
+        types.MakePointer(pointeeType));
 }
 
-TTypePtr RefType(const char* name, const TTypePtr& type) {
-    return std::make_shared<TReferenceType>(AsNamed(name, type));
+TTypePtr RefType(NQumir::NAst::TTypeFactory& types, const char* name, const TTypePtr& type) {
+    return types.MakeReference(AsNamed(types, name, type));
 }
 
 } // namespace
 
 TRowJoinLayout BuildRowJoinLayout(
+    NQumir::NAst::TTypeFactory& types,
     const TStructType& buildType,
     const TJoinKeyDescriptor& key,
     bool marked)
@@ -1991,7 +2013,7 @@ TRowJoinLayout BuildRowJoinLayout(
         TRowJoinColumn col{.SrcColIdx = i};
         int64_t size = 0;
         int64_t alignment = 1;
-        ClassifyRowJoinColumn(buildType.Fields[i].second, col, size, alignment);
+        ClassifyRowJoinColumn(types, buildType.Fields[i].second, col, size, alignment);
         hasBinInt = hasBinInt || col.Kind == TRowJoinColumn::EKind::BinInt;
         layout.HasString = layout.HasString || col.Kind == TRowJoinColumn::EKind::String;
         layout.Columns.push_back(std::move(col));
@@ -2024,29 +2046,30 @@ TRowJoinLayout BuildRowJoinLayout(
 }
 
 NQumir::NAst::TExprPtr GenRowJoinAppendAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     const TRowJoinLayout& layout,
     const std::string& funcName,
-    const TRowJoinGenTypes& types,
+    const TRowJoinGenTypes& joinTypes,
     bool hasPrecomputedHash,
     bool nullKeys)
 {
-    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
-    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
-    auto boolType = std::make_shared<TBoolType>();
+    auto i64Type = types.MakeInteger(TIntegerType::I64);
+    auto u8Type = types.MakeInteger(TIntegerType::U8);
+    auto u64Type = types.MakeInteger(TIntegerType::U64);
+    auto boolType = types.Make<TBoolType>();
     auto number = [&](int64_t value) {
-        return Oz::TypedInt(value, i64Type);
+        return Oz::TypedInt(types, value, i64Type);
     };
 
     Oz::TFunBuilder builder(funcName);
-    builder.Param("arena", RefType("RowArena", types.Arena))
-        .Param("batch", RefType("TRowSet", types.RowSet))
-        .Param("key_columns", std::make_shared<TPointerType>(i64Type))
+    builder.Param("arena", RefType(types, "RowArena", joinTypes.Arena))
+        .Param("batch", RefType(types, "TRowSet", joinTypes.RowSet))
+        .Param("key_columns", types.MakePointer(i64Type))
         .Return(boolType);
-    GenBatchPrologue(builder, key, types, hasPrecomputedHash);
+    GenBatchPrologue(types, builder, key, joinTypes, hasPrecomputedHash);
 
-    auto keyRead = GenKeyReadAst(key, "i", "key_value_", types.StringView);
+    auto keyRead = GenKeyReadAst(types, key, "i", "key_value_", joinTypes.StringView);
     std::vector<TExprPtr> store = std::move(keyRead.Setup);
     store.push_back(Oz::Var("key_value", key.LookupType));
     store.push_back(Oz::Assign("key_value", std::move(keyRead.Value)));
@@ -2055,27 +2078,27 @@ NQumir::NAst::TExprPtr GenRowJoinAppendAst(
     std::vector<TExprPtr> valid;
     if (nullKeys) {
         valid.push_back(Oz::Var("hash_value", u64Type));
-        valid.push_back(Oz::Assign("hash_value", Oz::TypedInt(0, u64Type)));
+        valid.push_back(Oz::Assign("hash_value", Oz::TypedInt(types, 0, u64Type)));
     } else {
-        valid = GenHashValue("i", "key_value", hasPrecomputedHash);
+        valid = GenHashValue(types, "i", "key_value", hasPrecomputedHash);
     }
-    valid.push_back(Oz::Var("row", std::make_shared<TPointerType>(u8Type)));
+    valid.push_back(Oz::Var("row", types.MakePointer(u8Type)));
     valid.push_back(Oz::Assign("row", Oz::Call("ra_new_row", {Oz::Ident("arena")})));
     valid.push_back(
         Oz::If(
             Oz::Bin(TOperator("=="), Oz::Cast(Oz::Ident("row"), i64Type), number(0)),
-            Oz::Block({Oz::Return(Oz::Bool(false))})));
-    valid.push_back(Oz::Var("words", std::make_shared<TPointerType>(u64Type)));
+            Oz::Block({Oz::Return(Oz::Bool(types, false))})));
+    valid.push_back(Oz::Var("words", types.MakePointer(u64Type)));
     valid.push_back(
-        Oz::Assign("words", Oz::Cast(Oz::Ident("row"), std::make_shared<TPointerType>(u64Type))));
+        Oz::Assign("words", Oz::Cast(Oz::Ident("row"), types.MakePointer(u64Type))));
     valid.push_back(Oz::ArrayAssign("words", number(0), Oz::Ident("hash_value")));
-    valid.push_back(Oz::Var("key_slot", std::make_shared<TPointerType>(key.LookupType)));
+    valid.push_back(Oz::Var("key_slot", types.MakePointer(key.LookupType)));
     valid.push_back(
-        Oz::Assign("key_slot", RowFieldPointer("row", layout.KeyOffset, key.LookupType)));
+        Oz::Assign("key_slot", RowFieldPointer(types, "row", layout.KeyOffset, key.LookupType)));
     valid.push_back(Oz::ArrayAssign("key_slot", number(0), Oz::Ident("key_value")));
     if (layout.MarkOffset >= 0) {
         valid.push_back(
-            Oz::ArrayAssign("row", number(layout.MarkOffset), Oz::TypedInt(0, u8Type)));
+            Oz::ArrayAssign("row", number(layout.MarkOffset), Oz::TypedInt(types, 0, u8Type)));
     }
     for (const auto& col : layout.Columns) {
         std::vector<TExprPtr> args = {
@@ -2087,7 +2110,7 @@ NQumir::NAst::TExprPtr GenRowJoinAppendAst(
         };
         switch (col.Kind) {
         case TRowJoinColumn::EKind::Fixed:
-            args.push_back(Oz::Cast(number(0), std::make_shared<TPointerType>(col.StorageType)));
+            args.push_back(Oz::Cast(number(0), types.MakePointer(col.StorageType)));
             valid.push_back(Oz::Call("jr_store_fixed", std::move(args)));
             break;
         case TRowJoinColumn::EKind::Bool:
@@ -2113,39 +2136,40 @@ NQumir::NAst::TExprPtr GenRowJoinAppendAst(
             Oz::While(
                 Oz::Bin(TOperator("<"), Oz::Ident("i"), Oz::Ident("n")),
                 Oz::Block({
-                    Oz::If(RowSelected("i"), Oz::Block(std::move(store))),
+                    Oz::If(RowSelected(types, "i"), Oz::Block(std::move(store))),
                     Oz::Assign("i", Oz::Add(Oz::Ident("i"), number(1))),
                 })))
-        .Stmt(Oz::Return(Oz::Bool(true)));
+        .Stmt(Oz::Return(Oz::Bool(types, true)));
     return std::move(builder).Build();
 }
 
 NQumir::NAst::TExprPtr GenRowJoinProbeAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     const TRowJoinLayout& layout,
     bool probeIsLeft,
     bool emitUnmatched,
     const std::string& funcName,
-    const TRowJoinGenTypes& types,
+    const TRowJoinGenTypes& joinTypes,
     bool hasPrecomputedHash)
 {
-    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
-    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
-    auto boolType = std::make_shared<TBoolType>();
-    auto ptrKeyType = std::make_shared<TPointerType>(key.LookupType);
+    auto i64Type = types.MakeInteger(TIntegerType::I64);
+    auto u8Type = types.MakeInteger(TIntegerType::U8);
+    auto u64Type = types.MakeInteger(TIntegerType::U64);
+    auto boolType = types.Make<TBoolType>();
+    auto ptrKeyType = types.MakePointer(key.LookupType);
     auto number = [&](int64_t value) {
-        return Oz::TypedInt(value, i64Type);
+        return Oz::TypedInt(types, value, i64Type);
     };
 
     Oz::TFunBuilder builder(funcName);
-    builder.Param("table", RefType("RowTable", types.Table))
-        .Param("scratch", RefType("RowScratch", types.Scratch))
-        .Param("batch", RefType("TRowSet", types.RowSet))
-        .Param("key_columns", std::make_shared<TPointerType>(i64Type))
-        .Param("pairs", RefType("PairBuffer", types.PairBuffer))
+    builder.Param("table", RefType(types, "RowTable", joinTypes.Table))
+        .Param("scratch", RefType(types, "RowScratch", joinTypes.Scratch))
+        .Param("batch", RefType(types, "TRowSet", joinTypes.RowSet))
+        .Param("key_columns", types.MakePointer(i64Type))
+        .Param("pairs", RefType(types, "PairBuffer", joinTypes.PairBuffer))
         .Return(boolType);
-    GenBatchPrologue(builder, key, types, hasPrecomputedHash);
+    GenBatchPrologue(types, builder, key, joinTypes, hasPrecomputedHash);
     builder
         .Stmt(
             Oz::If(
@@ -2158,10 +2182,10 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(
                             Oz::Ident("n"),
                             number(static_cast<int64_t>(key.Size)),
                         })),
-                Oz::Block({Oz::Return(Oz::Bool(false))})))
-        .Var("hashes", std::make_shared<TPointerType>(u64Type))
+                Oz::Block({Oz::Return(Oz::Bool(types, false))})))
+        .Var("hashes", types.MakePointer(u64Type))
         .Assign("hashes", Oz::Field("scratch", "Hashes"))
-        .Var("rows", std::make_shared<TPointerType>(i64Type))
+        .Var("rows", types.MakePointer(i64Type))
         .Assign("rows", Oz::Field("scratch", "Rows"))
         .Var("keys", ptrKeyType)
         .Assign("keys", Oz::Cast(Oz::Field("scratch", "Keys"), ptrKeyType))
@@ -2171,11 +2195,11 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(
     // Pass 1, the only one that reads the batch: the key and hash of every
     // selected row with a valid key. The pointer and key passes are
     // rt_seek_all of the row table and jr_probe_candidates of join_rows.oz.
-    auto keyRead = GenKeyReadAst(key, "i", "key_value_", types.StringView);
+    auto keyRead = GenKeyReadAst(types, key, "i", "key_value_", joinTypes.StringView);
     std::vector<TExprPtr> collect = std::move(keyRead.Setup);
     collect.push_back(Oz::Var("key_value", key.LookupType));
     collect.push_back(Oz::Assign("key_value", std::move(keyRead.Value)));
-    std::vector<TExprPtr> valid = GenHashValue("i", "key_value", hasPrecomputedHash);
+    std::vector<TExprPtr> valid = GenHashValue(types, "i", "key_value", hasPrecomputedHash);
     valid.push_back(Oz::ArrayAssign("rows", Oz::Ident("cnt"), Oz::Ident("i")));
     valid.push_back(Oz::ArrayAssign("hashes", Oz::Ident("cnt"), Oz::Ident("hash_value")));
     valid.push_back(Oz::ArrayAssign("keys", Oz::Ident("cnt"), Oz::Ident("key_value")));
@@ -2188,13 +2212,13 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(
             {
                 Oz::Ident("pairs"),
                 Oz::Ident("i"),
-                Oz::NullPtr(std::make_shared<TPointerType>(u8Type)),
-                Oz::Bool(probeIsLeft),
+                Oz::NullPtr(types, types.MakePointer(u8Type)),
+                Oz::Bool(types, probeIsLeft),
             });
         nullKey = Oz::Block({
             Oz::If(
                 Oz::Unary(TOperator("!"), std::move(padded)),
-                Oz::Block({Oz::Return(Oz::Bool(false))})),
+                Oz::Block({Oz::Return(Oz::Bool(types, false))})),
         });
     }
     collect.push_back(
@@ -2208,7 +2232,7 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(
             Oz::While(
                 Oz::Bin(TOperator("<"), Oz::Ident("i"), Oz::Ident("n")),
                 Oz::Block({
-                    Oz::If(RowSelected("i"), Oz::Block(std::move(collect))),
+                    Oz::If(RowSelected(types, "i"), Oz::Block(std::move(collect))),
                     Oz::Assign("i", Oz::Add(Oz::Ident("i"), number(1))),
                 })))
         .Stmt(Oz::Call("rt_seek_all", {Oz::Ident("table"), Oz::Ident("scratch"), Oz::Ident("cnt")}))
@@ -2222,8 +2246,8 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(
                         Oz::Ident("pairs"),
                         Oz::Ident("cnt"),
                         number(layout.KeyOffset),
-                        Oz::Bool(probeIsLeft),
-                        Oz::Bool(emitUnmatched),
+                        Oz::Bool(types, probeIsLeft),
+                        Oz::Bool(types, emitUnmatched),
                         number(layout.MarkOffset),
                         Oz::Cast(number(0), ptrKeyType),
                     })));
@@ -2231,15 +2255,16 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(
 }
 
 NQumir::NAst::TExprPtr GenRowJoinDispatchAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     const TRowJoinLayout& layout,
-    const TRowJoinGenTypes& types,
+    const TRowJoinGenTypes& joinTypes,
     EJoinType type)
 {
-    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto boolType = std::make_shared<TBoolType>();
+    auto i64Type = types.MakeInteger(TIntegerType::I64);
+    auto boolType = types.Make<TBoolType>();
     auto number = [&](int64_t value) {
-        return Oz::TypedInt(value, i64Type);
+        return Oz::TypedInt(types, value, i64Type);
     };
     auto opIs = [&](int64_t op) {
         return Oz::Bin(TOperator("=="), Oz::Ident("op"), number(op));
@@ -2248,12 +2273,12 @@ NQumir::NAst::TExprPtr GenRowJoinDispatchAst(
     constexpr int64_t blockRows = 16384;
 
     Oz::TFunBuilder builder("jr_dispatch");
-    builder.Param("arena", RefType("RowArena", types.Arena))
-        .Param("table", RefType("RowTable", types.Table))
-        .Param("scratch", RefType("RowScratch", types.Scratch))
-        .Param("pairs", RefType("PairBuffer", types.PairBuffer))
-        .Param("batch", RefType("TRowSet", types.RowSet))
-        .Param("key_columns", std::make_shared<TPointerType>(i64Type))
+    builder.Param("arena", RefType(types, "RowArena", joinTypes.Arena))
+        .Param("table", RefType(types, "RowTable", joinTypes.Table))
+        .Param("scratch", RefType(types, "RowScratch", joinTypes.Scratch))
+        .Param("pairs", RefType(types, "PairBuffer", joinTypes.PairBuffer))
+        .Param("batch", RefType(types, "TRowSet", joinTypes.RowSet))
+        .Param("key_columns", types.MakePointer(i64Type))
         .Param("op", i64Type)
         .Return(boolType)
         .Stmt(
@@ -2263,7 +2288,7 @@ NQumir::NAst::TExprPtr GenRowJoinDispatchAst(
                     Oz::Call(
                         "ra_init",
                         {Oz::Ident("arena"), number(layout.RowBytes), number(blockRows)}),
-                    Oz::Return(Oz::Bool(true)),
+                    Oz::Return(Oz::Bool(types, true)),
                 })))
         .Stmt(
             Oz::If(
@@ -2285,7 +2310,7 @@ NQumir::NAst::TExprPtr GenRowJoinDispatchAst(
                                 Oz::Ident("table"),
                                 Oz::Ident("arena"),
                                 number(layout.KeyOffset),
-                                Oz::Cast(number(0), std::make_shared<TPointerType>(key.LookupType)),
+                                Oz::Cast(number(0), types.MakePointer(key.LookupType)),
                             })),
                 })))
         .Stmt(
@@ -2326,34 +2351,35 @@ NQumir::NAst::TExprPtr GenRowJoinDispatchAst(
                                 Oz::Ident("arena"),
                                 Oz::Ident("pairs"),
                                 number(layout.MarkOffset),
-                                Oz::Bool(type == EJoinType::LeftSemi),
+                                Oz::Bool(types, type == EJoinType::LeftSemi),
                             })),
                 })));
     }
-    builder.Stmt(Oz::Return(Oz::Bool(false)));
+    builder.Stmt(Oz::Return(Oz::Bool(types, false)));
     return std::move(builder).Build();
 }
 
 NQumir::NAst::TExprPtr GenRowJoinMaterializeAst(
+    NQumir::NAst::TTypeFactory& types,
     const TStructType& leftType,
     const TStructType& rightType,
     bool buildIsLeft,
     EJoinOutputColumns output,
     const TRowJoinLayout& layout,
-    const TRowJoinGenTypes& types)
+    const TRowJoinGenTypes& joinTypes)
 {
-    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto i64Type = types.MakeInteger(TIntegerType::I64);
     auto number = [&](int64_t value) {
-        return Oz::TypedInt(value, i64Type);
+        return Oz::TypedInt(types, value, i64Type);
     };
-    auto ptrColumnType = ColumnPointerType(types.Column, types.RowSet);
-    auto rowSetPtrType = std::make_shared<TPointerType>(AsNamed("TRowSet", types.RowSet));
+    auto ptrColumnType = ColumnPointerType(types, joinTypes.Column, joinTypes.RowSet);
+    auto rowSetPtrType = types.MakePointer(AsNamed(types, "TRowSet", joinTypes.RowSet));
 
     const auto& probeType = buildIsLeft
         ? rightType
         : leftType;
     const auto probeColumns = output == EJoinOutputColumns::LeftRight
-        ? BuildJoinOutputColumns(probeType, probeType, EJoinOutputColumns::Left)
+        ? BuildJoinOutputColumns(types, probeType, probeType, EJoinOutputColumns::Left)
         : std::vector<TJoinOutputColumn>{};
     const int64_t probePair = buildIsLeft
         ? 1
@@ -2378,11 +2404,11 @@ NQumir::NAst::TExprPtr GenRowJoinMaterializeAst(
     }
 
     Oz::TFunBuilder builder("jr_materialize");
-    builder.Param("pairs", RefType("PairBuffer", types.PairBuffer))
-        .Param("stream", RefType("TRowSet", types.RowSet))
+    builder.Param("pairs", RefType(types, "PairBuffer", joinTypes.PairBuffer))
+        .Param("stream", RefType(types, "TRowSet", joinTypes.RowSet))
         .Param("start", i64Type)
         .Param("limit", i64Type)
-        .Param("out", RefType("TRowSet", types.RowSet))
+        .Param("out", RefType(types, "TRowSet", joinTypes.RowSet))
         .Return(i64Type)
         .Var("n", i64Type)
         .Assign("n", Oz::Sub(Oz::Field("pairs", "Count"), Oz::Ident("start")))
@@ -2405,7 +2431,7 @@ NQumir::NAst::TExprPtr GenRowJoinMaterializeAst(
     auto emitProbeColumn = [&](const TJoinOutputColumn& column, int64_t outIndex) {
         std::vector<TExprPtr> args = {
             Oz::Ident("pairs"),
-            Oz::NullPtr(rowSetPtrType),
+            Oz::NullPtr(types, rowSetPtrType),
             Oz::Ident("stream"),
             Oz::Ident("start"),
             Oz::Ident("n"),
@@ -2419,7 +2445,7 @@ NQumir::NAst::TExprPtr GenRowJoinMaterializeAst(
             args.push_back(number(ownerIndex++));
             args.push_back(number(ownerIndex++));
             args.push_back(number(column.FixedWidth));
-            args.push_back(Oz::Cast(number(0), std::make_shared<TPointerType>(column.StorageType)));
+            args.push_back(Oz::Cast(number(0), types.MakePointer(column.StorageType)));
             builder.Stmt(Oz::Call("jt_materialize_fixed_column", std::move(args)));
             break;
         case TJoinOutputColumn::EKind::Bool:
@@ -2458,7 +2484,7 @@ NQumir::NAst::TExprPtr GenRowJoinMaterializeAst(
             args.push_back(number(ownerIndex++));
             args.push_back(number(ownerIndex++));
             args.push_back(number(column.FixedWidth));
-            args.push_back(Oz::Cast(number(0), std::make_shared<TPointerType>(column.StorageType)));
+            args.push_back(Oz::Cast(number(0), types.MakePointer(column.StorageType)));
             builder.Stmt(Oz::Call("jr_gather_fixed_column", std::move(args)));
             break;
         case TRowJoinColumn::EKind::Bool:

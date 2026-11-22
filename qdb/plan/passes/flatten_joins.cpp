@@ -12,16 +12,16 @@ using namespace NQumir::NAst;
 namespace {
 
 TExprPtr Eq(const std::string& l, const std::string& r) {
-    return std::make_shared<TBinaryExpr>(NQumir::TLocation{}, TOperator("=="),
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, l),
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, r));
+    return NQumir::MakeIntrusive<TBinaryExpr>(NQumir::TLocation{}, TOperator("=="),
+        NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, l),
+        NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, r));
 }
 
 TExprPtr Conjoin(const std::vector<TExprPtr>& parts) {
     TExprPtr result;
     for (const auto& p : parts) {
         result = result
-            ? std::make_shared<TBinaryExpr>(p->Location, TOperator("&&"), result, p)
+            ? NQumir::MakeIntrusive<TBinaryExpr>(p->Location, TOperator("&&"), result, p)
             : p;
     }
     return result;
@@ -58,7 +58,7 @@ void Collect(const TOperatorPtr& node, std::vector<TOperatorPtr>& leaves, std::v
 
 } // namespace
 
-TOperatorPtr FlattenInnerJoins(TOperatorPtr root) {
+TOperatorPtr FlattenInnerJoins(NQumir::NAst::TTypeFactory& types, TOperatorPtr root) {
     if (!root) {
         return root;
     }
@@ -68,18 +68,18 @@ TOperatorPtr FlattenInnerJoins(TOperatorPtr root) {
         Collect(root, leaves, conds);
         TOperatorPtr chain;
         for (const auto& leaf : leaves) {
-            auto flat = FlattenInnerJoins(leaf);
+            auto flat = FlattenInnerJoins(types, leaf);
             chain = chain
-                ? std::make_shared<TJoinOperator>(
-                      chain, flat, std::vector<TJoinKey>{}, EJoinType::Inner, nullptr)
+                ? NQumir::MakeIntrusive<TJoinOperator>(
+                      types, chain, flat, std::vector<TJoinKey>{}, EJoinType::Inner, nullptr)
                 : flat;
         }
         return conds.empty()
             ? chain
-            : std::make_shared<TFilterOperator>(chain, Conjoin(conds));
+            : NQumir::MakeIntrusive<TFilterOperator>(types, chain, Conjoin(conds));
     }
     for (auto& input : root->MutableInputs()) {
-        input = FlattenInnerJoins(input);
+        input = FlattenInnerJoins(types, input);
     }
     return root;
 }

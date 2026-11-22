@@ -140,7 +140,7 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
 
         if (*relName == "use-filter") {
             auto inputExpr = co_await h.Expr();
-            auto input = std::static_pointer_cast<IOperator>(inputExpr);
+            auto input = NQumir::StaticPointerCast<IOperator>(inputExpr);
             bool hasUse = false;
             while (true) {
                 auto tok = h.Next();
@@ -221,12 +221,12 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
             auto opExpr = opts.SourceFactory(std::string_view(pathTok.Name), loc);
             if (!opExpr) co_return TError(loc, "(rel source) factory returned null");
             if (!explicitAlias.empty()) {
-                if (auto* src = dynamic_cast<TSourceOperator*>(opExpr.get())) {
-                    src->SetAlias(std::move(explicitAlias));
+                if (auto* src = dynamic_cast<TSourceOperator*>(opExpr.Get())) {
+                    src->SetAlias(h.Types(), std::move(explicitAlias));
                 }
             }
             if (rowGroupPredicate) {
-                if (auto* src = dynamic_cast<TSourceOperator*>(opExpr.get())) {
+                if (auto* src = dynamic_cast<TSourceOperator*>(opExpr.Get())) {
                     src->SetRowGroupPredicate(std::move(rowGroupPredicate));
                 }
             }
@@ -235,7 +235,7 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
 
         if (*relName == TOneRowOperator::OpId) {
             co_await h.Take(')');
-            co_return std::make_shared<TOneRowOperator>();
+            co_return NQumir::MakeIntrusive<TOneRowOperator>(h.Types());
         }
 
         if (*relName == TCteRef::OpId) {
@@ -251,20 +251,20 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
             if (it == opts.CteRegistry->end()) {
                 co_return TError(loc, "(rel cte-ref) references unknown CTE id");
             }
-            co_return std::make_shared<TCteRef>(it->second);
+            co_return NQumir::MakeIntrusive<TCteRef>(h.Types(), it->second);
         }
 
         if (*relName == TFilterOperator::OpId) {
             auto inputExpr = co_await h.Expr();
-            auto input = std::static_pointer_cast<IOperator>(inputExpr);
+            auto input = NQumir::StaticPointerCast<IOperator>(inputExpr);
             auto pred = co_await h.Expr();
             co_await h.Take(')');
-            co_return std::make_shared<TFilterOperator>(std::move(input), std::move(pred));
+            co_return NQumir::MakeIntrusive<TFilterOperator>(h.Types(), std::move(input), std::move(pred));
         }
 
         if (*relName == TProjectOperator::OpId) {
             auto inputExpr = co_await h.Expr();
-            auto input = std::static_pointer_cast<IOperator>(inputExpr);
+            auto input = NQumir::StaticPointerCast<IOperator>(inputExpr);
             std::vector<TProjectionSpec> specs;
             while (true) {
                 auto tok = h.Next();
@@ -314,12 +314,12 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                 }
                 specs.push_back(std::move(spec));
             }
-            co_return std::make_shared<TProjectOperator>(std::move(input), std::move(specs));
+            co_return NQumir::MakeIntrusive<TProjectOperator>(h.Types(), std::move(input), std::move(specs));
         }
 
         if (*relName == TLateMaterializeOperator::OpId) {
             auto inputExpr = co_await h.Expr();
-            auto input = std::static_pointer_cast<IOperator>(inputExpr);
+            auto input = NQumir::StaticPointerCast<IOperator>(inputExpr);
 
             co_await h.Take('(');
             auto locatorTagTok = h.Next();
@@ -370,8 +370,8 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                 co_return TError(
                     loc, "(rel late-materialize) requires at least one column");
             }
-            co_return std::make_shared<TLateMaterializeOperator>(
-                std::move(input), std::move(*locator), std::move(columns));
+            co_return NQumir::MakeIntrusive<TLateMaterializeOperator>(
+                h.Types(), std::move(input), std::move(*locator), std::move(columns));
         }
 
         if (*relName == TUnionAllOperator::OpId) {
@@ -381,15 +381,15 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                 if (IParseHandle::IsOp(tok, ')')) break;
                 h.Unget(tok);
                 auto branch = co_await h.Expr();
-                inputs.push_back(std::static_pointer_cast<IOperator>(std::move(branch)));
+                inputs.push_back(NQumir::StaticPointerCast<IOperator>(std::move(branch)));
             }
-            co_return std::make_shared<TUnionAllOperator>(std::move(inputs));
+            co_return NQumir::MakeIntrusive<TUnionAllOperator>(h.Types(), std::move(inputs));
         }
 
         if (*relName == TSortOperator::OpId || *relName == TTopSortOperator::OpId) {
             const bool isTopSort = *relName == TTopSortOperator::OpId;
             auto inputExpr = co_await h.Expr();
-            auto input = std::static_pointer_cast<IOperator>(inputExpr);
+            auto input = NQumir::StaticPointerCast<IOperator>(inputExpr);
             std::vector<TSortKey> keys;
             std::optional<int64_t> limit;
 
@@ -440,17 +440,17 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                 if (!limit) {
                     co_return TError(loc, "(rel top-sort) requires (limit N)");
                 }
-                co_return std::make_shared<TTopSortOperator>(std::move(input), std::move(keys), *limit);
+                co_return NQumir::MakeIntrusive<TTopSortOperator>(h.Types(), std::move(input), std::move(keys), *limit);
             }
             if (limit) {
                 co_return TError(loc, "(rel sort) does not accept (limit N); use (rel top-sort)");
             }
-            co_return std::make_shared<TSortOperator>(std::move(input), std::move(keys));
+            co_return NQumir::MakeIntrusive<TSortOperator>(h.Types(), std::move(input), std::move(keys));
         }
 
         if (*relName == TLimitOperator::OpId) {
             auto inputExpr = co_await h.Expr();
-            auto input = std::static_pointer_cast<IOperator>(inputExpr);
+            auto input = NQumir::StaticPointerCast<IOperator>(inputExpr);
             std::optional<int64_t> limit;
             int64_t offset = 0;
 
@@ -481,12 +481,12 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
             if (!limit) {
                 co_return TError(loc, "(rel limit) requires (limit N)");
             }
-            co_return std::make_shared<TLimitOperator>(std::move(input), *limit, offset);
+            co_return NQumir::MakeIntrusive<TLimitOperator>(h.Types(), std::move(input), *limit, offset);
         }
 
         if (*relName == TAggregateOperator::OpId) {
             auto inputExpr = co_await h.Expr();
-            auto input = std::static_pointer_cast<IOperator>(inputExpr);
+            auto input = NQumir::StaticPointerCast<IOperator>(inputExpr);
 
             co_await h.Take('(');
             auto keysTok = h.Next();
@@ -532,14 +532,14 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                 aggs.push_back({outName.Name, funcTok.Name, std::move(arg)});
             }
 
-            co_return std::make_shared<TAggregateOperator>(std::move(input), std::move(groupKeys), std::move(aggs));
+            co_return NQumir::MakeIntrusive<TAggregateOperator>(h.Types(), std::move(input), std::move(groupKeys), std::move(aggs));
         }
 
         if (*relName == TJoinOperator::OpId) {
             auto leftExpr = co_await h.Expr();
-            auto left = std::static_pointer_cast<IOperator>(leftExpr);
+            auto left = NQumir::StaticPointerCast<IOperator>(leftExpr);
             auto rightExpr = co_await h.Expr();
-            auto right = std::static_pointer_cast<IOperator>(rightExpr);
+            auto right = NQumir::StaticPointerCast<IOperator>(rightExpr);
 
             // Key pairs optionally carry NULL-equal comparison semantics.
             co_await h.Take('(');
@@ -622,15 +622,15 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                 filter = co_await h.Expr();
             }
 
-            auto joinOp = std::make_shared<TJoinOperator>(
-                std::move(left), std::move(right), std::move(keys), type, std::move(filter));
+            auto joinOp = NQumir::MakeIntrusive<TJoinOperator>(
+                h.Types(), std::move(left), std::move(right), std::move(keys), type, std::move(filter));
             joinOp->MutableRuntimeFilter() = std::move(runtimeFilter);
             co_return joinOp;
         }
 
         if (*relName == TWindowOperator::OpId) {
             auto inputExpr = co_await h.Expr();
-            auto input = std::static_pointer_cast<IOperator>(inputExpr);
+            auto input = NQumir::StaticPointerCast<IOperator>(inputExpr);
             std::vector<std::string> partitionKeys;
             std::vector<TSortKey> orderKeys;
             std::optional<TWindowFrame> frame;
@@ -737,8 +737,8 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                 }
             }
 
-            co_return std::make_shared<TWindowOperator>(
-                std::move(input), std::move(partitionKeys), std::move(orderKeys),
+            co_return NQumir::MakeIntrusive<TWindowOperator>(
+                h.Types(), std::move(input), std::move(partitionKeys), std::move(orderKeys),
                 std::move(frame), std::move(funcs));
         }
 
@@ -771,7 +771,7 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                 co_await h.Take(')');
                 auto def = std::make_shared<TCteDefinition>();
                 def->Id = static_cast<uint32_t>(idTok.Value.i64);
-                def->Plan = std::static_pointer_cast<IOperator>(std::move(planExpr));
+                def->Plan = NQumir::StaticPointerCast<IOperator>(std::move(planExpr));
                 def->OutputType = def->Plan->OutputColumns();
                 auto [it, inserted] = opts.CteRegistry->emplace(def->Id, def);
                 if (!inserted) {
@@ -780,7 +780,7 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
             } else if (head && *head == "main") {
                 auto planExpr = co_await h.Expr();
                 co_await h.Take(')'); // close (main ...)
-                main = std::static_pointer_cast<IOperator>(std::move(planExpr));
+                main = NQumir::StaticPointerCast<IOperator>(std::move(planExpr));
                 co_await h.Take(')'); // close (query ...)
                 break;
             } else {

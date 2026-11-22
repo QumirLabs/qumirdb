@@ -3,6 +3,7 @@
 #include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
+#include <qdb/plan/types/type_text.h>
 
 #include <stdexcept>
 
@@ -10,7 +11,7 @@ namespace NQdb {
 
 std::vector<TValueLayout> RowLayouts(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
-    auto structure = TMaybeType<TStructType>(UnwrapNamedType(type));
+    auto structure = TMaybeType<TStructType>(UnwrapNamedValueType(type));
     if (!structure) {
         throw std::runtime_error("row type must be a struct");
     }
@@ -18,7 +19,7 @@ std::vector<TValueLayout> RowLayouts(const NQumir::NAst::TTypePtr& type) {
     for (const auto& [name, field] : structure.Cast()->Fields) {
         const auto value = ValueTypeOf(field);
         if (!value) {
-            throw std::runtime_error("unsupported row column: " + field->ToString());
+            throw std::runtime_error("unsupported row column: " + SqlTypeName(field));
         }
         layouts.push_back({.Width = value->Width, .Bitmap = value->Kind == EValueKind::Bool});
     }
@@ -37,7 +38,7 @@ std::optional<TValueType> ValueTypeOf(const NQumir::NAst::TTypePtr& type) {
             .Nullable = nullable,
         };
     }
-    if (const auto date = std::dynamic_pointer_cast<TDateType>(value)) {
+    if (const auto* date = DateStorageType(value)) {
         return TValueType{.Kind = EValueKind::Date, .Width = date->BitWidth() / 8, .Nullable = nullable};
     }
     if (IsBinIntStorageType(value)) {
@@ -46,13 +47,13 @@ std::optional<TValueType> ValueTypeOf(const NQumir::NAst::TTypePtr& type) {
     // Aliases and Nullable may nest around the other types.
     auto inner = value;
     while (true) {
-        const auto next = UnwrapNamedType(UnwrapNullableType(inner));
+        const auto next = UnwrapNamedValueType(UnwrapNullableType(inner));
         if (next == inner) {
             break;
         }
         inner = next;
     }
-    if (auto maybeInteger = TMaybeType<TIntegerType>(inner)) {
+    if (auto maybeInteger = MaybeIntegerType(inner)) {
         const auto integer = maybeInteger.Cast();
         return TValueType{
             .Kind = integer->IsSigned() ? EValueKind::Signed : EValueKind::Unsigned,

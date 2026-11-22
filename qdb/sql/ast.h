@@ -487,7 +487,7 @@ struct TSqlExternalFunction : TSqlNode {
     // Symbol -> Func->MangledName
     // Args -> Func->Params
     // RetType -> Func->RetType
-    std::shared_ptr<NQumir::NAst::TFunDecl> Func;
+    NQumir::TIntrusivePtr<NQumir::NAst::TFunDecl> Func;
     bool Replace = false;
 
     explicit TSqlExternalFunction(bool replace)

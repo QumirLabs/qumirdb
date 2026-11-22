@@ -14,6 +14,7 @@
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/late_materialize.h>
 #include <qdb/plan/ops/union.h>
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <algorithm>
@@ -29,7 +30,7 @@ using namespace NQumir::NAst;
 using namespace NQumir::NAst::NLiterals;
 
 double EstimateTypeWidth(const TTypePtr& type) {
-    auto inner = UnwrapNamedType(UnwrapNullableType(type));
+    auto inner = UnwrapNamedValueType(UnwrapNullableType(type));
     if (const auto width = NKernel::FixedValueWidth(type)) {
         return static_cast<double>(width);
     }
@@ -107,11 +108,11 @@ TTypePtr ColumnTypeOf(const TOperatorPtr& op, const std::string& name) {
     if (!op) {
         return nullptr;
     }
-    auto structure = TMaybeType<TStructType>(op->OutputColumns());
+    auto structure = op->OutputColumns();
     if (!structure) {
         return nullptr;
     }
-    for (const auto& [fieldName, fieldType] : structure.Cast()->Fields) {
+    for (const auto& [fieldName, fieldType] : structure->Fields) {
         if (fieldName == name) {
             return fieldType;
         }
@@ -499,7 +500,7 @@ private:
         // NaN != NaN, so a float column keeps the general estimate below.
         auto type = ColumnType(leftName);
         const bool mayBeNaN = type
-            && TMaybeType<TFloatType>(UnwrapNamedType(UnwrapNullableType(type)));
+            && TMaybeType<TFloatType>(UnwrapNamedValueType(UnwrapNullableType(type)));
         if (leftName == rightName && !mayBeNaN) {
             // A column equals itself on every non-NULL row, whatever its
             // NDV; `x != x` holds on no row.
@@ -572,9 +573,9 @@ private:
             static_cast<double>(*it->second->NullCount) / static_cast<double>(InputStats_.RowCount));
     }
 
-    std::shared_ptr<TNumberExpr> ConstNumber(const TExprPtr& expr) {
+    NQumir::TIntrusivePtr<TNumberExpr> ConstNumber(const TExprPtr& expr) {
         if (auto number = TMaybeNode<TNumberExpr>(expr)) {
-            return number.Cast();
+            return NQumir::TIntrusivePtr<TNumberExpr>(number.Cast());
         }
         if (!IsConstExpr(expr)) {
             return nullptr;
@@ -592,7 +593,7 @@ private:
         // Check the statistics first: evaluating the bound is the costly step.
         if (
             colIt == InputStats_.ColumnStats.end() || colIt->second->Histogram.empty() ||
-            !(TMaybeType<TFloatType>(type) || TMaybeType<TIntegerType>(type)))
+            !(TMaybeType<TFloatType>(type) || MaybeIntegerType(type)))
         {
             return std::nullopt;
         }
@@ -617,7 +618,7 @@ private:
         if (TMaybeType<TFloatType>(type)) {
             return stats.FractionBelow(static_cast<double>(value), strict);
         }
-        if (!TMaybeType<TIntegerType>(type)) {
+        if (!MaybeIntegerType(type)) {
             return std::nullopt;
         }
         if constexpr (std::is_floating_point_v<TValue>) {
@@ -666,7 +667,7 @@ private:
         const auto lowerType = ColumnType(lowerName);
         const auto upperType = ColumnType(upperName);
         const bool upperFloat = static_cast<bool>(TMaybeType<TFloatType>(upperType));
-        if (upper.Histogram.size() < 2 || !(upperFloat || TMaybeType<TIntegerType>(upperType))) {
+        if (upper.Histogram.size() < 2 || !(upperFloat || MaybeIntegerType(upperType))) {
             return std::nullopt;
         }
         auto below = [&](size_t boundary) {
@@ -733,7 +734,7 @@ private:
         }
         double min = 0.0;
         double max = 0.0;
-        if (auto integer = TMaybeType<TIntegerType>(ColumnType(colName))) {
+        if (auto integer = MaybeIntegerType(ColumnType(colName))) {
             // The smallest and the largest integer between the ends.
             lower.Value = lower.Inclusive
                 ? std::ceil(lower.Value)
@@ -770,7 +771,7 @@ private:
             return std::nullopt;
         }
         const auto type = ColumnType(colName);
-        auto integerType = TMaybeType<TIntegerType>(type);
+        auto integerType = MaybeIntegerType(type);
         if (type && !integerType && !TMaybeType<TFloatType>(type)) {
             return std::nullopt;
         }
@@ -936,7 +937,7 @@ double EstimateResidual(
     std::vector<std::pair<std::string, TTypePtr>> fields;
     for (const auto& column : FindUnboundVars(residual)) {
         for (const auto& input : {left, right}) {
-            if (auto type = FieldType(input->OutputColumns().get(), column)) {
+            if (auto type = FieldType(input->OutputColumns(), column)) {
                 fields.emplace_back(column, std::move(type));
                 if (auto it = input->Stats_->ColumnStats.find(column); it != input->Stats_->ColumnStats.end()) {
                     stats.ColumnStats.insert(*it);
@@ -948,7 +949,7 @@ double EstimateResidual(
     const double rows = static_cast<double>(left->Stats_->RowCount)
         * static_cast<double>(right->Stats_->RowCount);
     stats.RowCount = static_cast<uint64_t>(std::min(rows, 0x1p63));
-    const TStructType type(std::move(fields));
+    const TStructType& type = *folder.Types().MakeStruct(std::move(fields));
     const double selectivity = TSelectivityEstimator(stats, type, false, folder).Estimate(residual);
     return std::clamp(selectivity, 0.0, 1.0);
 }
@@ -957,7 +958,7 @@ double EstimateResidual(
 double EstimateSelectivity(
     const TExprPtr& atom,
     const TStatsPtr& inputStats,
-    const std::shared_ptr<TStructType>& operatorType,
+    const TStructType* operatorType,
     bool overSource,
     TConstFolder& folder)
 {
@@ -967,7 +968,7 @@ double EstimateSelectivity(
     return TSelectivityEstimator(*inputStats, *operatorType, overSource, folder).Estimate(atom);
 }
 
-TStatsPtr ComputeFilterStats(const std::shared_ptr<TFilterOperator>& filter, TConstFolder& folder) {
+TStatsPtr ComputeFilterStats(const NQumir::TIntrusivePtr<TFilterOperator>& filter, TConstFolder& folder) {
     auto inputStats = filter->Input()->Stats_;
     if (!inputStats) {
         return nullptr;
@@ -985,7 +986,7 @@ TStatsPtr ComputeFilterStats(const std::shared_ptr<TFilterOperator>& filter, TCo
     return outputStats;
 }
 
-TStatsPtr ComputeProjectStats(const std::shared_ptr<TProjectOperator>& project) {
+TStatsPtr ComputeProjectStats(const NQumir::TIntrusivePtr<TProjectOperator>& project) {
     auto inputStats = project->Input()->Stats_;
     if (!inputStats) {
         return nullptr;
@@ -1066,9 +1067,10 @@ std::optional<TValueRange> ValueRange(const TOperatorPtr& op, const std::string&
         return std::nullopt;
     }
     // A named type such as DECIMAL is not compared by its raw value.
-    auto type = UnwrapNullableType(ColumnTypeOf(op, name));
+    const auto columnType = ColumnTypeOf(op, name);
+    const auto& type = UnwrapNullableType(columnType);
     TValueRange range;
-    if (auto integer = TMaybeType<TIntegerType>(type)) {
+    if (auto integer = MaybeIntegerType(type)) {
         range.Integer = true;
         range.Signed = integer.Cast()->IsSigned();
         range.Min = range.Signed
@@ -1235,7 +1237,7 @@ TColumnOrigin ColumnOrigin(const TOperatorPtr& op, const std::string& column) {
     if (auto maybeJoin = TMaybeOp<TJoinOperator>(op)) {
         auto join = maybeJoin.Cast();
         return ColumnOrigin(
-            FieldType(join->Left()->OutputColumns().get(), column) ? join->Left() : join->Right(),
+            FieldType(join->Left()->OutputColumns(), column) ? join->Left() : join->Right(),
             column);
     }
     if (auto maybeFilter = TMaybeOp<TFilterOperator>(op)) {
@@ -1253,7 +1255,7 @@ TColumnOrigin ColumnOrigin(const TOperatorPtr& op, const std::string& column) {
             break;
         }
     }
-    return {op.get(), column};
+    return {op.Get(), column};
 }
 
 // The rows of a key's relation, before the filters and joins above it; 0
@@ -1543,7 +1545,7 @@ uint64_t JoinRows(
 }
 
 TStatsPtr ComputeJoinStats(
-    const std::shared_ptr<TJoinOperator>& join,
+    const NQumir::TIntrusivePtr<TJoinOperator>& join,
     TConstFolder& folder,
     const std::unordered_set<std::string>* columns = nullptr)
 {
@@ -1629,7 +1631,7 @@ TStatsPtr ComputeJoinStats(
     return outputStats;
 }
 
-TStatsPtr ComputeSourceStats(const std::shared_ptr<TSourceOperator>& source) {
+TStatsPtr ComputeSourceStats(const NQumir::TIntrusivePtr<TSourceOperator>& source) {
     auto raw = source->GetTable()->Stats();
     if (!raw) {
         return nullptr;
@@ -1639,7 +1641,7 @@ TStatsPtr ComputeSourceStats(const std::shared_ptr<TSourceOperator>& source) {
     out->RowCount = raw->RowCount;
     out->Cost = static_cast<double>(out->RowCount)
         * std::max(OutputRowWidth(source), 1.0);
-    for (const auto& col : source->GetTable()->Schema().Columns) {
+    for (const auto& col : source->TableSchema().Columns) {
         auto it = raw->ColumnStats.find(std::string(col.Name));
         if (it != raw->ColumnStats.end()) {
             out->ColumnStats[alias + "." + std::string(col.Name)] = it->second;
@@ -1648,7 +1650,7 @@ TStatsPtr ComputeSourceStats(const std::shared_ptr<TSourceOperator>& source) {
     return out;
 }
 
-TStatsPtr ComputeUnionStats(const std::shared_ptr<TUnionAllOperator>& un) {
+TStatsPtr ComputeUnionStats(const NQumir::TIntrusivePtr<TUnionAllOperator>& un) {
     auto&& outStruct = un->OutputColumns();
     if (!outStruct) {
         return nullptr;
@@ -1704,7 +1706,7 @@ TStatsPtr ComputeUnionStats(const std::shared_ptr<TUnionAllOperator>& un) {
     return out;
 }
 
-TStatsPtr ComputeAggregateStats(const std::shared_ptr<TAggregateOperator>& aggregate)
+TStatsPtr ComputeAggregateStats(const NQumir::TIntrusivePtr<TAggregateOperator>& aggregate)
 {
     auto inputStats = aggregate->Input()->Stats_;
     if (!inputStats) {
@@ -1841,7 +1843,7 @@ TStatsPtr ComputeStatsFor(TOperatorPtr op, TConstFolder& folder) {
 } // namespace
 
 TStatsPtr EstimateJoinStats(
-    const std::shared_ptr<TJoinOperator>& join,
+    const NQumir::TIntrusivePtr<TJoinOperator>& join,
     TConstFolder& folder,
     const std::unordered_set<std::string>* columns)
 {
@@ -1869,8 +1871,8 @@ TStatsPtr EstimateStats(TOperatorPtr op, TConstFolder& folder) {
     return op->Stats_ = std::move(stats);
 }
 
-TStatsPtr EstimateStats(TOperatorPtr op) {
-    TConstFolder folder;
+TStatsPtr EstimateStats(NQumir::NAst::TTypeFactory& types, TOperatorPtr op) {
+    TConstFolder folder(types);
     return EstimateStats(op, folder);
 }
 

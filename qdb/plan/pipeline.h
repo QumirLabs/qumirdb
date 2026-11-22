@@ -29,6 +29,6 @@ struct TPlanPassOptions {
     std::ostream* DumpPasses = nullptr;
 };
 
-void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options = {});
+void ApplyPlanPasses(NQumir::NAst::TTypeFactory& types, TOperatorPtr& plan, TPlanPassOptions options = {});
 
 } // namespace NQdb

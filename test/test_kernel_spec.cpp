@@ -15,20 +15,22 @@
 #include <string>
 #include <utility>
 
+#include "test_types.h"
+
 using namespace NQdb;
 
 TEST(KernelSpec, LikeConstantPatternPicksFastPath) {
     using namespace NQumir::NAst;
-    TStructType input({{"url", std::make_shared<TStringType>()}});
+    const auto& input = *TestTypes().MakeStruct({{"url", TestTypes().Make<TStringType>()}});
     auto lowered = [&](const std::string& pattern) {
-        auto call = std::make_shared<TCallExpr>(NQumir::TLocation{},
-            std::make_shared<TIdentExpr>(NQumir::TLocation{}, "qdb_string_view_sql_like"),
+        auto call = NQumir::MakeIntrusive<TCallExpr>(NQumir::TLocation{},
+            NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "qdb_string_view_sql_like"),
             std::vector<TExprPtr>{
-                std::make_shared<TIdentExpr>(NQumir::TLocation{}, "url"),
-                std::make_shared<TStringLiteralExpr>(NQumir::TLocation{}, pattern),
+                NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "url"),
+                NQumir::MakeIntrusive<TStringLiteralExpr>(NQumir::TLocation{}, pattern, TestTypes()),
             });
         return NCore::PrintAst(
-            NKernel::ExpandKernelExpr(call, input, nullptr).first);
+            NKernel::ExpandKernelExpr(TestTypes(), call, input, nullptr).first);
     };
     EXPECT_NE(lowered("%google%").find("qdb_like_contains"), std::string::npos);
     EXPECT_NE(lowered("google%").find("qdb_like_prefix"), std::string::npos);
@@ -41,12 +43,12 @@ TEST(KernelSpec, LikeConstantPatternPicksFastPath) {
 TEST(KernelSpec, PrintsStableDebugDescription) {
     using namespace NQumir::NAst;
 
-    auto i64 = std::make_shared<TIntegerType>();
-    auto input = std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{
+    auto i64 = TestTypes().MakeInteger();
+    auto input = TestTypes().MakeStruct(std::vector<std::pair<std::string, TTypePtr>>{
         {"a", i64},
         {"b", i64},
     });
-    auto output = std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{
+    auto output = TestTypes().MakeStruct(std::vector<std::pair<std::string, TTypePtr>>{
         {"a", i64},
     });
 
@@ -59,10 +61,10 @@ TEST(KernelSpec, PrintsStableDebugDescription) {
             {.Name = "b", .Index = 1, .Type = i64},
         },
         .Expressions = {
-            std::make_shared<TBinaryExpr>(
+            NQumir::MakeIntrusive<TBinaryExpr>(
                 NQumir::TLocation{}, TOperator(">"),
-                std::make_shared<TIdentExpr>(NQumir::TLocation{}, "b"),
-                std::make_shared<TNumberExpr>(NQumir::TLocation{}, int64_t(0))),
+                NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "b"),
+                NQumir::MakeIntrusive<TNumberExpr>(NQumir::TLocation{}, int64_t(0), TestTypes())),
         },
         .Keys = {
             {.Name = "predicate-columns",
@@ -101,18 +103,18 @@ TEST(KernelSpec, PrintsStableDebugDescription) {
 TEST(KernelSpec, BuildsFilterSpecFromPredicate) {
     using namespace NQumir::NAst;
 
-    auto i64 = std::make_shared<TIntegerType>();
-    TStructType input({
+    auto i64 = TestTypes().MakeInteger();
+    const auto& input = *TestTypes().MakeStruct({
         {"a", i64},
         {"b", i64},
         {"c", i64},
     });
-    auto predicate = std::make_shared<TBinaryExpr>(
+    auto predicate = NQumir::MakeIntrusive<TBinaryExpr>(
         NQumir::TLocation{}, TOperator("<"),
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "c"),
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "a"));
+        NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "c"),
+        NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "a"));
 
-    auto spec = NKernel::BuildFilterKernelSpec(input, predicate, "qdb_filter_test");
+    auto spec = NKernel::BuildFilterKernelSpec(TestTypes(), input, predicate, "qdb_filter_test");
 
     EXPECT_EQ(spec.Kind, NKernel::EOperatorKernelKind::UnaryStreaming);
     EXPECT_EQ(spec.OperatorName, "filter");
@@ -134,22 +136,22 @@ TEST(KernelSpec, BuildsFilterSpecFromPredicate) {
 TEST(KernelSpec, BuildsProjectSpecFromComputedExpressions) {
     using namespace NQumir::NAst;
 
-    auto i64 = std::make_shared<TIntegerType>();
-    auto f64 = std::make_shared<TFloatType>();
-    TStructType input({
+    auto i64 = TestTypes().MakeInteger();
+    auto f64 = TestTypes().MakeFloat();
+    const auto& input = *TestTypes().MakeStruct({
         {"a", i64},
         {"b", f64},
         {"c", i64},
     });
     std::vector<TExprPtr> exprs = {
-        std::make_shared<TBinaryExpr>(
+        NQumir::MakeIntrusive<TBinaryExpr>(
             NQumir::TLocation{}, TOperator("+"),
-            std::make_shared<TIdentExpr>(NQumir::TLocation{}, "b"),
-            std::make_shared<TIdentExpr>(NQumir::TLocation{}, "a")),
+            NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "b"),
+            NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "a")),
     };
     std::vector<TTypePtr> types = {f64};
 
-    auto spec = NKernel::BuildProjectKernelSpec(
+    auto spec = NKernel::BuildProjectKernelSpec(TestTypes(),
         input, exprs, types, "qdb_project_test");
 
     EXPECT_EQ(spec.Kind, NKernel::EOperatorKernelKind::UnaryStreaming);
@@ -162,7 +164,7 @@ TEST(KernelSpec, BuildsProjectSpecFromComputedExpressions) {
     EXPECT_EQ(spec.ReferencedColumns[1].Index, 1);
     ASSERT_EQ(spec.Expressions.size(), 1u);
     EXPECT_EQ(spec.Expressions[0], exprs[0]);
-    auto* output = static_cast<TStructType*>(spec.OutputSchema.get());
+    auto* output = static_cast<const TStructType*>(spec.OutputSchema);
     ASSERT_NE(output, nullptr);
     ASSERT_EQ(output->Fields.size(), 1u);
     EXPECT_EQ(output->Fields[0].first, "computed_0");
@@ -177,18 +179,18 @@ TEST(KernelSpec, BuildsProjectSpecFromComputedExpressions) {
 TEST(KernelSpec, BuildsAggregateSpecFromGroupKeysAndAggregates) {
     using namespace NQumir::NAst;
 
-    auto i64 = std::make_shared<TIntegerType>();
-    TStructType input({
+    auto i64 = TestTypes().MakeInteger();
+    const auto& input = *TestTypes().MakeStruct({
         {"k", i64},
         {"v", i64},
     });
     std::vector<TAggregateSpec> aggs = {{
         .Name = "sum_v",
         .Func = "sum",
-        .Arg = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "v"),
+        .Arg = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "v"),
     }};
 
-    auto spec = NKernel::BuildAggregateKernelSpec(input, {"k"}, aggs);
+    auto spec = NKernel::BuildAggregateKernelSpec(TestTypes(), input, {"k"}, aggs);
 
     EXPECT_EQ(spec.Kind, NKernel::EOperatorKernelKind::UnaryBlocking);
     EXPECT_EQ(spec.OperatorName, "aggregate");
@@ -212,14 +214,14 @@ TEST(KernelSpec, BuildsAggregateSpecFromGroupKeysAndAggregates) {
 TEST(KernelSpec, BuildsSortSpecFromSortKeys) {
     using namespace NQumir::NAst;
 
-    auto i64 = std::make_shared<TIntegerType>();
-    auto str = std::make_shared<TStringType>();
-    TStructType input({
+    auto i64 = TestTypes().MakeInteger();
+    auto str = TestTypes().Make<TStringType>();
+    const auto& input = *TestTypes().MakeStruct({
         {"id", i64},
         {"name", str},
     });
 
-    auto spec = NKernel::BuildSortKernelSpec(
+    auto spec = NKernel::BuildSortKernelSpec(TestTypes(),
         input,
         {{.Column = "name",
           .Direction = ESortDirection::Desc,
@@ -242,17 +244,17 @@ TEST(KernelSpec, BuildsSortSpecFromSortKeys) {
 TEST(KernelSpec, BuildsJoinSpecFromEquiKeys) {
     using namespace NQumir::NAst;
 
-    auto i64 = std::make_shared<TIntegerType>();
-    TStructType left({
+    auto i64 = TestTypes().MakeInteger();
+    const auto& left = *TestTypes().MakeStruct({
         {"lk", i64},
         {"lv", i64},
     });
-    TStructType right({
+    const auto& right = *TestTypes().MakeStruct({
         {"rk", i64},
         {"rv", i64},
     });
 
-    auto spec = NKernel::BuildJoinKernelSpec(
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(),
         left, right, {{.Left = "lk", .Right = "rk"}}, EJoinType::Inner);
 
     EXPECT_EQ(spec.Kind, NKernel::EOperatorKernelKind::Binary);
@@ -274,17 +276,17 @@ TEST(KernelSpec, BuildsJoinSpecFromEquiKeys) {
 TEST(KernelSpec, BuildsMarkJoinSpec) {
     using namespace NQumir::NAst;
 
-    auto i64 = std::make_shared<TIntegerType>();
-    TStructType left({
+    auto i64 = TestTypes().MakeInteger();
+    const auto& left = *TestTypes().MakeStruct({
         {"lk", i64},
         {"lv", i64},
     });
-    TStructType right({
+    const auto& right = *TestTypes().MakeStruct({
         {"rk", i64},
         {"rv", i64},
     });
 
-    auto spec = NKernel::BuildJoinKernelSpec(
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(),
         left, right, {{.Left = "lk", .Right = "rk"}}, EJoinType::LeftMark,
         nullptr, "marker");
 
@@ -307,10 +309,10 @@ TEST(KernelSpec, BuildsMarkJoinSpec) {
     EXPECT_EQ(spec.Entrypoints[1].Name, "jt_materialize");
 
     // A NULL key on either side can make the marker NULL.
-    TStructType nullableRight({
-        {"rk", std::make_shared<TNullable>(i64)},
+    const auto& nullableRight = *TestTypes().MakeStruct({
+        {"rk", MakeNullableType(TestTypes(), i64)},
     });
-    auto nullableSpec = NKernel::BuildJoinKernelSpec(
+    auto nullableSpec = NKernel::BuildJoinKernelSpec(TestTypes(),
         left, nullableRight, {{.Left = "lk", .Right = "rk"}},
         EJoinType::LeftMark, nullptr, "marker");
     auto nullableOutput = TMaybeType<TStructType>(nullableSpec.OutputSchema);
@@ -324,15 +326,15 @@ TEST(KernelSpec, BuildsMarkJoinSpec) {
 TEST(KernelSpec, BuildsCrossJoinSpec) {
     using namespace NQumir::NAst;
 
-    auto i64 = std::make_shared<TIntegerType>();
-    TStructType left({
+    auto i64 = TestTypes().MakeInteger();
+    const auto& left = *TestTypes().MakeStruct({
         {"lk", i64},
     });
-    TStructType right({
+    const auto& right = *TestTypes().MakeStruct({
         {"rv", i64},
     });
 
-    auto spec = NKernel::BuildCrossJoinKernelSpec(left, right);
+    auto spec = NKernel::BuildCrossJoinKernelSpec(TestTypes(), left, right);
 
     EXPECT_EQ(spec.Kind, NKernel::EOperatorKernelKind::Binary);
     EXPECT_EQ(spec.OperatorName, "cross-join");
@@ -349,15 +351,15 @@ TEST(KernelSpec, BuildsCrossJoinSpec) {
 TEST(KernelSpec, RejectsRegexpReplaceInDirectAggregateAndJoinKernels) {
     using namespace NQumir::NAst;
 
-    auto i64 = std::make_shared<TIntegerType>();
-    TStructType input({{"value", i64}});
-    auto regex = std::make_shared<TCallExpr>(
+    auto i64 = TestTypes().MakeInteger();
+    const auto& input = *TestTypes().MakeStruct({{"value", i64}});
+    auto regex = NQumir::MakeIntrusive<TCallExpr>(
         NQumir::TLocation{},
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "regexp_replace"),
+        NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "regexp_replace"),
         std::vector<TExprPtr>{
-            std::make_shared<TIdentExpr>(NQumir::TLocation{}, "value"),
-            std::make_shared<TStringLiteralExpr>(NQumir::TLocation{}, "x"),
-            std::make_shared<TStringLiteralExpr>(NQumir::TLocation{}, "y"),
+            NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "value"),
+            NQumir::MakeIntrusive<TStringLiteralExpr>(NQumir::TLocation{}, "x", TestTypes()),
+            NQumir::MakeIntrusive<TStringLiteralExpr>(NQumir::TLocation{}, "y", TestTypes()),
         });
 
     auto expectClearError = [](auto&& build) {
@@ -371,14 +373,14 @@ TEST(KernelSpec, RejectsRegexpReplaceInDirectAggregateAndJoinKernels) {
         }
     };
     expectClearError([&] {
-        NKernel::BuildAggregateKernelSpec(input, {}, {{
+        NKernel::BuildAggregateKernelSpec(TestTypes(), input, {}, {{
             .Name = "bad",
             .Func = "count",
             .Arg = regex,
         }});
     });
     expectClearError([&] {
-        NKernel::BuildJoinKernelSpec(
+        NKernel::BuildJoinKernelSpec(TestTypes(),
             input, input, {}, EJoinType::Inner, regex);
     });
 }
@@ -386,7 +388,7 @@ TEST(KernelSpec, RejectsRegexpReplaceInDirectAggregateAndJoinKernels) {
 TEST(OzFunBuilder, BuildsFunctionDeclaration) {
     using namespace NQumir::NAst;
 
-    auto i64 = std::make_shared<TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     auto builder = NKernel::NOz::TFunBuilder("identity")
         .Param("value", i64)
         .Return(i64)
@@ -413,20 +415,20 @@ TEST(OzFunBuilder, BuildsFunctionDeclaration) {
 TEST(KernelSpec, FixedValueWidthIsTheByteWidthOfOneValue) {
     using namespace NQumir::NAst;
     auto width = [](const TTypePtr& type) { return NKernel::FixedValueWidth(type); };
-    EXPECT_EQ(width(std::make_shared<TIntegerType>(TIntegerType::I8)), 1);
-    EXPECT_EQ(width(std::make_shared<TIntegerType>(TIntegerType::U32)), 4);
-    EXPECT_EQ(width(std::make_shared<TIntegerType>(TIntegerType::I64)), 8);
-    EXPECT_EQ(width(std::make_shared<TIntegerType>(TIntegerType::I128)), 16);
-    EXPECT_EQ(width(std::make_shared<TFloatType>(TFloatType::F32)), 4);
-    EXPECT_EQ(width(std::make_shared<TFloatType>(TFloatType::F64)), 8);
-    EXPECT_EQ(width(std::make_shared<TBoolType>()), 1);
-    EXPECT_EQ(width(std::make_shared<TStringType>()), 0);
-    EXPECT_EQ(width(MakeDecimalType({.Precision = 18, .Scale = 2})), 8);
-    EXPECT_EQ(width(MakeDecimalType({.Precision = 38, .Scale = 2})), 16);
-    EXPECT_EQ(width(BinIntStorageType()), 16);
+    EXPECT_EQ(width(TestTypes().MakeInteger(TIntegerType::I8)), 1);
+    EXPECT_EQ(width(TestTypes().MakeInteger(TIntegerType::U32)), 4);
+    EXPECT_EQ(width(TestTypes().MakeInteger(TIntegerType::I64)), 8);
+    EXPECT_EQ(width(TestTypes().MakeInteger(TIntegerType::I128)), 16);
+    EXPECT_EQ(width(TestTypes().MakeFloat(TFloatType::F32)), 4);
+    EXPECT_EQ(width(TestTypes().MakeFloat(TFloatType::F64)), 8);
+    EXPECT_EQ(width(TestTypes().Make<TBoolType>()), 1);
+    EXPECT_EQ(width(TestTypes().Make<TStringType>()), 0);
+    EXPECT_EQ(width(MakeDecimalType(TestTypes(), {.Precision = 18, .Scale = 2})), 8);
+    EXPECT_EQ(width(MakeDecimalType(TestTypes(), {.Precision = 38, .Scale = 2})), 16);
+    EXPECT_EQ(width(BinIntStorageType(TestTypes())), 16);
     // Nullability does not change the width.
-    EXPECT_EQ(width(std::make_shared<TNullable>(std::make_shared<TFloatType>(TFloatType::F32))), 4);
-    EXPECT_EQ(width(std::make_shared<TNullable>(std::make_shared<TFloatType>())), 8);
+    EXPECT_EQ(width(MakeNullableType(TestTypes(), TestTypes().MakeFloat(TFloatType::F32))), 4);
+    EXPECT_EQ(width(MakeNullableType(TestTypes(), TestTypes().MakeFloat())), 8);
 }
 
 int main(int argc, char** argv) {

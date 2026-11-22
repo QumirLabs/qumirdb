@@ -95,7 +95,7 @@ struct TExecPlanNode {
     EAggregatePhase AggregatePhase = EAggregatePhase::Single;
     std::optional<TRuntimeFilterUseSpec> RuntimeFilterUse;
     std::vector<TExecPlanNodeId> Inputs;
-    NQumir::NAst::TTypePtr OutputType;
+    NQumir::NAst::TTypePtr OutputType = nullptr;
     std::vector<size_t> KernelIndexes;
     std::optional<size_t> MaterializationId;
     std::optional<std::vector<int32_t>> KeptInputColumns;

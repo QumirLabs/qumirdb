@@ -36,6 +36,7 @@ using TCteReuseDecisions = std::unordered_map<TCteDefinition*, TCteReuseDecision
 // descent (branch pruning, const-folding) to PushDownPredicates. Run after
 // main+definition optimization, before ChooseCteReuse.
 void PushConsumerPredicatesIntoDefinitions(
+    NQumir::NAst::TTypeFactory& types,
     TOperatorPtr& main,
     const NKernel::TAnnotationContext& context,
     TConstFolder& folder);
@@ -45,6 +46,6 @@ TCteReuseDecisions ChooseCteReuse(const TCteUsageMap& usage);
 
 // Realizes each TCteRef per its decision: Inline splices a private clone,
 // Materialize leaves a TCteConsumer sharing one TCteMaterialization.
-TOperatorPtr ApplyCteReuse(TOperatorPtr plan, const TCteReuseDecisions& decisions);
+TOperatorPtr ApplyCteReuse(NQumir::NAst::TTypeFactory& types, TOperatorPtr plan, const TCteReuseDecisions& decisions);
 
 } // namespace NQdb

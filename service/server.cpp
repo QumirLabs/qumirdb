@@ -3,6 +3,7 @@
 #include <coroio/pipe/pipe.hpp>
 
 #include <qdb/io/parquet/source.h>
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/plan/stats_codec.h>
@@ -289,13 +290,17 @@ std::string SchemaTypeName(const NQumir::NAst::TTypePtr& type) {
     if (!type) {
         return "unknown";
     }
-    if (auto nullable = TMaybeType<NQdb::TNullable>(type)) {
+    if (NQdb::IsNullableType(type)) {
         return "<named Nullable [" +
-            SchemaTypeName(nullable.Cast()->UnderlyingType) + "]>";
+            SchemaTypeName(NQdb::UnwrapNullableType(type)) + "]>";
     }
     if (auto decimal = NQdb::DecimalSpecOfValueType(type)) {
         return "<named Decimal [" + std::to_string(decimal->Precision) + " " +
             std::to_string(decimal->Scale) + "]>";
+    }
+    // The workbench schema has no DATE: it reads the day count as its integer.
+    if (const auto* date = NQdb::DateStorageType(type)) {
+        return NQumir::NAst::NCore::PrintType(date);
     }
     return NQumir::NAst::NCore::PrintType(type);
 }
@@ -345,7 +350,8 @@ llvm::json::Array ColumnStatsJson(const NQdb::TParquetFile& source) {
         return columns;
     }
 
-    for (const auto& column : source.Schema().Columns) {
+    NQumir::NAst::TTypeFactory types;
+    for (const auto& column : source.Schema(types).Columns) {
         const auto name = std::string(column.Name);
         auto it = stats->ColumnStats.find(name);
         if (it == stats->ColumnStats.end() || !it->second) {
@@ -997,8 +1003,9 @@ private:
             const auto sourceFile = file.filename().string();
             try {
                 NQdb::TParquetFile source(file.string());
+                NQumir::NAst::TTypeFactory types;
                 llvm::json::Array columns;
-                for (const auto& column : source.Schema().Columns) {
+                for (const auto& column : source.Schema(types).Columns) {
                     columns.push_back(llvm::json::Object{
                         {"name", std::string(column.Name)},
                         {"type", SchemaTypeName(column.Type)},

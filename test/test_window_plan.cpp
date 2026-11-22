@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "mock_source.h"
+#include "test_types.h"
 
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/join.h>
@@ -26,25 +27,25 @@ std::expected<TOperatorPtr, NQumir::TError> BuildSqlPlan(
 {
     std::istringstream in{std::string(sql)};
     NSql::TTokenStream ts(in);
-    NSql::TParser parser;
+    NSql::TParser parser(TestTypes());
     auto parsed = parser.Parse(ts);
     if (!parsed) {
         return std::unexpected(parsed.error());
     }
-    auto factory = [&](std::string_view table)
+    auto factory = [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         auto it = tables.find(std::string(table));
         if (it == tables.end()) {
             return std::unexpected(NQumir::TError("unknown table: " + std::string(table)));
         }
-        return std::make_shared<TSourceOperator>(Borrow(*it->second), std::string(table));
+        return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(*it->second), std::string(table));
     };
-    return BuildPlan(parsed.value(), factory);
+    return BuildPlan(TestTypes(), parsed.value(), factory);
 }
 
-const TWindowOperator* FindWindow(const TOperatorPtr& op) {
-    if (auto* window = dynamic_cast<const TWindowOperator*>(op.get())) {
+const TWindowOperator* FindWindow(const IOperator* op) {
+    if (auto* window = dynamic_cast<const TWindowOperator*>(op)) {
         return window;
     }
     for (const auto& child : op->Children()) {
@@ -57,8 +58,8 @@ const TWindowOperator* FindWindow(const TOperatorPtr& op) {
     return nullptr;
 }
 
-int CountWindows(const TOperatorPtr& op) {
-    int count = dynamic_cast<const TWindowOperator*>(op.get()) ? 1 : 0;
+int CountWindows(const IOperator* op) {
+    int count = dynamic_cast<const TWindowOperator*>(op) ? 1 : 0;
     for (const auto& child : op->Children()) {
         if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
             count += CountWindows(childOp.Cast());
@@ -67,8 +68,8 @@ int CountWindows(const TOperatorPtr& op) {
     return count;
 }
 
-const TJoinOperator* FindJoin(const TOperatorPtr& op) {
-    if (auto* join = dynamic_cast<const TJoinOperator*>(op.get())) {
+const TJoinOperator* FindJoin(const IOperator* op) {
+    if (auto* join = dynamic_cast<const TJoinOperator*>(op)) {
         return join;
     }
     for (const auto& child : op->Children()) {
@@ -81,10 +82,10 @@ const TJoinOperator* FindJoin(const TOperatorPtr& op) {
     return nullptr;
 }
 
-void AssertWindowFuncArgsExistInInput(const TOperatorPtr& op) {
-    if (auto* window = dynamic_cast<const TWindowOperator*>(op.get())) {
-        auto* input = static_cast<NQumir::NAst::TStructType*>(
-            window->Input()->OutputColumns().get());
+void AssertWindowFuncArgsExistInInput(const IOperator* op) {
+    if (auto* window = dynamic_cast<const TWindowOperator*>(op)) {
+        auto* input = static_cast<const NQumir::NAst::TStructType*>(
+            window->Input()->OutputColumns());
         ASSERT_NE(input, nullptr);
         auto hasField = [&](const std::string& name) {
             for (const auto& [fieldName, _] : input->Fields) {
@@ -118,7 +119,7 @@ TEST(WindowPlan, SingleSpecStructure) {
         "SELECT rank() OVER (PARTITION BY a ORDER BY b DESC) AS r FROM t", tables);
     ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
 
-    auto* window = FindWindow(*plan);
+    auto* window = FindWindow(plan->Get());
     ASSERT_NE(window, nullptr);
     ASSERT_EQ(window->PartitionKeys().size(), 1u);
     EXPECT_EQ(window->PartitionKeys()[0], "t.a");
@@ -147,7 +148,7 @@ TEST(WindowPlan, DistinctSpecsStack) {
         "rank() OVER (PARTITION BY b) AS r2 FROM t", tables);
     ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
 
-    EXPECT_EQ(CountWindows(*plan), 2);
+    EXPECT_EQ(CountWindows(plan->Get()), 2);
 }
 
 TEST(WindowPlan, FullPipelineOverJoin) {
@@ -163,11 +164,11 @@ TEST(WindowPlan, FullPipelineOverJoin) {
 
     // Full pipeline must run through the window (join reorder + equi-key
     // extraction + column pruning all recurse into the window's child).
-    ApplyPlanPasses(*plan);
+    ApplyPlanPasses(TestTypes(), *plan);
 
-    EXPECT_EQ(CountWindows(*plan), 1);
+    EXPECT_EQ(CountWindows(plan->Get()), 1);
     // The join equality below the window was lifted into a join key.
-    auto* join = FindJoin(*plan);
+    auto* join = FindJoin(plan->Get());
     ASSERT_NE(join, nullptr);
     EXPECT_FALSE(join->Keys().empty());
 }
@@ -185,7 +186,7 @@ TEST(WindowPlan, CteWindowAggregateArgsAreIndependentPerInline) {
         tables);
     ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
 
-    AssertWindowFuncArgsExistInInput(*plan);
+    AssertWindowFuncArgsExistInInput(plan->Get());
 }
 
 TEST(WindowPlan, HavingScalarSubqueryIgnoresFunctionCalleeForCorrelation) {
@@ -213,16 +214,16 @@ TEST(WindowPlan, HavingScalarSubqueryIgnoresFunctionCalleeForCorrelation) {
         ") v",
         tables);
     ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
-    ApplyPlanPasses(*plan);
+    ApplyPlanPasses(TestTypes(), *plan);
 
-    auto* window = FindWindow(*plan);
+    auto* window = FindWindow(plan->Get());
     ASSERT_NE(window, nullptr);
-    auto* scalarJoin = FindJoin(*plan);
+    auto* scalarJoin = FindJoin(plan->Get());
     ASSERT_NE(scalarJoin, nullptr);
     EXPECT_EQ(scalarJoin->JoinType(), EJoinType::Inner);
     EXPECT_TRUE(scalarJoin->Keys().empty());
-    auto* output = static_cast<NQumir::NAst::TStructType*>(
-        scalarJoin->OutputColumns().get());
+    auto* output = static_cast<const NQumir::NAst::TStructType*>(
+        scalarJoin->OutputColumns());
     ASSERT_NE(output, nullptr);
     EXPECT_TRUE(std::ranges::any_of(output->Fields, [](const auto& field) {
         return field.first == "__scalar_0__";
@@ -239,9 +240,9 @@ TEST(WindowPlan, ColumnListAliasesSurviveTyping) {
     }) {
         auto plan = BuildSqlPlan(sql, tables);
         ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
-        ApplyPlanPasses(*plan);
-        auto* output = static_cast<NQumir::NAst::TStructType*>(
-            (*plan)->OutputColumns().get());
+        ApplyPlanPasses(TestTypes(), *plan);
+        auto* output = static_cast<const NQumir::NAst::TStructType*>(
+            (*plan)->OutputColumns());
         ASSERT_NE(output, nullptr);
         ASSERT_EQ(output->Fields.size(), 1u);
         EXPECT_NE(output->Fields[0].second, nullptr);

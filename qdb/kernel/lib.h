@@ -43,7 +43,7 @@ std::string ReadRowTableKernel();
 // external jt_dispatch entry are generated in join_gen.cpp and appended by
 // TKernelCompiler::CompileJoin.
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
-BuildJoinKernelLibrary();
+BuildJoinKernelLibrary(NQumir::NAst::TTypeFactory& types);
 
 // Cross (nested-loop) join library: the shared HashTable/pair-buffer base,
 // the default residual filter, and join_cross.oz. Deliberately excludes
@@ -52,7 +52,7 @@ BuildJoinKernelLibrary();
 // cross program does not define. The per-type xj_dispatch entry is generated in
 // join_gen.cpp and appended by TKernelCompiler::CompileCrossJoin.
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
-BuildCrossJoinKernelLibrary();
+BuildCrossJoinKernelLibrary(NQumir::NAst::TTypeFactory& types);
 
 // Row join library: the shared HashTable/pair-buffer base, the output
 // materializer, row_table.oz (row arena, salted pointer table, lookup scratch)
@@ -60,14 +60,14 @@ BuildCrossJoinKernelLibrary();
 // helpers). The per-query append/build/probe functions and the jr_dispatch
 // entry are generated in join_gen.cpp and appended by TKernelCompiler::CompileRowJoin.
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
-BuildRowJoinKernelLibrary();
+BuildRowJoinKernelLibrary(NQumir::NAst::TTypeFactory& types);
 
 // The dual lookup/stored-key HashTable helpers (owned_blocks.oz,
 // robin_hood_dual_key.oz) that join_update.oz calls. Every program that
 // includes BuildJoinKernelLibrary must also include these (after the per-key
 // rh_hash / rh_key_equal / key_owned_bytes / key_clone_owned overloads).
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
-BuildJoinDualKeyLibrary();
+BuildJoinDualKeyLibrary(NQumir::NAst::TTypeFactory& types);
 
 // Parses `source` as a top-level (block (fun ...) ...) and returns its
 // FunDecl statements, in order, skipping any whose Name is in `exclude`.
@@ -77,6 +77,7 @@ BuildJoinDualKeyLibrary();
 // and lowers everything together.
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
 ParseFunctionLibrary(
+    NQumir::NAst::TTypeFactory& types,
     const std::string& source,
     const std::unordered_set<std::string>& exclude = {});
 
@@ -88,6 +89,7 @@ NQumir::NAst::TExprPtr MergeKernelLibrary(
 
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
 BuildFilterProgramAst(
+    NQumir::NAst::TTypeFactory& types,
     NQumir::NAst::TExprPtr predicate,
     const NQumir::NAst::TStructType& inputType,
     const std::unordered_map<std::string, int32_t>& fieldIndices,
@@ -101,6 +103,7 @@ BuildFilterProgramAst(
 // AllowOverloads=true and explicit entry name "agg_dispatch".
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
 BuildGenericAggregateProgramAst(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& inputType,
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
@@ -110,6 +113,7 @@ BuildGenericAggregateProgramAst(
 
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
 BuildGenericAggregateFinalizeProgramAst(
+    NQumir::NAst::TTypeFactory& types,
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr hashTableType,
@@ -117,6 +121,7 @@ BuildGenericAggregateFinalizeProgramAst(
 
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
 BuildGenericAggregateMeasureProgramAst(
+    NQumir::NAst::TTypeFactory& types,
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr hashTableType);
@@ -127,6 +132,7 @@ BuildGenericAggregateMeasureProgramAst(
 // layout (BuildAggRowLayout), the program serves both table layouts.
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
 BuildGenericAggregateFusedProgramAst(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& inputType,
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,

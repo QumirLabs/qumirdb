@@ -10,6 +10,7 @@
 #include <qdb/exec/sort_exec.h>
 #include <qdb/exec/window_exec.h>
 #include <qdb/io/row_layouts.h>
+#include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/finalize.h>
 #include <qdb/kernel/spec.h>
@@ -112,7 +113,7 @@ NScheduler::TTaskNode& AddTask(
 template <class TNode>
 struct TUnaryNodeStage {
     TNode Node;
-    NQumir::NAst::TTypePtr OutputType;
+    NQumir::NAst::TTypePtr OutputType = nullptr;
     // Appended to the label of the tasks, e.g. an aggregate's table.
     std::string LabelDetail;
 };
@@ -146,12 +147,13 @@ private:
 
 // The tasks bind the kernel from the record, not the compiled process.
 TUnaryNodeStage<NScheduler::TFilterNode> BuildSchedulerFilterStage(
+    NQumir::NAst::TTypeFactory& types,
     TFilterOperator& filter,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options)
 {
     auto runtime = BuildFilterPlan(
-        filter, inputType, std::move(options));
+        types, filter, inputType, std::move(options));
     return {
         .Node = {.Plan = std::move(runtime.Plan)},
         .OutputType = std::move(runtime.OutputType),
@@ -159,12 +161,13 @@ TUnaryNodeStage<NScheduler::TFilterNode> BuildSchedulerFilterStage(
 }
 
 TUnaryNodeStage<NScheduler::TProjectNode> BuildSchedulerProjectStage(
+    NQumir::NAst::TTypeFactory& types,
     TProjectOperator& project,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options)
 {
     auto runtime = BuildProjectPlan(
-        project, inputType, std::move(options));
+        types, project, inputType, std::move(options));
     return {
         .Node = {.Plan = std::move(runtime.Plan)},
         .OutputType = std::move(runtime.OutputType),
@@ -173,7 +176,7 @@ TUnaryNodeStage<NScheduler::TProjectNode> BuildSchedulerProjectStage(
 
 struct TLoweredOutput {
     std::vector<NScheduler::TTaskNode*> Producers;
-    NQumir::NAst::TTypePtr OutputType;
+    NQumir::NAst::TTypePtr OutputType = nullptr;
 };
 
 std::unordered_set<const TSourceOperator*> SourcesFeedingJoins(
@@ -189,13 +192,13 @@ std::unordered_set<const TSourceOperator*> SourcesFeedingJoins(
             }
             feedsJoin = feedsJoin || static_cast<bool>(TMaybeOp<TJoinOperator>(op));
             const unsigned state = feedsJoin ? 2 : 1;
-            auto& seen = visited[op.get()];
+            auto& seen = visited[op.Get()];
             if (seen & state) {
                 return;
             }
             seen |= state;
             if (auto source = TMaybeOp<TSourceOperator>(op); source && feedsJoin) {
-                sources.insert(source.Cast().get());
+                sources.insert(source.Cast().Get());
             }
             if (auto consumer = TMaybeOp<TCteConsumer>(op)) {
                 visit(consumer.Cast()->Materialization()->Plan, feedsJoin);
@@ -252,7 +255,7 @@ public:
     struct TFilterConsumerTasks {
         std::vector<NScheduler::TTaskNode*> Nodes;
         std::vector<std::string> ProbeKeys;
-        NQumir::NAst::TTypePtr OutputType;
+        NQumir::NAst::TTypePtr OutputType = nullptr;
         bool AtSource = false;
     };
 
@@ -269,18 +272,21 @@ public:
     };
 
     TSchedulerGraphLowerer(
+        std::shared_ptr<NQumir::NAst::TTypeFactory> types,
         NScheduler::TTaskGraph& graph,
         const TOperatorPtr& root,
         NScheduler::TSettings settings,
         std::ostream* diagnostics,
         std::vector<TGeneratedKernel>* kernelSink,
-        std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog,
+        const NKernel::TAnnotationContext* annotation,
         std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings)
-        : Graph_(graph)
+        : Types_(std::move(types))
+        , Graph_(graph)
         , Settings_(std::move(settings))
         , Diagnostics_(diagnostics)
         , KernelSink_(kernelSink)
-        , ExternalCatalog_(std::move(externalCatalog))
+        , Annotation_(annotation)
+        , ExternalCatalog_(annotation ? annotation->ExternalCatalog : nullptr)
         , RuntimeFilterBindings_(std::move(filterBindings))
         , RuntimeContext_(std::make_shared<TRuntimeContext>())
         , TaskContext_{.Runtime = RuntimeContext_}
@@ -296,12 +302,13 @@ public:
         TExecStageId execStageId) const
     {
         return TKernelCompilerOptions{
+            .Types = Types_,
             .Diagnostics = Diagnostics_,
             .Stage = std::move(stage),
             .ExecStageId = execStageId,
             .Sink = KernelSink_,
             .BindNow = false,
-            .ExternalCatalog = ExternalCatalog_,
+            .Annotation = Annotation_,
             .RuntimeContext = RuntimeContext_,
         };
     }
@@ -454,7 +461,7 @@ public:
             }
             SetRowType(*output, lowered.OutputType);
             const auto execStageId = NewExecStage(
-                op.get(), EExecPlanNodeKind::RuntimeFilter);
+                op.Get(), EExecPlanNodeKind::RuntimeFilter);
             ExecStages_.back().RuntimeFilterUse = use;
             TFilterConsumerTasks consumer{
                 .ProbeKeys = use.ProbeKeys,
@@ -502,7 +509,7 @@ public:
         if (auto n = TMaybeOp<TFilterOperator>(op)) {
             auto filter = n.Cast();
             auto execStageId = NewExecStage(
-                filter.get(), EExecPlanNodeKind::Filter);
+                filter.Get(), EExecPlanNodeKind::Filter);
             auto stageLabel = StageLabel("filter", execStageId);
             return LowerUnary(
                 filter->Input(),
@@ -511,7 +518,7 @@ public:
                 execStageId,
                 [&](const NQumir::NAst::TTypePtr& inType) {
                     return BuildSchedulerFilterStage(
-                        *filter,
+                        *Types_, *filter,
                         inType,
                         KernelOptions(stageLabel, execStageId));
                 },
@@ -521,7 +528,7 @@ public:
         if (auto n = TMaybeOp<TProjectOperator>(op)) {
             auto project = n.Cast();
             auto execStageId = NewExecStage(
-                project.get(), EExecPlanNodeKind::Project);
+                project.Get(), EExecPlanNodeKind::Project);
             auto stageLabel = StageLabel("project", execStageId);
             return LowerUnary(
                 project->Input(),
@@ -530,7 +537,7 @@ public:
                 execStageId,
                 [&](const NQumir::NAst::TTypePtr& inType) {
                     return BuildSchedulerProjectStage(
-                        *project,
+                        *Types_, *project,
                         inType,
                         KernelOptions(stageLabel, execStageId));
                 },
@@ -655,18 +662,15 @@ public:
                         ? spec.JoinKeys[i].Right.Name
                         : spec.JoinKeys[i].Left.Name;
                     const auto originalType = FieldType(
-                        probeSchema.Cast().get(), originalKey);
+                        probeSchema.Cast(), originalKey);
                     const auto consumerType = FieldType(
-                        consumerSchema.Cast().get(), consumer.ProbeKeys[i]);
+                        consumerSchema.Cast(), consumer.ProbeKeys[i]);
                     const auto& fields = consumerSchema.Cast()->Fields;
                     const auto field = std::find_if(fields.begin(), fields.end(),
                         [&](const auto& item) {
                             return item.first == consumer.ProbeKeys[i];
                         });
-                    if (!originalType || !consumerType
-                        || field == fields.end()
-                        || originalType->ToString()
-                            != consumerType->ToString()) {
+                    if (!originalType || field == fields.end() || originalType != consumerType) {
                         throw std::runtime_error(
                             "runtime filter consumer key type differs from join probe key");
                     }
@@ -678,8 +682,7 @@ public:
                         std::distance(fields.begin(), field));
                     ref.Type = consumerType;
                 }
-                const bool sameAsJoin = consumer.OutputType->ToString()
-                        == spec.InputSchemas[buildIsLeft ? 1 : 0]->ToString()
+                const bool sameAsJoin = consumer.OutputType == spec.InputSchemas[buildIsLeft ? 1 : 0]
                     && std::equal(consumer.ProbeKeys.begin(),
                         consumer.ProbeKeys.end(), spec.JoinKeys.begin(),
                         [buildIsLeft](const auto& name, const auto& key) {
@@ -865,6 +868,7 @@ private:
             }
         }
         auto rowGroups = src.GetTable()->PruneRowGroups(
+            *Types_,
             src.RowGroupPredicate(),
             src.GetAlias(),
             Settings_.Instrumentation.RowGroupPredicate
@@ -987,7 +991,7 @@ private:
         NScheduler::IConnection& outConn,
         size_t outLaneOffset)
     {
-        auto outputType = BuildSourceRuntimeType(src);
+        auto outputType = BuildSourceRuntimeType(*Types_, src);
         const auto execStageId = NewExecStage(
             &src, EExecPlanNodeKind::Source);
         auto splitPlan = ScanSplits(src);
@@ -1055,7 +1059,7 @@ private:
         NScheduler::IConnection* Completion = nullptr;
         size_t Lanes = 0;
         size_t NextConsumer = 0;
-        NQumir::NAst::TTypePtr OutputType;
+        NQumir::NAst::TTypePtr OutputType = nullptr;
     };
 
     TLoweredOutput LowerCteConsumer(
@@ -1277,15 +1281,15 @@ private:
         // Kernel input = leading i32 __grouping_id__ ++ nullable keys ++ args; the
         // masked batches the driver feeds match this layout column-for-column.
         std::vector<std::pair<std::string, TTypePtr>> extFields;
-        extFields.emplace_back("__grouping_id__", std::make_shared<TIntegerType>(TIntegerType::I32));
+        extFields.emplace_back("__grouping_id__", Types_->MakeInteger(TIntegerType::I32));
         for (size_t i = 0; i < inputType.Fields.size(); ++i) {
             auto [name, type] = inputType.Fields[i];
             if (i < numKeys && !IsNullableType(type)) {
-                type = std::make_shared<TNullable>(type);
+                type = MakeNullableType(*Types_, type);
             }
             extFields.emplace_back(name, std::move(type));
         }
-        auto extInput = std::make_shared<TStructType>(std::move(extFields));
+        auto extInput = Types_->MakeStruct(std::move(extFields));
 
         std::vector<std::string> extKeys;
         extKeys.reserve(numKeys + 1);
@@ -1295,7 +1299,7 @@ private:
         }
 
         auto spec = NKernel::BuildAggregateKernelSpec(
-            *extInput, extKeys, aggregate.Aggs(), ExternalCatalog_.get(),
+            *Types_, *extInput, extKeys, aggregate.Aggs(), Annotation_,
             aggregate.EmptyInputGroups());
         spec.AggregateRowLayout = AggregateMayUseRowLayout(Settings_.Aggregate.Table, aggregate);
         TKernelCompiler compiler(
@@ -1311,7 +1315,7 @@ private:
                 .NumKeys = numKeys,
             },
             .OutputType = ComputeAggregateOutputType(
-                childType, aggregate.GroupKeys(), aggregate.Aggs(), true,
+                *Types_, childType, aggregate.GroupKeys(), aggregate.Aggs(), true,
                 !aggregate.EmptyInputGroups().empty()),
             .LabelDetail = AggregateTableLabel(plan),
         };
@@ -1321,12 +1325,12 @@ private:
     struct TCompiledAggregate {
         TAggregateKernelMeta Meta;
         TAggregateTablePlan Plan;
-        NQumir::NAst::TTypePtr OutputType;
+        NQumir::NAst::TTypePtr OutputType = nullptr;
     };
 
     static const NQumir::NAst::TStructType& AggregateInputType(const NQumir::NAst::TTypePtr& type)
     {
-        auto* inputType = static_cast<NQumir::NAst::TStructType*>(type.get());
+        auto* inputType = static_cast<const NQumir::NAst::TStructType*>(type);
         if (!inputType) {
             throw std::runtime_error("aggregate input must have TStructType");
         }
@@ -1342,7 +1346,7 @@ private:
         bool hasPrecomputedHash)
     {
         auto spec = NKernel::BuildAggregateKernelSpec(
-            inputType, aggregate.GroupKeys(), aggregate.Aggs(), ExternalCatalog_.get(),
+            *Types_, inputType, aggregate.GroupKeys(), aggregate.Aggs(), Annotation_,
             aggregate.EmptyInputGroups());
         spec.HasPrecomputedHash = hasPrecomputedHash;
         // Only a table that may take the row layout needs its kernels.
@@ -1362,15 +1366,15 @@ private:
     static bool SameFields(
         const NQumir::NAst::TTypePtr& left, const NQumir::NAst::TTypePtr& right)
     {
-        auto* a = static_cast<NQumir::NAst::TStructType*>(left.get());
-        auto* b = static_cast<NQumir::NAst::TStructType*>(right.get());
+        auto* a = static_cast<const NQumir::NAst::TStructType*>(left);
+        auto* b = static_cast<const NQumir::NAst::TStructType*>(right);
         if (!a || !b || a->Fields.size() != b->Fields.size()) {
             return false;
         }
         for (size_t i = 0; i < a->Fields.size(); ++i) {
             const auto& [aName, aType] = a->Fields[i];
             const auto& [bName, bType] = b->Fields[i];
-            if (aName != bName || !aType || !bType || aType->ToString() != bType->ToString()) {
+            if (aName != bName || !aType || aType != bType) {
                 return false;
             }
         }
@@ -1392,9 +1396,9 @@ private:
             /*hasPrecomputedHash=*/false);
 
         std::optional<TProjectPlanData> passThrough;
-        if (auto project = BuildAggregatePassThroughOperator(aggregate)) {
+        if (auto project = BuildAggregatePassThroughOperator(*Types_, aggregate)) {
             auto runtime = BuildProjectPlan(
-                *project, childType, KernelOptions(stage, execStageId));
+                *Types_, *project, childType, KernelOptions(stage, execStageId));
             // The projection must produce exactly the rows the table emits; a
             // partial aggregate without it still reduces, it only never hands
             // rows through.
@@ -1445,7 +1449,7 @@ private:
     // Combine phase for a parallelized grouping-sets aggregate: a plain grouped
     // aggregate over the partials, keyed by the synthetic `__grouping_id__`
     // (leading key that keeps masked-NULL sets distinct) plus the original keys.
-    std::shared_ptr<TAggregateOperator> BuildGroupingSetsCombineAggregate(
+    NQumir::TIntrusivePtr<TAggregateOperator> BuildGroupingSetsCombineAggregate(
         TAggregateOperator& aggregate)
     {
         std::vector<std::string> keys;
@@ -1454,7 +1458,7 @@ private:
         for (const auto& key : aggregate.GroupKeys()) {
             keys.push_back(key);
         }
-        return BuildAggregateCombineOperator(aggregate, std::move(keys));
+        return BuildAggregateCombineOperator(*Types_, aggregate, std::move(keys));
     }
 
     // child[N] -> partial-aggregate[N] -> gather(N->1) -> final-combine[1].
@@ -1494,9 +1498,9 @@ private:
         }
 
         auto combineAgg = BuildAggregateCombineOperator(
-            aggregate, aggregate.GroupKeys());
+            *Types_, aggregate, aggregate.GroupKeys());
         const auto combineStageId = NewAggregateStage(
-            combineAgg.get(), EAggregatePhase::Final, combineAgg);
+            combineAgg.Get(), EAggregatePhase::Final, combineAgg);
         const auto combineGroup = StageLabel(
             "aggregate-combine", combineStageId);
         auto combineStage =
@@ -1551,7 +1555,7 @@ private:
             }();
         auto partialType = partialStage.OutputType;
         auto* partialStruct =
-            static_cast<NQumir::NAst::TStructType*>(partialType.get());
+            static_cast<const NQumir::NAst::TStructType*>(partialType);
         if (!partialStruct) {
             throw std::runtime_error("grouping-sets partial output must have TStructType");
         }
@@ -1570,8 +1574,7 @@ private:
 
         auto combineAgg = BuildGroupingSetsCombineAggregate(aggregate);
         TKernelCompiler hashCompiler(KernelOptions(partialGroup, partialStageId));
-        auto groupHash = hashCompiler.CompileAggregateHash(
-            *partialStruct, combineAgg->GroupKeys());
+        auto groupHash = hashCompiler.CompileAggregateHash(*partialStruct, combineAgg->GroupKeys());
         TLoweredOutput partialOut{
             .Producers = partialNodes,
             .OutputType = partialType,
@@ -1585,7 +1588,7 @@ private:
             "grouping-sets-repartition");
 
         const auto combineStageId = NewAggregateStage(
-            combineAgg.get(), EAggregatePhase::Final, combineAgg);
+            combineAgg.Get(), EAggregatePhase::Final, combineAgg);
         const auto combineGroup = StageLabel(
             "aggregate-combine", combineStageId);
         auto combineStage =
@@ -1643,8 +1646,8 @@ private:
                     EstimateAggregateTask(aggregate, childLanes));
             }();
         auto partialType = partialStage.OutputType;
-        auto* partialStruct = static_cast<NQumir::NAst::TStructType*>(
-            partialType.get());
+        auto* partialStruct = static_cast<const NQumir::NAst::TStructType*>(
+            partialType);
         if (!partialStruct) {
             throw std::runtime_error(
                 "partial aggregate output must have TStructType");
@@ -1665,9 +1668,9 @@ private:
         }
 
         auto combineAgg = BuildAggregateCombineOperator(
-            aggregate, aggregate.GroupKeys());
+            *Types_, aggregate, aggregate.GroupKeys());
         const auto finalStageId = NewAggregateStage(
-            combineAgg.get(), EAggregatePhase::Final, combineAgg);
+            combineAgg.Get(), EAggregatePhase::Final, combineAgg);
         const auto finalGroup = StageLabel(
             "aggregate-final", finalStageId);
 
@@ -1796,7 +1799,7 @@ private:
 
         auto childType = childOut.OutputType;
         auto* childStruct =
-            static_cast<NQumir::NAst::TStructType*>(childType.get());
+            static_cast<const NQumir::NAst::TStructType*>(childType);
         if (!childStruct) {
             throw std::runtime_error("aggregate input must have TStructType");
         }
@@ -1804,8 +1807,7 @@ private:
             &aggregate, EExecPlanNodeKind::Aggregate);
         const auto aggregateGroup = StageLabel("aggregate", execStageId);
         TKernelCompiler hashCompiler(KernelOptions(aggregateGroup, execStageId));
-        auto groupHash = hashCompiler.CompileAggregateHash(
-            *childStruct, aggregate.GroupKeys());
+        auto groupHash = hashCompiler.CompileAggregateHash(*childStruct, aggregate.GroupKeys());
         auto stage =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, aggregateGroup);
@@ -1889,8 +1891,8 @@ private:
         }
         auto childOut = Lower(late.Input(), *childConnection);
 
-        auto* input = static_cast<NQumir::NAst::TStructType*>(
-            childOut.OutputType.get());
+        auto* input = static_cast<const NQumir::NAst::TStructType*>(
+            childOut.OutputType);
         if (!input) {
             throw std::runtime_error(
                 "late materialize input must have TStructType");
@@ -2063,7 +2065,7 @@ private:
             [&, group](const NQumir::NAst::TTypePtr& childType) {
                 return TUnaryNodeStage<NScheduler::TSortNode>{
                     .Node = {.Plan = BuildSortPlanData(
-                        childType, sortKeys, kernelName, topLimit,
+                        *Types_, childType, sortKeys, kernelName, topLimit,
                         KernelOptions(group, execStageId))},
                     .OutputType = childType,
                 };
@@ -2074,7 +2076,7 @@ private:
 
     struct TSortMergeResult {
         NScheduler::TTaskNode* Merge = nullptr;
-        NQumir::NAst::TTypePtr OutputType;
+        NQumir::NAst::TTypePtr OutputType = nullptr;
     };
 
     // Builds `child[N] -> local-(top-)sort[N] -> merge`, writing the merged
@@ -2104,7 +2106,7 @@ private:
         auto plan = [&]() {
             TStageDiagnosticsScope diagnosticsScope(Diagnostics_, localSortGroup);
             return BuildSortPlanData(
-                childType, sortKeys, kernelName, topLimit,
+                *Types_, childType, sortKeys, kernelName, topLimit,
                 KernelOptions(localSortGroup, execStageId));
         }();
 
@@ -2282,22 +2284,22 @@ private:
         auto leftType = vectorOut.OutputType;
         auto rightType = scalarOut.OutputType;
         auto crossTypeExp =
-            ComputeJoinOutputType(leftType, rightType, join.JoinType());
+            ComputeJoinOutputType(*Types_, leftType, rightType, join.JoinType());
         if (!crossTypeExp) {
             throw std::runtime_error(
                 "cross join: " + crossTypeExp.error().ToString());
         }
         auto crossType = *crossTypeExp;
 
-        auto* leftStruct = static_cast<NQumir::NAst::TStructType*>(leftType.get());
-        auto* rightStruct = static_cast<NQumir::NAst::TStructType*>(rightType.get());
+        auto* leftStruct = static_cast<const NQumir::NAst::TStructType*>(leftType);
+        auto* rightStruct = static_cast<const NQumir::NAst::TStructType*>(rightType);
         if (!leftStruct || !rightStruct) {
             throw std::runtime_error("scheduler cross join inputs must have TStructType");
         }
         const bool filtersProduct =
             join.JoinType() == EJoinType::Inner && join.Filter() != nullptr;
         auto kernelSpec = NKernel::BuildCrossJoinKernelSpec(
-            *leftStruct, *rightStruct, join.JoinType(),
+            *Types_, *leftStruct, *rightStruct, join.JoinType(),
             join.JoinType() == EJoinType::Inner ? nullptr : join.Filter());
         const auto crossGroup = StageLabel("cross-join", crossStageId);
         TKernelCompiler compiler(
@@ -2350,10 +2352,10 @@ private:
 
         // Residual predicate is a plain filter over the glued schema.
         auto filterOp =
-            std::make_shared<TFilterOperator>(join.Left(), join.Filter());
+            NQumir::MakeIntrusive<TFilterOperator>(*Types_, join.Left(), join.Filter());
         // The synthetic filter consumes the cross output, including both
         // inputs. Its constructor inherits only the left input's schema.
-        filterOp->Type = std::make_shared<NQumir::NAst::TFunctionType>(
+        filterOp->Type = Types_->MakeFunction(
             std::vector<NQumir::NAst::TTypePtr>{crossType}, crossType);
         const auto residualStageId = NewExecStage(
             &join, EExecPlanNodeKind::CrossResidualFilter);
@@ -2365,7 +2367,7 @@ private:
                 // The residual is a separate executable stage even though its
                 // semantic metadata points at the owning join operator.
                 return BuildSchedulerFilterStage(
-                    *filterOp, crossType,
+                    *Types_, *filterOp, crossType,
                     KernelOptions(residualGroup, residualStageId));
             }();
         TLoweredOutput result;
@@ -2407,14 +2409,14 @@ private:
 
         auto leftType = leftOut.OutputType;
         auto rightType = rightOut.OutputType;
-        auto* leftStruct = static_cast<TStructType*>(leftType.get());
-        auto* rightStruct = static_cast<TStructType*>(rightType.get());
+        auto* leftStruct = static_cast<const TStructType*>(leftType);
+        auto* rightStruct = static_cast<const TStructType*>(rightType);
         if (!leftStruct || !rightStruct) {
             throw std::runtime_error("scheduler join inputs must have TStructType");
         }
 
         auto kernelSpec = NKernel::BuildJoinKernelSpec(
-            *leftStruct, *rightStruct, join.Keys(), join.JoinType(), join.Filter());
+            *Types_, *leftStruct, *rightStruct, join.Keys(), join.JoinType(), join.Filter());
         const auto execStageId = NewExecStage(
             &join, EExecPlanNodeKind::Join);
         const auto joinGroup = StageLabel("join", execStageId);
@@ -2559,9 +2561,9 @@ private:
         TExecStageId execStageId)
     {
         return {
-            .Node = {.Plan = BuildWindowPlanData(
+            .Node = {.Plan = BuildWindowPlanData(*Types_,
                 window, childType, KernelOptions(std::move(stage), execStageId))},
-            .OutputType = ComputeWindowOutputType(childType, window.Functions()),
+            .OutputType = ComputeWindowOutputType(*Types_, childType, window.Functions()),
         };
     }
 
@@ -2596,14 +2598,13 @@ private:
 
         auto childType = childOut.OutputType;
         auto* childStruct =
-            static_cast<NQumir::NAst::TStructType*>(childType.get());
+            static_cast<const NQumir::NAst::TStructType*>(childType);
         if (!childStruct) {
             throw std::runtime_error("window input must have TStructType");
         }
 
         TKernelCompiler hashCompiler(KernelOptions(windowGroup, execStageId));
-        auto partitionHash = hashCompiler.CompileAggregateHash(
-            *childStruct, window.PartitionKeys());
+        auto partitionHash = hashCompiler.CompileAggregateHash(*childStruct, window.PartitionKeys());
         auto shuf = BuildRepartitionExchange(
             childOut,
             childConnRef,
@@ -2792,10 +2793,12 @@ private:
         return ++LastTaskGroupId_;
     }
 
+    std::shared_ptr<NQumir::NAst::TTypeFactory> Types_;
     NScheduler::TTaskGraph& Graph_;
     NScheduler::TSettings Settings_;
     std::ostream* Diagnostics_;
     std::vector<TGeneratedKernel>* KernelSink_ = nullptr;
+    const NKernel::TAnnotationContext* Annotation_ = nullptr;
     std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog_;
     std::shared_ptr<IRuntimeFilterBindingFactory> RuntimeFilterBindings_;
     std::shared_ptr<TRuntimeContext> RuntimeContext_;
@@ -2921,13 +2924,10 @@ size_t ChooseAggregatePartitionCount(
         return result;
     }
 
-    auto maybeInputStruct = NQumir::NAst::TMaybeType<
-        NQumir::NAst::TStructType>(NQumir::NAst::UnwrapNamedType(
-            aggregate.Input()->OutputColumns()));
-    if (!maybeInputStruct) {
+    const auto inputStruct = aggregate.Input()->OutputColumns();
+    if (!inputStruct) {
         return result;
     }
-    const auto inputStruct = maybeInputStruct.Cast().get();
 
     // String shuffle copies payload bytes and showed mixed results at full
     // fanout. Start with the statistically predictable fixed-width case.
@@ -2938,7 +2938,7 @@ size_t ChooseAggregatePartitionCount(
         }
         const bool isDecimal = IsDecimalType(
             UnwrapNullableType(type));
-        type = NQumir::NAst::UnwrapNamedType(
+        type = UnwrapNamedValueType(
             UnwrapNullableType(type));
         const bool fixedWidth =
             static_cast<bool>(NQumir::NAst::TMaybeType<
@@ -3032,16 +3032,17 @@ void PrintCounterDiagnostics(
 
 TLoweredPlan LowerPlanToGraph(
     const TOperatorPtr& root,
+    std::shared_ptr<NQumir::NAst::TTypeFactory> types,
     TSettings settings,
     std::ostream* diagnostics,
-    std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog,
+    const NKernel::TAnnotationContext* annotation,
     std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings)
 {
     PlaceRuntimeFilterConsumers(root);
     auto graph = std::make_unique<TTaskGraph>();
     std::vector<TGeneratedKernel> kernels;
     TSchedulerGraphLowerer lowerer(
-        *graph, root, settings, diagnostics, &kernels, externalCatalog,
+        types, *graph, root, settings, diagnostics, &kernels, annotation,
         std::move(filterBindings));
     const size_t lanes = lowerer.OutputLanes(root);
     if (lanes == 0) {
@@ -3069,13 +3070,14 @@ TLoweredPlan LowerPlanToGraph(
     auto nodeSpecs = std::move(lowerer.NodeSpecs());
     nodeSpecs.resize(graph->Nodes().size());
     return TLoweredPlan{
+        .Types = std::move(types),
         .Graph = std::move(graph),
         .OutputType = std::move(out.OutputType),
         .FinalGather = finalRef,
         .Producers = std::move(out.Producers),
         .Lanes = lanes,
         .Kernels = std::move(kernels),
-        .ExternalCatalog = std::move(externalCatalog),
+        .ExternalCatalog = annotation ? annotation->ExternalCatalog : nullptr,
         .ExecStages = std::move(lowerer.ExecStages()),
         .RuntimeFilters = std::move(lowerer.RuntimeFilters()),
         .NodeSpecs = std::move(nodeSpecs),
@@ -3402,7 +3404,7 @@ bool RunPlanIntoSink(
         EnableOperatorInstrumentation(lowered);
     }
     FinalizeKernels(
-        lowered.Kernels, settings.Kernel.Backend, diagnostics, lowered.ExternalCatalog,
+        lowered.Kernels, lowered.Types, settings.Kernel.Backend, diagnostics, lowered.ExternalCatalog,
         settings.Jit.CacheDir);
     lowered.Graph->SetConnectionStatsEnabled(settings.Queue.EnableDebugCounters);
     if (diagnostics) {

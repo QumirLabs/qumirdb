@@ -2,6 +2,7 @@
 
 #include "mock_source.h"
 #include "plan_runner.h"
+#include "test_types.h"
 
 #include <qdb/catalog/external_module.h>
 #include <qdb/plan/build.h>
@@ -32,7 +33,7 @@ namespace {
 std::vector<TSqlNodePtr> ParseAll(const std::string& sql) {
     std::istringstream in(sql);
     TTokenStream tokens(in);
-    TParser parser;
+    TParser parser(TestTypes());
     auto parsed = parser.ParseAll(tokens);
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
@@ -46,7 +47,7 @@ void ApplyDefinitions(
 {
     for (const auto& statement : statements) {
         if (auto module = NQdb::NSql::TMaybeNode<TSqlExternalModule>(statement)) {
-            auto result = catalog.Apply(*module.Cast());
+            auto result = catalog.Apply(TestTypes(), *module.Cast());
             ASSERT_TRUE(result) << result.error().ToString();
         } else if (auto function =
                 NQdb::NSql::TMaybeNode<TSqlExternalFunction>(statement)) {
@@ -70,8 +71,8 @@ TEST(ExternalModuleCatalog, CreateIsLazyAndReplaceKeepsFunctions) {
         "CREATE OR REPLACE MODULE orbital LANGUAGE rust AS $$also deferred$$;");
     ApplyDefinitions(catalog, replacement);
 
-    auto resolved = catalog.Snapshot()->ResolveReturnType(
-        "distance", {std::make_shared<TFloatType>()});
+    auto resolved = catalog.Snapshot(SharedTestTypes())->ResolveReturnType(
+        "distance", {TestTypes().MakeFloat()});
     ASSERT_TRUE(resolved) << resolved.error().ToString();
     ASSERT_TRUE(*resolved);
     EXPECT_TRUE(TMaybeType<TFloatType>(**resolved));
@@ -86,13 +87,13 @@ TEST(ExternalModuleCatalog, RustFailureIsDeferredUntilModuleIsUsed) {
     ApplyDefinitions(catalog, statements);
 
     NQumir::TLocation location{};
-    auto call = std::make_shared<TCallExpr>(
+    auto call = NQumir::MakeIntrusive<TCallExpr>(
         location,
-        std::make_shared<TIdentExpr>(location, "broken_fn"),
-        std::vector<TExprPtr>{std::make_shared<TNumberExpr>(location, 1.0)});
-    auto ast = std::make_shared<TBlockExpr>(
+        NQumir::MakeIntrusive<TIdentExpr>(location, "broken_fn"),
+        std::vector<TExprPtr>{NQumir::MakeIntrusive<TNumberExpr>(location, 1.0, TestTypes())});
+    auto ast = NQumir::MakeIntrusive<TBlockExpr>(
         location, std::vector<TExprPtr>{call});
-    auto composed = catalog.Snapshot()->ComposeReferenced(ast);
+    auto composed = catalog.Snapshot(SharedTestTypes())->ComposeReferenced(ast);
     ASSERT_FALSE(composed);
     EXPECT_NE(composed.error().ToString().find("external module `broken'"),
         std::string::npos);
@@ -108,11 +109,11 @@ TEST(ExternalModuleCatalog, FunctionsAreOverloadedByArgumentTypes) {
         "SET MODULE TO math SET SYMBOL TO convert_i32;");
     ApplyDefinitions(catalog, statements);
 
-    auto snapshot = catalog.Snapshot();
+    auto snapshot = catalog.Snapshot(SharedTestTypes());
     auto floating = snapshot->ResolveReturnType(
-        "convert", {std::make_shared<TFloatType>()});
+        "convert", {TestTypes().MakeFloat()});
     auto integer = snapshot->ResolveReturnType(
-        "convert", {std::make_shared<TIntegerType>(TIntegerType::I32)});
+        "convert", {TestTypes().MakeInteger(TIntegerType::I32)});
     ASSERT_TRUE(floating);
     ASSERT_TRUE(integer);
     ASSERT_TRUE(*floating);
@@ -157,19 +158,19 @@ TEST(ExternalModuleCatalog, RustFunctionRunsThroughSqlPlan) {
     ApplyDefinitions(catalog, {statements[0], statements[1], statements[2]});
 
     NQumir::TLocation location{};
-    auto probe = std::make_shared<TBlockExpr>(
+    auto probe = NQumir::MakeIntrusive<TBlockExpr>(
         location,
-        std::vector<TExprPtr>{std::make_shared<TCallExpr>(
+        std::vector<TExprPtr>{NQumir::MakeIntrusive<TCallExpr>(
             location,
-            std::make_shared<TIdentExpr>(location, "orbit_distance"),
+            NQumir::MakeIntrusive<TIdentExpr>(location, "orbit_distance"),
             std::vector<TExprPtr>{
-                std::make_shared<TNumberExpr>(location, 1.0),
-                std::make_shared<TNumberExpr>(location, 2.0)})});
-    auto firstComposition = catalog.Snapshot()->ComposeReferenced(probe);
+                NQumir::MakeIntrusive<TNumberExpr>(location, 1.0, TestTypes()),
+                NQumir::MakeIntrusive<TNumberExpr>(location, 2.0, TestTypes())})});
+    auto firstComposition = catalog.Snapshot(SharedTestTypes())->ComposeReferenced(probe);
     ASSERT_TRUE(firstComposition) << firstComposition.error().ToString();
     ASSERT_TRUE(*firstComposition);
     EXPECT_EQ(probe->Stmts.size(), 1);
-    auto secondComposition = catalog.Snapshot()->ComposeReferenced(probe);
+    auto secondComposition = catalog.Snapshot(SharedTestTypes())->ComposeReferenced(probe);
     ASSERT_TRUE(secondComposition) << secondComposition.error().ToString();
     ASSERT_TRUE(*secondComposition);
     EXPECT_EQ(probe->Stmts.size(), 1);
@@ -185,16 +186,16 @@ TEST(ExternalModuleCatalog, RustFunctionRunsThroughSqlPlan) {
         .RefCount = 1,
     };
     TMockSource source(
-        {"x"}, {std::make_shared<TFloatType>()}, {batch});
-    auto snapshot = catalog.Snapshot();
-    NKernel::TAnnotationContext annotation{.ExternalCatalog = snapshot};
-    auto plan = BuildPlan(statements[3], [&](std::string_view table)
+        {"x"}, {TestTypes().MakeFloat()}, {batch});
+    auto snapshot = catalog.Snapshot(SharedTestTypes());
+    auto annotation = NKernel::MakeAnnotationContext(TestTypes(), snapshot);
+    auto plan = BuildPlan(TestTypes(), statements[3], [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         if (table != "points") {
             return std::unexpected(NQumir::TError("unknown test table"));
         }
-        return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
+        return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(table));
     }, annotation);
     ASSERT_TRUE(plan) << plan.error().ToString();
 
@@ -204,27 +205,27 @@ TEST(ExternalModuleCatalog, RustFunctionRunsThroughSqlPlan) {
     EXPECT_EQ(sort.Cast()->Keys()[0].Column, "col4");
     EXPECT_EQ(sort.Cast()->Keys()[1].Column, "vector_y");
 
-    AnnotateTypes(*plan, annotation);
+    AnnotateTypes(TestTypes(), *plan, annotation);
     EXPECT_EQ(sort.Cast()->Keys()[0].Column, "col4");
     EXPECT_EQ(sort.Cast()->Keys()[1].Column, "vector_y");
     ASSERT_TRUE(annotation.Resolver);
     auto resolvedWithCoercion = snapshot->ResolveReturnType(
         "orbit_distance",
         {
-            std::make_shared<TFloatType>(),
-            std::make_shared<TIntegerType>(TIntegerType::I64),
+            TestTypes().MakeFloat(),
+            TestTypes().MakeInteger(TIntegerType::I64),
         });
     ASSERT_TRUE(resolvedWithCoercion) << resolvedWithCoercion.error().ToString();
     ASSERT_TRUE(*resolvedWithCoercion);
     EXPECT_TRUE(TMaybeType<TFloatType>(**resolvedWithCoercion));
     auto* resolver = annotation.Resolver.get();
-    AnnotateTypes(*plan, annotation);
+    AnnotateTypes(TestTypes(), *plan, annotation);
     EXPECT_EQ(annotation.Resolver.get(), resolver);
-    ApplyPlanPasses(*plan, {
+    ApplyPlanPasses(TestTypes(), *plan, {
         .EnableCbo = false,
         .Annotation = annotation,
     });
-    auto* outputType = static_cast<TStructType*>((*plan)->OutputColumns().get());
+    auto* outputType = static_cast<const TStructType*>((*plan)->OutputColumns());
     ASSERT_TRUE(outputType);
     ASSERT_EQ(outputType->Fields.size(), 5);
     EXPECT_EQ(outputType->Fields[0].first, "distance");
@@ -272,8 +273,8 @@ TEST(ExternalModuleCatalog, DerivedTableQualifiesStructAliasGroup) {
         "SELECT d.vector_y FROM (SELECT DISTINCT orbit_vector(x) "
         "AS (vector_x, vector_y, vector_z) FROM points) d;");
     ApplyDefinitions(catalog, {statements[0], statements[1]});
-    auto snapshot = catalog.Snapshot();
-    NKernel::TAnnotationContext annotation{.ExternalCatalog = snapshot};
+    auto snapshot = catalog.Snapshot(SharedTestTypes());
+    auto annotation = NKernel::MakeAnnotationContext(TestTypes(), snapshot);
 
     // Runs a query over points(x) = {1, 2, 1} and returns its rows sorted.
     auto run = [&](const TSqlNodePtr& statement) {
@@ -289,17 +290,17 @@ TEST(ExternalModuleCatalog, DerivedTableQualifiesStructAliasGroup) {
             .RefCount = 1,
         };
         TMockSource source(
-            {"x"}, {std::make_shared<TFloatType>()}, {batch});
-        auto plan = BuildPlan(statement, [&](std::string_view table)
+            {"x"}, {TestTypes().MakeFloat()}, {batch});
+        auto plan = BuildPlan(TestTypes(), statement, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
             -> std::expected<TOperatorPtr, NQumir::TError>
         {
-            return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
+            return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(table));
         }, annotation);
         if (!plan) {
             ADD_FAILURE() << plan.error().ToString();
             return rows;
         }
-        ApplyPlanPasses(*plan, {
+        ApplyPlanPasses(TestTypes(), *plan, {
             .EnableCbo = false,
             .Annotation = annotation,
         });
@@ -340,9 +341,9 @@ TEST(ExternalModuleCatalog, KumirFunctionsAreExportedAndRunWithoutCreateFunction
         "SELECT kumir_abs(x) AS value FROM points;");
     ApplyDefinitions(catalog, {statements[0]});
 
-    auto snapshot = catalog.Snapshot();
+    auto snapshot = catalog.Snapshot(SharedTestTypes());
     auto returnType = snapshot->ResolveReturnType(
-        "kumir_abs", {std::make_shared<TFloatType>()});
+        "kumir_abs", {TestTypes().MakeFloat()});
     ASSERT_TRUE(returnType) << returnType.error().ToString();
     ASSERT_TRUE(*returnType);
     EXPECT_TRUE(TMaybeType<TFloatType>(**returnType));
@@ -358,20 +359,20 @@ TEST(ExternalModuleCatalog, KumirFunctionsAreExportedAndRunWithoutCreateFunction
         .RefCount = 1,
     };
     TMockSource source(
-        {"x"}, {std::make_shared<TFloatType>()}, {batch});
-    NKernel::TAnnotationContext annotation{.ExternalCatalog = snapshot};
-    auto plan = BuildPlan(statements[1], [&](std::string_view table)
+        {"x"}, {TestTypes().MakeFloat()}, {batch});
+    auto annotation = NKernel::MakeAnnotationContext(TestTypes(), snapshot);
+    auto plan = BuildPlan(TestTypes(), statements[1], [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         if (table != "points") {
             return std::unexpected(NQumir::TError("unknown test table"));
         }
-        return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
+        return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(table));
     }, annotation);
     ASSERT_TRUE(plan) << plan.error().ToString();
 
-    AnnotateTypes(*plan, annotation);
-    ApplyPlanPasses(*plan, {
+    AnnotateTypes(TestTypes(), *plan, annotation);
+    ApplyPlanPasses(TestTypes(), *plan, {
         .EnableCbo = false,
         .Annotation = annotation,
     });
@@ -410,18 +411,18 @@ TEST(ExternalModuleCatalog, OzlangFunctionsAreExportedAndRunWithoutCreateFunctio
         .RefCount = 1,
     };
     TMockSource source(
-        {"x"}, {std::make_shared<TFloatType>()}, {batch});
-    auto snapshot = catalog.Snapshot();
-    NKernel::TAnnotationContext annotation{.ExternalCatalog = snapshot};
-    auto plan = BuildPlan(statements[1], [&](std::string_view table)
+        {"x"}, {TestTypes().MakeFloat()}, {batch});
+    auto snapshot = catalog.Snapshot(SharedTestTypes());
+    auto annotation = NKernel::MakeAnnotationContext(TestTypes(), snapshot);
+    auto plan = BuildPlan(TestTypes(), statements[1], [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
-        return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
+        return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(table));
     }, annotation);
     ASSERT_TRUE(plan) << plan.error().ToString();
 
-    AnnotateTypes(*plan, annotation);
-    ApplyPlanPasses(*plan, {
+    AnnotateTypes(TestTypes(), *plan, annotation);
+    ApplyPlanPasses(TestTypes(), *plan, {
         .EnableCbo = false,
         .Annotation = annotation,
     });
@@ -459,17 +460,17 @@ TEST(ExternalModuleCatalog, VmBackendRejectsExternalModules) {
         .RefCount = 1,
     };
     TMockSource source(
-        {"x"}, {std::make_shared<TFloatType>()}, {batch});
-    auto snapshot = catalog.Snapshot();
-    NKernel::TAnnotationContext annotation{.ExternalCatalog = snapshot};
-    auto plan = BuildPlan(statements[2], [&](std::string_view table)
+        {"x"}, {TestTypes().MakeFloat()}, {batch});
+    auto snapshot = catalog.Snapshot(SharedTestTypes());
+    auto annotation = NKernel::MakeAnnotationContext(TestTypes(), snapshot);
+    auto plan = BuildPlan(TestTypes(), statements[2], [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
-        return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
+        return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(table));
     }, annotation);
     ASSERT_TRUE(plan) << plan.error().ToString();
-    AnnotateTypes(*plan, annotation);
-    ApplyPlanPasses(*plan, {
+    AnnotateTypes(TestTypes(), *plan, annotation);
+    ApplyPlanPasses(TestTypes(), *plan, {
         .EnableCbo = false,
         .Annotation = annotation,
     });
@@ -508,12 +509,12 @@ TEST(ExternalModuleCatalog, StddevArgumentTypesExternalFunctions) {
         .RefCount = 1,
     };
     TMockSource source(
-        {"x"}, {std::make_shared<TFloatType>()}, {batch});
+        {"x"}, {TestTypes().MakeFloat()}, {batch});
     auto build = [&](const NKernel::TAnnotationContext& annotation) {
-        return BuildPlan(statements[1], [&](std::string_view table)
+        return BuildPlan(TestTypes(), statements[1], [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
             -> std::expected<TOperatorPtr, NQumir::TError>
         {
-            return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
+            return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(table));
         }, annotation);
     };
     // The aggregate argument is typed while the plan is built, so the builder
@@ -523,11 +524,11 @@ TEST(ExternalModuleCatalog, StddevArgumentTypesExternalFunctions) {
     EXPECT_NE(untyped.error().ToString().find("oz_square"), std::string::npos)
         << untyped.error().ToString();
 
-    auto snapshot = catalog.Snapshot();
-    NKernel::TAnnotationContext annotation{.ExternalCatalog = snapshot};
+    auto snapshot = catalog.Snapshot(SharedTestTypes());
+    auto annotation = NKernel::MakeAnnotationContext(TestTypes(), snapshot);
     auto plan = build(annotation);
     ASSERT_TRUE(plan) << plan.error().ToString();
-    ApplyPlanPasses(*plan, {
+    ApplyPlanPasses(TestTypes(), *plan, {
         .EnableCbo = false,
         .Annotation = annotation,
     });
@@ -556,24 +557,23 @@ TEST(ExternalModuleCatalog, DistinctStructProjectionNamesFieldsByColumnAliases) 
 
     TMockSource source(
         TMockColumns{},
-        {{"x", std::make_shared<TFloatType>()}});
+        {{"x", TestTypes().MakeFloat()}});
     auto build = [&](const TSqlNodePtr& statement) {
-        return BuildPlan(statement, [&](std::string_view table)
+        return BuildPlan(TestTypes(), statement, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
             -> std::expected<TOperatorPtr, NQumir::TError>
         {
             if (table != "points") {
                 return std::unexpected(NQumir::TError("unknown test table"));
             }
-            return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
-        }, {.ExternalCatalog = catalog.Snapshot()});
+            return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(table));
+        }, NKernel::MakeAnnotationContext(TestTypes(), catalog.Snapshot(SharedTestTypes())));
     };
 
     auto aliased = build(statements[2]);
     ASSERT_TRUE(aliased) << aliased.error().ToString();
-    AnnotateTypes(*aliased, {
-        .ExternalCatalog = catalog.Snapshot(),
-    });
-    auto* output = static_cast<TStructType*>((*aliased)->OutputColumns().get());
+    AnnotateTypes(TestTypes(), *aliased,
+        NKernel::MakeAnnotationContext(TestTypes(), catalog.Snapshot(SharedTestTypes())));
+    auto* output = static_cast<const TStructType*>((*aliased)->OutputColumns());
     ASSERT_TRUE(output);
     ASSERT_EQ(output->Fields.size(), 3u);
     EXPECT_EQ(output->Fields[0].first, "vector_x");
@@ -610,22 +610,22 @@ TEST(ExternalModuleCatalog, RustFunctionRunsInFilter) {
     };
     TMockSource source(
         {"x"},
-        {std::make_shared<NQdb::TNullable>(std::make_shared<TFloatType>())},
+        {MakeNullableType(TestTypes(), TestTypes().MakeFloat())},
         {batch});
-    auto plan = BuildPlan(statements[2], [&](std::string_view table)
+    auto plan = BuildPlan(TestTypes(), statements[2], [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         if (table != "points") {
             return std::unexpected(NQumir::TError("unknown test table"));
         }
-        return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
+        return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(table));
     });
     ASSERT_TRUE(plan) << plan.error().ToString();
 
-    auto snapshot = catalog.Snapshot();
-    ApplyPlanPasses(*plan, {
+    auto snapshot = catalog.Snapshot(SharedTestTypes());
+    ApplyPlanPasses(TestTypes(), *plan, {
         .EnableCbo = false,
-        .Annotation = {.ExternalCatalog = snapshot},
+        .Annotation = NKernel::MakeAnnotationContext(TestTypes(), snapshot),
     });
     auto runtime = RunPlan(*plan, {}, snapshot);
 

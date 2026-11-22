@@ -1,7 +1,10 @@
 #include <qdb/kernel/aggregate_key.h>
 #include <qdb/kernel/column_value.h>
+#include <qdb/modules/qumirdb.h>
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
+#include <qdb/plan/types/type_text.h>
 
 #include <qumir/error.h>
 
@@ -19,19 +22,19 @@ namespace {
 using TLayout = TKeyLayout;
 using TRepresentedType = TRepresentedKeyType;
 
-TLayout TypeLayout(const NQumir::NAst::TTypePtr& original) {
+TLayout TypeLayout(NQumir::NAst::TTypeFactory& types, const NQumir::NAst::TTypePtr& original) {
     using namespace NQumir::NAst;
 
     // Key structs follow the C ABI, which qumir and LLVM share: an i128 and the
     // BinInt struct around it are 16-aligned, so a struct holding one is too.
     if (auto decimal = DecimalSpecOf(original)) {
-        return TypeLayout(DecimalStorageType(*decimal));
+        return TypeLayout(types, DecimalStorageType(types, *decimal));
     }
     if (IsBinIntStorageType(original)) {
         return {16, 16};
     }
-    auto type = UnwrapNamedType(original);
-    if (auto integer = TMaybeType<TIntegerType>(type)) {
+    auto type = UnwrapNamedValueType(original);
+    if (auto integer = MaybeIntegerType(type)) {
         const size_t size = static_cast<size_t>(integer.Cast()->BitWidth() / 8);
         return {size, size};
     }
@@ -47,7 +50,7 @@ TLayout TypeLayout(const NQumir::NAst::TTypePtr& original) {
         size_t offset = 0;
         size_t maxAlignment = 1;
         for (const auto& [_, fieldType] : structure.Cast()->Fields) {
-            const auto field = TypeLayout(fieldType);
+            const auto field = TypeLayout(types, fieldType);
             offset = AlignUp(offset, field.Alignment);
             offset += field.Size;
             maxAlignment = std::max(maxAlignment, field.Alignment);
@@ -56,19 +59,7 @@ TLayout TypeLayout(const NQumir::NAst::TTypePtr& original) {
     }
     throw NQumir::TError(
         "aggregation key type is not fixed-width and trivially copyable: " +
-        (original ? original->ToString() : std::string("<null>")));
-}
-
-NQumir::NAst::TTypePtr StringHandleType(const std::string& name) {
-    using namespace NQumir::NAst;
-    auto u8 = std::make_shared<TIntegerType>(TIntegerType::U8);
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto structure = std::make_shared<TStructType>(
-        std::vector<std::pair<std::string, TTypePtr>>{
-            {"Data", std::make_shared<TPointerType>(u8)},
-            {"Size", i64},
-        });
-    return std::make_shared<TNamedType>(name, std::move(structure));
+        SqlTypeName(original));
 }
 
 std::string PhysicalKeyComponentName(const NQumir::NAst::TTypePtr& type);
@@ -83,10 +74,10 @@ std::string PhysicalKeyInnerComponentName(const NQumir::NAst::TTypePtr& original
         return "BinInt";
     }
     if (auto decimal = DecimalSpecOf(original)) {
-        return PhysicalKeyInnerComponentName(DecimalStorageType(*decimal));
+        return DecimalStorageOf(*decimal) == EDecimalStorage::I64 ? "i64" : "BinInt";
     }
-    auto type = UnwrapNamedType(original);
-    if (auto integer = TMaybeType<TIntegerType>(type)) {
+    auto type = UnwrapNamedValueType(original);
+    if (auto integer = MaybeIntegerType(type)) {
         return integer.Cast()->ToString();
     }
     if (auto floating = TMaybeType<TFloatType>(type)) {
@@ -107,7 +98,7 @@ std::string PhysicalKeyInnerComponentName(const NQumir::NAst::TTypePtr& original
     }
     throw NQumir::TError(
         "key type name is not supported: " +
-        (original ? original->ToString() : std::string("<null>")));
+        SqlTypeName(original));
 }
 
 std::string PhysicalKeyComponentName(const NQumir::NAst::TTypePtr& type) {
@@ -127,52 +118,52 @@ std::string PhysicalKeyTypeName(
     // keys share one cache symbol regardless of which columns they came from.
     std::string name = "AggKey";
     for (const auto& [type, nullable] : fields) {
-        const auto componentType = nullable
-            ? std::static_pointer_cast<NQumir::NAst::TType>(
-                  std::make_shared<NQdb::TNullable>(type))
-            : type;
-        name += "_";
-        name += PhysicalKeyComponentName(componentType);
+        name += nullable ? "_n" : "_";
+        name += PhysicalKeyComponentName(type);
     }
     return name;
 }
 
-TRepresentedKeyType RepresentKeyType(const NQumir::NAst::TTypePtr& original) {
+TRepresentedKeyType RepresentKeyType(NQumir::NAst::TTypeFactory& types, const NQumir::NAst::TTypePtr& original) {
     using namespace NQumir::NAst;
 
     const bool nullable = IsNullableType(original);
     auto inner = nullable ? UnwrapNullableType(original) : original;
-    // A decimal key is its storage: a BinInt, or the plain i64 of p <= 18.
+    // A decimal key is its storage: a BinInt, or the plain i64 of p <= 18. A DATE key
+    // is its storage integer, as kernels read it.
     if (auto decimal = DecimalSpecOf(inner)) {
-        inner = DecimalStorageType(*decimal);
+        inner = DecimalStorageType(types, *decimal);
+    }
+    if (const auto* date = DateStorageType(inner)) {
+        inner = date;
     }
     if (IsBinIntStorageType(inner)) {
-        auto storage = BinIntStorageType();
+        auto storage = BinIntStorageType(types);
         return {
             .Lookup = storage,
             .Stored = storage,
-            .Layout = TypeLayout(storage),
+            .Layout = TypeLayout(types, storage),
             .Nullable = nullable,
             .Inner = storage,
         };
     }
-    auto type = UnwrapNamedType(inner);
+    auto type = UnwrapNamedValueType(inner);
     if (TMaybeType<TStringType>(type)) {
         return {
-            .Lookup = StringHandleType("StringView"),
-            .Stored = StringHandleType("OwnedString"),
+            .Lookup = NQumir::NRegistry::QumirDbNamedType(types, "StringView"),
+            .Stored = NQumir::NRegistry::QumirDbNamedType(types, "OwnedString"),
             .Layout = {16, 8},
             .HasString = true,
             .Nullable = nullable,
             .Inner = inner,
         };
     }
-    if (TMaybeType<TIntegerType>(type) || TMaybeType<TFloatType>(type) ||
+    if (MaybeIntegerType(type) || TMaybeType<TFloatType>(type) ||
         TMaybeType<TBoolType>(type)) {
         return {
             .Lookup = inner,
             .Stored = inner,
-            .Layout = TypeLayout(inner),
+            .Layout = TypeLayout(types, inner),
             .Nullable = nullable,
             .Inner = inner,
         };
@@ -185,7 +176,7 @@ TRepresentedKeyType RepresentKeyType(const NQumir::NAst::TTypePtr& original) {
         bool hasString = false;
 
         for (const auto& [name, fieldType] : structure.Cast()->Fields) {
-            auto represented = RepresentKeyType(fieldType);
+            auto represented = RepresentKeyType(types, fieldType);
             offset = AlignUp(offset, represented.Layout.Alignment);
             lookupFields.emplace_back(name, represented.Lookup);
             storedFields.emplace_back(name, represented.Stored);
@@ -204,8 +195,8 @@ TRepresentedKeyType RepresentKeyType(const NQumir::NAst::TTypePtr& original) {
             };
         }
         return {
-            .Lookup = std::make_shared<TStructType>(std::move(lookupFields)),
-            .Stored = std::make_shared<TStructType>(std::move(storedFields)),
+            .Lookup = types.MakeStruct(std::move(lookupFields)),
+            .Stored = types.MakeStruct(std::move(storedFields)),
             .Layout = {size, maxAlignment},
             .HasString = hasString,
             .Nullable = nullable,
@@ -214,10 +205,11 @@ TRepresentedKeyType RepresentKeyType(const NQumir::NAst::TTypePtr& original) {
     }
     throw NQumir::TError(
         "key type is not supported: " +
-        (original ? original->ToString() : std::string("<null>")));
+        SqlTypeName(original));
 }
 
 TAggregateKeyDescriptor BuildAggregateKeyDescriptor(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& inputType,
     const std::vector<std::string>& groupKeys)
 {
@@ -235,7 +227,7 @@ TAggregateKeyDescriptor BuildAggregateKeyDescriptor(
 
     for (const auto& key : groupKeys) {
         int32_t columnIndex = -1;
-        TTypePtr type;
+        TTypePtr type = nullptr;
         for (int32_t i = 0; i < static_cast<int32_t>(inputType.Fields.size()); ++i) {
             const auto& name = inputType.Fields[i].first;
             const auto dot = name.rfind('.');
@@ -250,15 +242,15 @@ TAggregateKeyDescriptor BuildAggregateKeyDescriptor(
             throw NQumir::TError("aggregation key descriptor: unknown column '" + key + "'");
         }
 
-        const auto represented = RepresentKeyType(type);
+        const auto represented = RepresentKeyType(types, type);
         const auto layout = represented.Layout;
         if (represented.Nullable) {
             lookupFields.emplace_back(
                 "valid_" + std::to_string(result.Fields.size()),
-                std::make_shared<TBoolType>());
+                types.Make<TBoolType>());
             storedFields.emplace_back(
                 "valid_" + std::to_string(result.Fields.size()),
-                std::make_shared<TBoolType>());
+                types.Make<TBoolType>());
             ++offset;
         }
         offset = AlignUp(offset, layout.Alignment);
@@ -295,13 +287,13 @@ TAggregateKeyDescriptor BuildAggregateKeyDescriptor(
     if (hasDistinctType) {
         result.LookupTypeName = result.TypeName + "_Lookup";
         result.StoredTypeName = result.TypeName + "_Stored";
-        result.LookupType = std::make_shared<TNamedType>(result.LookupTypeName,
-            std::make_shared<TStructType>(std::move(lookupFields)));
-        result.StoredType = std::make_shared<TNamedType>(result.StoredTypeName,
-            std::make_shared<TStructType>(std::move(storedFields)));
+        result.LookupType = types.MakeNamed(result.LookupTypeName,
+            types.MakeStruct(std::move(lookupFields)));
+        result.StoredType = types.MakeNamed(result.StoredTypeName,
+            types.MakeStruct(std::move(storedFields)));
     } else {
-        auto concrete = std::make_shared<TNamedType>(result.TypeName,
-            std::make_shared<TStructType>(std::move(storedFields)));
+        auto concrete = types.MakeNamed(result.TypeName,
+            types.MakeStruct(std::move(storedFields)));
         result.LookupType = concrete;
         result.StoredType = concrete;
     }

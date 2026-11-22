@@ -50,7 +50,7 @@ inline void Release(TRowSet* rs) {
 
 struct ISource {
     virtual ~ISource() = default;
-    virtual const TSchema& Schema() const = 0;
+    virtual TSchema Schema(NQumir::NAst::TTypeFactory& types) const = 0;
     virtual const TStatsPtr Stats() const = 0;
     virtual bool Next(TRowSet& rowSet) = 0;
 };

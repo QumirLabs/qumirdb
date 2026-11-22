@@ -18,6 +18,7 @@
 #include <qdb/plan/passes/flatten_disjuncts.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/passes/unbound_vars.h>
+#include <qdb/plan/types/date.h>
 
 #include <qumir/parser/ast.h>
 #include <qumir/parser/core/printer.h>
@@ -143,7 +144,7 @@ std::optional<int64_t> SelectPosition(const NAst::TExprPtr& expr) {
         sign = -1;
     }
     auto number = NAst::TMaybeNode<NAst::TNumberExpr>(operand);
-    if (!number || !NAst::TMaybeType<NAst::TIntegerType>(number.Cast()->Type)) {
+    if (!number || !MaybeIntegerType(number.Cast()->Type)) {
         return std::nullopt;
     }
     return sign * number.Cast()->IntValue;
@@ -476,13 +477,14 @@ struct TPositionedOutputs {
 // single values, so it counts as one column, which BuildSelect checks once it is
 // typed.
 std::expected<TPositionedOutputs, TError> PositionedOutputs(
+    NQumir::NAst::TTypeFactory& types,
     const std::vector<TProjectionSpec>& projections,
     size_t helpers,
     const TAggCollector& collector,
     const NAst::TStructType* inputSchema,
     const NKernel::TAnnotationContext& annotation)
 {
-    auto slots = collector.SlotTypes();
+    auto slots = collector.SlotTypes(types);
     if (!slots) {
         return std::unexpected(slots.error());
     }
@@ -495,7 +497,7 @@ std::expected<TPositionedOutputs, TError> PositionedOutputs(
     for (const auto& [name, _] : fields) {
         columns.insert(name);
     }
-    const NAst::TStructType schema(std::move(fields));
+    const NAst::TStructType& schema = *types.MakeStruct(std::move(fields));
 
     TPositionedOutputs outputs{.Helpers = helpers};
     for (size_t i = helpers; i < projections.size(); ++i) {
@@ -509,7 +511,7 @@ std::expected<TPositionedOutputs, TError> PositionedOutputs(
         size_t width = std::max<size_t>(projection.ColumnAliases.size(), 1);
         if (projection.ColumnAliases.empty() && !typedAbove) {
             try {
-                width = FlattenedArity(NKernel::AnnotateExprType(expression, schema, &annotation));
+                width = FlattenedArity(NKernel::AnnotateExprType(types, expression, schema, &annotation));
             } catch (const TError& error) {
                 return std::unexpected(error);
             }
@@ -581,14 +583,15 @@ TRelation Relation(TOperatorPtr plan) {
 // Labels follow the join's output: both inputs, or the preserved side of a
 // semi/anti/mark join (the marker belongs to no input relation).
 TRelation JoinRelations(
+    NQumir::NAst::TTypeFactory& types,
     TRelation left,
     TRelation right,
     std::vector<TJoinKey> keys,
     EJoinType type,
     NAst::TExprPtr residual)
 {
-    TRelation joined{.Plan = std::make_shared<TJoinOperator>(
-        left.Plan, right.Plan, std::move(keys), type, std::move(residual))};
+    TRelation joined{.Plan = NQumir::MakeIntrusive<TJoinOperator>(
+        types, left.Plan, right.Plan, std::move(keys), type, std::move(residual))};
     switch (type) {
         case EJoinType::LeftSemi:
         case EJoinType::LeftAnti:
@@ -613,9 +616,9 @@ TRelation JoinRelations(
 
 // Types an operator built over typed inputs. Kernel type annotation reports
 // errors as exceptions; the builder returns them as values.
-std::expected<void, TError> Annotate(const TOperatorPtr& plan, const TBuildContext& context) {
+std::expected<void, TError> Annotate(NQumir::NAst::TTypeFactory& types, const TOperatorPtr& plan, const TBuildContext& context) {
     try {
-        AnnotateOperatorType(plan, context.Annotation);
+        AnnotateOperatorType(types, plan, context.Annotation);
     } catch (const TError& error) {
         return std::unexpected(error);
     }
@@ -680,7 +683,7 @@ public:
         // CASE; each binds once.
         std::unordered_set<const NAst::TExpr*> visited;
         auto bind = [&](const auto& self, NAst::TExprPtr& node) -> std::expected<void, TError> {
-            if (!node || !visited.insert(node.get()).second) {
+            if (!node || !visited.insert(node.Get()).second) {
                 return {};
             }
             if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(node)) {
@@ -747,6 +750,7 @@ std::expected<std::string, TError> BindColumn(const std::string& name, const TRe
 // being built alone, so it is renamed in place; another plan gets a renaming
 // projection.
 std::expected<TOperatorPtr, TError> RenameOutputs(
+    NQumir::NAst::TTypeFactory& types,
     TOperatorPtr plan,
     const std::vector<std::string>& names,
     const TBuildContext& context)
@@ -769,9 +773,9 @@ std::expected<TOperatorPtr, TError> RenameOutputs(
         for (size_t i = 0; i < columns.size(); ++i) {
             renamed.push_back({.Name = names[i], .Expression = Ident({}, columns[i])});
         }
-        plan = std::make_shared<TProjectOperator>(std::move(plan), std::move(renamed));
+        plan = NQumir::MakeIntrusive<TProjectOperator>(types, std::move(plan), std::move(renamed));
     }
-    if (auto annotated = Annotate(plan, context); !annotated) {
+    if (auto annotated = Annotate(types, plan, context); !annotated) {
         return std::unexpected(annotated.error());
     }
     return plan;
@@ -779,6 +783,7 @@ std::expected<TOperatorPtr, TError> RenameOutputs(
 
 // Gives a relation new labels. Physical names follow them unless labels repeat.
 std::expected<TRelation, TError> Relabel(
+    NQumir::NAst::TTypeFactory& types,
     TRelation relation,
     std::vector<std::string> labels,
     const TBuildContext& context)
@@ -793,7 +798,7 @@ std::expected<TRelation, TError> Relabel(
             name = fresh.Next("__scope");
         }
     }
-    auto plan = RenameOutputs(std::move(relation.Plan), names, context);
+    auto plan = RenameOutputs(types, std::move(relation.Plan), names, context);
     if (!plan) {
         return std::unexpected(plan.error());
     }
@@ -803,6 +808,7 @@ std::expected<TRelation, TError> Relabel(
 // Renames a built sub-plan's output columns to the given list (CTE column lists
 // and derived-table column aliases).
 std::expected<TRelation, TError> ApplyColumnAliases(
+    NQumir::NAst::TTypeFactory& types,
     TRelation relation,
     const std::vector<std::string>& aliases,
     const TBuildContext& context)
@@ -812,12 +818,13 @@ std::expected<TRelation, TError> ApplyColumnAliases(
             return std::unexpected(valid.error());
         }
     }
-    return Relabel(std::move(relation), aliases, context);
+    return Relabel(types, std::move(relation), aliases, context);
 }
 
 // Qualifies a subplan's output columns as `alias.col`, so the outer query can
 // reference `alias.col` (and equi-join keys on them are extracted).
 std::expected<TRelation, TError> AliasSubplan(
+    NQumir::NAst::TTypeFactory& types,
     TRelation relation,
     const std::string& alias,
     const TBuildContext& context)
@@ -826,12 +833,13 @@ std::expected<TRelation, TError> AliasSubplan(
     for (const auto& label : relation.Labels) {
         labels.push_back(alias + "." + BareColumnName(label));
     }
-    return Relabel(std::move(relation), std::move(labels), context);
+    return Relabel(types, std::move(relation), std::move(labels), context);
 }
 
 // FROM items and subqueries may expose equal physical names, for example two
 // unaliased derived tables. The right side gets other names; labels stay.
 std::expected<TRelation, TError> SeparateRight(
+    NQumir::NAst::TTypeFactory& types,
     const TRelation& left,
     TRelation right,
     const TBuildContext& context)
@@ -854,7 +862,7 @@ std::expected<TRelation, TError> SeparateRight(
             name = fresh.Next("__scope");
         }
     }
-    auto plan = RenameOutputs(std::move(right.Plan), names, context);
+    auto plan = RenameOutputs(types, std::move(right.Plan), names, context);
     if (!plan) {
         return std::unexpected(plan.error());
     }
@@ -865,17 +873,18 @@ std::expected<TRelation, TError> SeparateRight(
 // A subquery's outputs under internal names, hidden from SQL, ready to join onto
 // `node`.
 std::expected<TRelation, TError> SubqueryOutputs(
+    NQumir::NAst::TTypeFactory& types,
     const TRelation& node,
     TRelation subquery,
     std::vector<std::string> names,
     const TBuildContext& context)
 {
-    auto renamed = Relabel(std::move(subquery), std::move(names), context);
+    auto renamed = Relabel(types, std::move(subquery), std::move(names), context);
     if (!renamed) {
         return renamed;
     }
     std::ranges::fill(renamed->Labels, std::string());
-    return SeparateRight(node, std::move(*renamed), context);
+    return SeparateRight(types, node, std::move(*renamed), context);
 }
 
 // The labels of a plan built over `input`: a column that keeps the name of an
@@ -897,19 +906,20 @@ TRelation CarryLabels(const TRelation& input, TOperatorPtr plan) {
 // SELECT DISTINCT: dedup by grouping on every output column. ORDER BY extends the
 // pass-through project on top with hidden sort columns over the distinct rows.
 std::expected<TRelation, TError> ApplyDistinct(
+    NQumir::NAst::TTypeFactory& types,
     TRelation projected,
     const std::vector<std::string>& columns,
     const TBuildContext& context)
 {
-    auto agg = std::make_shared<TAggregateOperator>(
-        std::move(projected.Plan), columns, std::vector<TAggregateSpec>{});
+    auto agg = NQumir::MakeIntrusive<TAggregateOperator>(
+        types, std::move(projected.Plan), columns, std::vector<TAggregateSpec>{});
     std::vector<TProjectionSpec> passthrough;
     passthrough.reserve(columns.size());
     for (const auto& col : columns) {
         passthrough.push_back({ .Name = col, .Expression = Ident({}, col) });
     }
-    projected.Plan = std::make_shared<TProjectOperator>(std::move(agg), std::move(passthrough));
-    if (auto annotated = Annotate(projected.Plan, context); !annotated) {
+    projected.Plan = NQumir::MakeIntrusive<TProjectOperator>(types, std::move(agg), std::move(passthrough));
+    if (auto annotated = Annotate(types, projected.Plan, context); !annotated) {
         return std::unexpected(annotated.error());
     }
     return projected;
@@ -959,6 +969,7 @@ std::expected<std::optional<TLimitClause>, TError> LimitClause(const NSql::TSqlQ
 // The leading `bindingColumns` outputs of a correlated subquery body identify
 // the outer binding of each row; ORDER BY and LIMIT then apply per binding.
 std::expected<TRelation, TError> BuildQuery(
+    NQumir::NAst::TTypeFactory& types,
     const NSql::TSqlQuery& query,
     TBuildContext& context,
     std::optional<TSelectOutput>* output = nullptr,
@@ -969,6 +980,7 @@ std::expected<TRelation, TError> BuildQuery(
 // As in DuckDB, it takes the place of the left input. The inputs stay reachable
 // by their qualified labels only, as `t.c` and `u.c`.
 std::expected<TRelation, TError> ShareUsingColumns(
+    NQumir::NAst::TTypeFactory& types,
     TRelation joined,
     const std::vector<TJoinKey>& keys,
     EJoinType type,
@@ -1039,9 +1051,9 @@ std::expected<TRelation, TError> ShareUsingColumns(
         projections.push_back({.Name = name, .Expression = Ident({}, columns[i])});
         labels.push_back(joined.Labels[i]);
     }
-    joined.Plan = std::make_shared<TProjectOperator>(std::move(joined.Plan), std::move(projections));
+    joined.Plan = NQumir::MakeIntrusive<TProjectOperator>(types, std::move(joined.Plan), std::move(projections));
     joined.Labels = std::move(labels);
-    if (auto annotated = Annotate(joined.Plan, context); !annotated) {
+    if (auto annotated = Annotate(types, joined.Plan, context); !annotated) {
         return std::unexpected(annotated.error());
     }
     return joined;
@@ -1077,6 +1089,7 @@ std::vector<std::string> CommonColumns(const TRelation& left, const TRelation& r
 }
 
 std::expected<TRelation, TError> BuildTableRef(
+    NQumir::NAst::TTypeFactory& types,
     const NSql::TSqlPtr<NSql::TSqlTableRef>& ref,
     TBuildContext& context)
 {
@@ -1089,9 +1102,9 @@ std::expected<TRelation, TError> BuildTableRef(
         const auto qualifier = *ItemQualifier(ref);
         if (auto maybeSourceOp = TMaybeOp<TSourceOperator>(source->Plan)) {
             auto sourceOp = maybeSourceOp.Cast();
-            sourceOp->SetAlias(SourceAlias(*node, context.SourceAliases));
+            sourceOp->SetAlias(types, SourceAlias(*node, context.SourceAliases));
             source->Labels.clear();
-            for (const auto& column : sourceOp->GetTable()->Schema().Columns) {
+            for (const auto& column : sourceOp->TableSchema().Columns) {
                 source->Labels.push_back(qualifier + "." + std::string(column.Name));
             }
             return source;
@@ -1100,38 +1113,38 @@ std::expected<TRelation, TError> BuildTableRef(
         // when referenced bare - by the CTE name, so `<cte>.col` references resolve
         // (otherwise the inlined columns stay bare and equi-joins over them drop their
         // keys, producing keyless cross joins).
-        return AliasSubplan(std::move(*source), qualifier, context);
+        return AliasSubplan(types, std::move(*source), qualifier, context);
     }
 
     if (auto sub = NSql::TMaybeNode<NSql::TSqlSubqueryTable>(ref)) {
         auto node = sub.Cast();
-        auto plan = BuildQuery(*node->Query, context);
+        auto plan = BuildQuery(types, *node->Query, context);
         if (!plan) {
             return plan;
         }
         if (node->ColumnAliases) {
-            plan = ApplyColumnAliases(std::move(*plan), node->ColumnAliases->Items, context);
+            plan = ApplyColumnAliases(types, std::move(*plan), node->ColumnAliases->Items, context);
             if (!plan) {
                 return plan;
             }
         }
         if (node->Alias) {
-            return AliasSubplan(std::move(*plan), *node->Alias, context);
+            return AliasSubplan(types, std::move(*plan), *node->Alias, context);
         }
         return plan;
     }
 
     if (auto maybeJoin = NSql::TMaybeNode<NSql::TSqlJoin>(ref)) {
         auto join = maybeJoin.Cast();
-        auto left = BuildTableRef(join->Left, context);
+        auto left = BuildTableRef(types, join->Left, context);
         if (!left) {
             return std::unexpected(left.error());
         }
-        auto right = BuildTableRef(join->Right, context);
+        auto right = BuildTableRef(types, join->Right, context);
         if (!right) {
             return std::unexpected(right.error());
         }
-        right = SeparateRight(*left, std::move(*right), context);
+        right = SeparateRight(types, *left, std::move(*right), context);
         if (!right) {
             return std::unexpected(right.error());
         }
@@ -1177,10 +1190,10 @@ std::expected<TRelation, TError> BuildTableRef(
                 }
             }
         }
-        auto joined = JoinRelations(std::move(*left), std::move(*right), keys,
+        auto joined = JoinRelations(types, std::move(*left), std::move(*right), keys,
             MapJoinType(join->Type), std::move(residual));
         if (condition && condition->UsingColumns) {
-            return ShareUsingColumns(std::move(joined), keys, MapJoinType(join->Type), context);
+            return ShareUsingColumns(types, std::move(joined), keys, MapJoinType(join->Type), context);
         }
         return joined;
     }
@@ -1189,13 +1202,14 @@ std::expected<TRelation, TError> BuildTableRef(
 }
 
 std::expected<TRelation, TError> BuildFrom(
+    NQumir::NAst::TTypeFactory& types,
     const NSql::TSqlFrom& from,
     TBuildContext& context)
 {
     if (from.Items.empty()) {
         return std::unexpected(TError("empty FROM"));
     }
-    auto node = BuildTableRef(from.Items[0], context);
+    auto node = BuildTableRef(types, from.Items[0], context);
     if (!node) {
         return std::unexpected(node.error());
     }
@@ -1205,15 +1219,15 @@ std::expected<TRelation, TError> BuildFrom(
     // predicate stays a single top-level filter (equi-join extraction is an
     // optimizer pass).
     for (size_t i = 1; i < from.Items.size(); ++i) {
-        auto right = BuildTableRef(from.Items[i], context);
+        auto right = BuildTableRef(types, from.Items[i], context);
         if (!right) {
             return std::unexpected(right.error());
         }
-        right = SeparateRight(result, std::move(*right), context);
+        right = SeparateRight(types, result, std::move(*right), context);
         if (!right) {
             return std::unexpected(right.error());
         }
-        result = JoinRelations(std::move(result), std::move(*right), {}, EJoinType::Inner, nullptr);
+        result = JoinRelations(types, std::move(result), std::move(*right), {}, EJoinType::Inner, nullptr);
     }
     return result;
 }
@@ -1222,7 +1236,7 @@ NAst::TExprPtr Conjoin(const std::vector<NAst::TExprPtr>& parts) {
     NAst::TExprPtr result;
     for (const auto& part : parts) {
         result = result
-            ? std::make_shared<NAst::TBinaryExpr>(part->Location, NAst::TOperator("&&"), result, part)
+            ? NQumir::MakeIntrusive<NAst::TBinaryExpr>(part->Location, NAst::TOperator("&&"), result, part)
             : part;
     }
     return result;
@@ -1231,7 +1245,7 @@ NAst::TExprPtr Conjoin(const std::vector<NAst::TExprPtr>& parts) {
 struct TDecorrelation {
     EJoinType Type;
     bool IsIn;
-    std::shared_ptr<NSql::TSubqueryExpr> Subquery;
+    NQumir::TIntrusivePtr<NSql::TSubqueryExpr> Subquery;
 };
 
 // Recognizes a WHERE conjunct that decorrelates into a semi/anti join:
@@ -1255,13 +1269,14 @@ std::optional<TDecorrelation> AsDecorrelation(const NAst::TExprPtr& conjunct) {
     return TDecorrelation{
         .Type = negated ? EJoinType::LeftAnti : EJoinType::LeftSemi,
         .IsIn = kind == EKind::In,
-        .Subquery = sub.Cast(),
+        .Subquery = NQumir::TIntrusivePtr<NSql::TSubqueryExpr>(sub.Cast()),
     };
 }
 
 // EXISTS: the subquery's FROM becomes the right side and its WHERE (correlation
 // plus local predicates) becomes the join residual.
 std::expected<TRelation, TError> DecorrelateExists(
+    NQumir::NAst::TTypeFactory& types,
     TRelation left,
     const NSql::TSubqueryExpr& subquery,
     EJoinType type,
@@ -1278,14 +1293,14 @@ std::expected<TRelation, TError> DecorrelateExists(
     if (!select->From) {
         return std::unexpected(TError("EXISTS subquery requires FROM"));
     }
-    auto right = BuildFrom(*select->From, context);
+    auto right = BuildFrom(types, *select->From, context);
     if (!right) {
         return std::unexpected(right.error());
     }
     if (select->Where && HasSubquery(select->Where)) {
         return std::unexpected(TError("nested subqueries are not supported yet"));
     }
-    right = SeparateRight(left, std::move(*right), context);
+    right = SeparateRight(types, left, std::move(*right), context);
     if (!right) {
         return std::unexpected(right.error());
     }
@@ -1300,11 +1315,12 @@ std::expected<TRelation, TError> DecorrelateExists(
             return std::unexpected(bound.error());
         }
     }
-    return JoinRelations(std::move(left), std::move(*right), {}, type, std::move(residual));
+    return JoinRelations(types, std::move(left), std::move(*right), {}, type, std::move(residual));
 }
 
 // IN: build the subquery as a full plan and join on `operand == <its only column>`.
 std::expected<TRelation, TError> DecorrelateIn(
+    NQumir::NAst::TTypeFactory& types,
     TRelation left,
     const NSql::TSubqueryExpr& subquery,
     EJoinType type,
@@ -1313,7 +1329,7 @@ std::expected<TRelation, TError> DecorrelateIn(
     if (!subquery.Operand || HasSubquery(subquery.Operand)) {
         return std::unexpected(TError("unsupported IN operand"));
     }
-    auto right = BuildQuery(*subquery.Query, context);
+    auto right = BuildQuery(types, *subquery.Query, context);
     if (!right) {
         return std::unexpected(right.error());
     }
@@ -1326,15 +1342,15 @@ std::expected<TRelation, TError> DecorrelateIn(
     // key extraction drops entirely, leaving a keyless (unschedulable,
     // condition-less) semi-join. The name is internal - a semi/anti join exposes
     // only its left side.
-    right = SubqueryOutputs(left, std::move(*right), {"__qdb_in__" + columns.front()}, context);
+    right = SubqueryOutputs(types, left, std::move(*right), {"__qdb_in__" + columns.front()}, context);
     if (!right) {
         return std::unexpected(right.error());
     }
     // The operand was bound with the rest of the WHERE clause.
     auto column = Ident(subquery.Operand->Location, ColumnNames(right->Plan).front());
-    auto residual = std::make_shared<NAst::TBinaryExpr>(
+    auto residual = NQumir::MakeIntrusive<NAst::TBinaryExpr>(
         subquery.Operand->Location, NAst::TOperator("=="), subquery.Operand, std::move(column));
-    return JoinRelations(std::move(left), std::move(*right), {}, type, std::move(residual));
+    return JoinRelations(types, std::move(left), std::move(*right), {}, type, std::move(residual));
 }
 
 // The names a subquery's FROM makes visible. A qualified reference is local iff its
@@ -1639,7 +1655,7 @@ void ReplaceIdents(
 
 // A conjunct that is a disjunction of positive EXISTS subqueries (`exists(A) OR
 // exists(B) [OR ...]`). Returns the EXISTS subqueries, or empty if the shape doesn't match.
-std::vector<std::shared_ptr<NSql::TSubqueryExpr>> AsExistsOrDisjunction(
+std::vector<NQumir::TIntrusivePtr<NSql::TSubqueryExpr>> AsExistsOrDisjunction(
     const NAst::TExprPtr& conjunct)
 {
     std::vector<NAst::TExprPtr> disjuncts;
@@ -1647,13 +1663,13 @@ std::vector<std::shared_ptr<NSql::TSubqueryExpr>> AsExistsOrDisjunction(
     if (disjuncts.size() < 2) {
         return {};
     }
-    std::vector<std::shared_ptr<NSql::TSubqueryExpr>> existsList;
+    std::vector<NQumir::TIntrusivePtr<NSql::TSubqueryExpr>> existsList;
     for (const auto& d : disjuncts) {
         auto sub = NAst::TMaybeNode<NSql::TSubqueryExpr>(d);
         if (!sub || sub.Cast()->Kind != NSql::TSubqueryExpr::EKind::Exists) {
             return {};
         }
-        existsList.push_back(sub.Cast());
+        existsList.emplace_back(sub.Cast());
     }
     return existsList;
 }
@@ -1664,8 +1680,9 @@ std::vector<std::shared_ptr<NSql::TSubqueryExpr>> AsExistsOrDisjunction(
 // is neutralized and its inner key projected under a common name; the union feeds one
 // left-semi join. Returns nullopt when the shape isn't supported (caller falls back).
 std::expected<std::optional<TRelation>, TError> DecorrelateExistsOr(
+    NQumir::NAst::TTypeFactory& types,
     const TRelation& left,
-    const std::vector<std::shared_ptr<NSql::TSubqueryExpr>>& existsList,
+    const std::vector<NQumir::TIntrusivePtr<NSql::TSubqueryExpr>>& existsList,
     TBuildContext& context)
 {
     std::optional<std::string> outerKey;
@@ -1702,7 +1719,7 @@ std::expected<std::optional<TRelation>, TError> DecorrelateExistsOr(
         } else if (*outerKey != outer) {
             return std::optional<TRelation>{}; // branches must share the outer key
         }
-        auto body = BuildFrom(*select->From, context);
+        auto body = BuildFrom(types, *select->From, context);
         if (!body) {
             return std::unexpected(body.error());
         }
@@ -1715,24 +1732,24 @@ std::expected<std::optional<TRelation>, TError> DecorrelateExistsOr(
                 return std::unexpected(bound.error());
             }
         }
-        TOperatorPtr filtered = std::make_shared<TFilterOperator>(std::move(body->Plan), std::move(where));
+        TOperatorPtr filtered = NQumir::MakeIntrusive<TFilterOperator>(types, std::move(body->Plan), std::move(where));
         std::vector<TProjectionSpec> projs{
             { .Name = "__exists_key__", .Expression = std::move(key) }};
-        branches.push_back(std::make_shared<TProjectOperator>(
-            std::move(filtered), std::move(projs)));
-        if (auto annotated = Annotate(branches.back(), context); !annotated) {
+        branches.push_back(NQumir::MakeIntrusive<TProjectOperator>(
+            types, std::move(filtered), std::move(projs)));
+        if (auto annotated = Annotate(types, branches.back(), context); !annotated) {
             return std::unexpected(annotated.error());
         }
     }
-    auto un = Relation(std::make_shared<TUnionAllOperator>(std::move(branches)));
-    if (auto annotated = Annotate(un.Plan, context); !annotated) {
+    auto un = Relation(NQumir::MakeIntrusive<TUnionAllOperator>(types, std::move(branches)));
+    if (auto annotated = Annotate(types, un.Plan, context); !annotated) {
         return std::unexpected(annotated.error());
     }
     auto outer = BindColumn(*outerKey, left);
     if (!outer) {
         return std::unexpected(outer.error());
     }
-    auto right = SeparateRight(left, std::move(un), context);
+    auto right = SeparateRight(types, left, std::move(un), context);
     if (!right) {
         return std::unexpected(right.error());
     }
@@ -1740,7 +1757,7 @@ std::expected<std::optional<TRelation>, TError> DecorrelateExistsOr(
     // equi-key extraction, sees this as an equi-join and does not cross-join around it.
     std::vector<TJoinKey> keys{ TJoinKey{ *outer, ColumnNames(right->Plan).front() } };
     return std::optional<TRelation>{
-        JoinRelations(left, std::move(*right), std::move(keys), EJoinType::LeftSemi, nullptr)};
+        JoinRelations(types, left, std::move(*right), std::move(keys), EJoinType::LeftSemi, nullptr)};
 }
 
 // True if any identifier leaf is not a local column (a leftover outer reference not
@@ -1811,6 +1828,7 @@ struct TCorrelatedCount {
 };
 
 std::optional<TCorrelatedCount> SplitCorrelatedCount(
+    NQumir::NAst::TTypeFactory& types,
     const TOperatorPtr& plan,
     size_t correlationCount)
 {
@@ -1840,13 +1858,14 @@ std::optional<TCorrelatedCount> SplitCorrelatedCount(
     if (having) {
         split.Having = CloneExpr(having.Cast()->Predicate());
     }
-    split.States = std::make_shared<TProjectOperator>(aggregate.Cast(), std::move(states));
+    split.States = NQumir::MakeIntrusive<TProjectOperator>(types, aggregate.Cast(), std::move(states));
     return split;
 }
 
 // The scalar value over the joined state columns `states`, in the order of
 // `split.Aggregates`.
 NAst::TExprPtr RestoreCorrelatedCount(
+    NQumir::NAst::TTypeFactory& types,
     const TCorrelatedCount& split,
     const std::vector<std::string>& states)
 {
@@ -1856,7 +1875,7 @@ NAst::TExprPtr RestoreCorrelatedCount(
         if (split.EmptyIsZero[i]) {
             value = Call({}, "coalesce", {
                 std::move(value),
-                std::make_shared<NAst::TNumberExpr>(TLocation{}, static_cast<int64_t>(0)),
+                NQumir::MakeIntrusive<NAst::TNumberExpr>(TLocation{}, static_cast<int64_t>(0), types),
             });
         }
         replacements.emplace(split.Aggregates[i], std::move(value));
@@ -1867,7 +1886,7 @@ NAst::TExprPtr RestoreCorrelatedCount(
         // means an empty scalar subquery, whose result is NULL, even for COUNT.
         auto condition = RestoreCorrelatedCountDefaults(CloneExpr(split.Having), replacements);
         const auto location = value->Location;
-        value = std::make_shared<NAst::TIfExpr>(
+        value = NQumir::MakeIntrusive<NAst::TIfExpr>(
             location,
             Call({}, "qdb_is_true", {std::move(condition)}),
             std::move(value), Call({}, "qdb_sql_null", {}));
@@ -1892,6 +1911,7 @@ struct TExtractedSubqueries {
 // a filter above rejects the NULL value, outer-join simplification turns either
 // join into an inner one.
 std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
+    NQumir::NAst::TTypeFactory& types,
     NAst::TExprPtr expr,
     TRelation& node,
     TBuildContext& context,
@@ -1902,11 +1922,11 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
     }
     if (auto sub = NAst::TMaybeNode<NSql::TSubqueryExpr>(expr)) {
         auto scalar = sub.Cast();
-        if (auto found = extracted.Columns.find(scalar.get()); found != extracted.Columns.end()) {
+        if (auto found = extracted.Columns.find(scalar); found != extracted.Columns.end()) {
             return CloneExpr(found->second);
         }
         auto extract = [&](NAst::TExprPtr replacement) {
-            extracted.Columns.emplace(scalar.get(), CloneExpr(replacement));
+            extracted.Columns.emplace(scalar, CloneExpr(replacement));
             return replacement;
         };
         if (scalar->Kind == NSql::TSubqueryExpr::EKind::In) {
@@ -1931,7 +1951,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                         "correlated IN subquery in a boolean expression is not supported"));
                 }
             }
-            auto plan = BuildQuery(*scalar->Query, context);
+            auto plan = BuildQuery(types, *scalar->Query, context);
             if (!plan) {
                 return std::unexpected(plan.error());
             }
@@ -1939,13 +1959,13 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                 return std::unexpected(TError("IN subquery must return exactly one column"));
             }
             auto right = SubqueryOutputs(
-                node, std::move(*plan), {"__in_mark_" + std::to_string(extracted.Counter++) + "__"}, context);
+                types, node, std::move(*plan), {"__in_mark_" + std::to_string(extracted.Counter++) + "__"}, context);
             if (!right) {
                 return std::unexpected(right.error());
             }
             const auto markName = ColumnNames(right->Plan).front();
             // Dedup so each outer row matches at most one right row (no duplication).
-            auto distinct = ApplyDistinct(std::move(*right), { markName }, context);
+            auto distinct = ApplyDistinct(types, std::move(*right), { markName }, context);
             if (!distinct) {
                 return std::unexpected(distinct.error());
             }
@@ -1955,14 +1975,14 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
             if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(scalar->Operand)) {
                 keys.push_back(TJoinKey{ ident.Cast()->Name, markName });
             } else {
-                residual = std::make_shared<NAst::TBinaryExpr>(
+                residual = NQumir::MakeIntrusive<NAst::TBinaryExpr>(
                     scalar->Operand->Location, NAst::TOperator("=="),
                     scalar->Operand, Ident(scalar->Operand->Location, markName));
             }
-            node = JoinRelations(std::move(node), std::move(*distinct), std::move(keys),
+            node = JoinRelations(types, std::move(node), std::move(*distinct), std::move(keys),
                 EJoinType::Left, std::move(residual));
             // Replace `x IN (subquery)` with `!(qdb_is_null(marker))`.
-            return extract(std::make_shared<NAst::TUnaryExpr>(
+            return extract(NQumir::MakeIntrusive<NAst::TUnaryExpr>(
                 expr->Location, NAst::TOperator("!"),
                 Call(expr->Location, "qdb_is_null", { Ident(expr->Location, markName) })));
         }
@@ -2074,7 +2094,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                         unsupported("unsupported correlated subquery (outer column outside an equality)"));
                 }
 
-                auto plan = BuildQuery(*scalar->Query, context, nullptr, correlation.size());
+                auto plan = BuildQuery(types, *scalar->Query, context, nullptr, correlation.size());
                 if (!plan) {
                     return std::unexpected(plan.error());
                 }
@@ -2083,17 +2103,17 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                         TError("correlated scalar subquery must return one value"));
                 }
                 if (empty) {
-                    plan->Plan = std::make_shared<TLimitOperator>(std::move(plan->Plan), 0);
+                    plan->Plan = NQumir::MakeIntrusive<TLimitOperator>(types, std::move(plan->Plan), 0);
                 }
                 std::optional<TCorrelatedCount> counts;
                 if (ungrouped && !empty) {
-                    counts = SplitCorrelatedCount(plan->Plan, correlation.size());
+                    counts = SplitCorrelatedCount(types, plan->Plan, correlation.size());
                 }
                 if (counts) {
                     // The states replace the scalar column; the COUNT identity,
                     // the projection and HAVING are evaluated above the join.
                     auto states = Relation(std::move(counts->States));
-                    if (auto annotated = Annotate(states.Plan, context); !annotated) {
+                    if (auto annotated = Annotate(types, states.Plan, context); !annotated) {
                         return std::unexpected(annotated.error());
                     }
                     for (size_t i = 0; i < counts->Aggregates.size(); ++i) {
@@ -2104,7 +2124,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                 } else {
                     outputs.push_back("__scalar_" + std::to_string(id) + "__");
                 }
-                auto right = SubqueryOutputs(node, std::move(*plan), std::move(outputs), context);
+                auto right = SubqueryOutputs(types, node, std::move(*plan), std::move(outputs), context);
                 if (!right) {
                     return std::unexpected(right.error());
                 }
@@ -2116,9 +2136,9 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                 // LEFT join preserves outer rows; a missing match yields NULL, so
                 // the surrounding comparison filters the row out (SQL semantics).
                 node = JoinRelations(
-                    std::move(node), std::move(*right), std::move(joinKeys), EJoinType::Left, nullptr);
+                    types, std::move(node), std::move(*right), std::move(joinKeys), EJoinType::Left, nullptr);
                 if (counts) {
-                    return extract(RestoreCorrelatedCount(*counts,
+                    return extract(RestoreCorrelatedCount(types, *counts,
                         {columns.begin() + correlation.size(), columns.end()}));
                 }
                 return extract(Ident(expr->Location, columns.back()));
@@ -2136,7 +2156,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
         }
 
         // Uncorrelated: the subquery's row is broadcast to every row of `node`.
-        auto plan = BuildQuery(*scalar->Query, context);
+        auto plan = BuildQuery(types, *scalar->Query, context);
         if (!plan) {
             return std::unexpected(plan.error());
         }
@@ -2144,17 +2164,17 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
             return std::unexpected(TError("scalar subquery must return exactly one column"));
         }
         auto right = SubqueryOutputs(
-            node, std::move(*plan), {"__scalar_" + std::to_string(extracted.Counter++) + "__"}, context);
+            types, node, std::move(*plan), {"__scalar_" + std::to_string(extracted.Counter++) + "__"}, context);
         if (!right) {
             return std::unexpected(right.error());
         }
         const auto column = ColumnNames(right->Plan).front();
         right->Plan->AtMostOneRow = true;
-        node = JoinRelations(std::move(node), std::move(*right), {}, EJoinType::Left, nullptr);
+        node = JoinRelations(types, std::move(node), std::move(*right), {}, EJoinType::Left, nullptr);
         return extract(Ident(expr->Location, column));
     }
     for (NAst::TExprPtr* child : expr->MutableChildren()) {
-        auto rewritten = ExtractScalarSubqueries(*child, node, context, extracted);
+        auto rewritten = ExtractScalarSubqueries(types, *child, node, context, extracted);
         if (!rewritten) {
             return std::unexpected(rewritten.error());
         }
@@ -2172,6 +2192,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
 // the window input, which in an aggregated SELECT is the aggregate output; it is
 // not supported yet.
 std::expected<void, TError> ExtractAggregateArgumentSubqueries(
+    NQumir::NAst::TTypeFactory& types,
     const NAst::TExprPtr& expr,
     TRelation& node,
     TBuildContext& context,
@@ -2182,7 +2203,7 @@ std::expected<void, TError> ExtractAggregateArgumentSubqueries(
     }
     if (auto window = NAst::TMaybeNode<NSql::TWindowExpr>(expr)) {
         for (auto* input : WindowInputs(*window.Cast())) {
-            if (auto done = ExtractAggregateArgumentSubqueries(*input, node, context, extracted); !done) {
+            if (auto done = ExtractAggregateArgumentSubqueries(types, *input, node, context, extracted); !done) {
                 return done;
             }
         }
@@ -2194,7 +2215,7 @@ std::expected<void, TError> ExtractAggregateArgumentSubqueries(
     }
     if (IsAggregateCall(expr)) {
         for (auto& arg : NAst::TMaybeNode<NAst::TCallExpr>(expr).Cast()->Args) {
-            auto rewritten = ExtractScalarSubqueries(arg, node, context, extracted);
+            auto rewritten = ExtractScalarSubqueries(types, arg, node, context, extracted);
             if (!rewritten) {
                 return std::unexpected(rewritten.error());
             }
@@ -2203,7 +2224,7 @@ std::expected<void, TError> ExtractAggregateArgumentSubqueries(
         return {};
     }
     for (const auto& child : expr->Children()) {
-        if (auto done = ExtractAggregateArgumentSubqueries(child, node, context, extracted); !done) {
+        if (auto done = ExtractAggregateArgumentSubqueries(types, child, node, context, extracted); !done) {
             return done;
         }
     }
@@ -2221,6 +2242,7 @@ std::expected<void, TError> ExtractAggregateArgumentSubqueries(
 // GROUPING() values. A GROUP BY position names one of the `positioned` outputs
 // of `projections`.
 std::expected<TRelation, TError> BuildAggregate(
+    NQumir::NAst::TTypeFactory& types,
     TRelation node,
     TAggCollector& collector,
     TFreshNames& names,
@@ -2335,14 +2357,14 @@ std::expected<TRelation, TError> BuildAggregate(
     // still keys of the single grouping set of a plain GROUP BY.
     auto groupingInfo = MakeGroupingRewriteInfo(groupKeys, groupingSets);
     for (auto& projection : projections) {
-        auto rewritten = RewriteGroupingCalls(projection.Expression, groupingInfo);
+        auto rewritten = RewriteGroupingCalls(types, projection.Expression, groupingInfo);
         if (!rewritten) {
             return std::unexpected(rewritten.error());
         }
         projection.Expression = std::move(*rewritten);
     }
     if (having) {
-        auto rewritten = RewriteGroupingCalls(having, groupingInfo);
+        auto rewritten = RewriteGroupingCalls(types, having, groupingInfo);
         if (!rewritten) {
             return std::unexpected(rewritten.error());
         }
@@ -2424,15 +2446,15 @@ std::expected<TRelation, TError> BuildAggregate(
                     .EmptyIsZero = spec.Func == "count" || spec.EmptyIsZero,
                 });
             }
-            node = Relation(std::make_shared<TAggregateOperator>(
-                std::move(node.Plan), std::move(dedupKeys), std::move(innerSpecs)));
+            node = Relation(NQumir::MakeIntrusive<TAggregateOperator>(
+                types, std::move(node.Plan), std::move(dedupKeys), std::move(innerSpecs)));
             // The normal construction below builds the OUTER aggregate over `node`
             // (the inner result) with these merge specs, grouped by the group keys.
             specs = std::move(outerSpecs);
         } else {
             // Lone count(distinct): dedup, then count over the deduped rows below.
-            node = Relation(std::make_shared<TAggregateOperator>(
-                std::move(node.Plan), std::move(dedupKeys), std::vector<TAggregateSpec>{}));
+            node = Relation(NQumir::MakeIntrusive<TAggregateOperator>(
+                types, std::move(node.Plan), std::move(dedupKeys), std::vector<TAggregateSpec>{}));
         }
     }
 
@@ -2496,24 +2518,24 @@ std::expected<TRelation, TError> BuildAggregate(
         if (global) {
             argProjections.push_back({
                 .Name = "__group__",
-                .Expression = std::make_shared<NAst::TNumberExpr>(TLocation{}, static_cast<int64_t>(1)),
+                .Expression = NQumir::MakeIntrusive<NAst::TNumberExpr>(TLocation{}, static_cast<int64_t>(1), types),
             });
             keys.push_back("__group__");
         }
-        node = Relation(std::make_shared<TProjectOperator>(std::move(node.Plan), std::move(argProjections)));
-        if (auto annotated = Annotate(node.Plan, context); !annotated) {
+        node = Relation(NQumir::MakeIntrusive<TProjectOperator>(types, std::move(node.Plan), std::move(argProjections)));
+        if (auto annotated = Annotate(types, node.Plan, context); !annotated) {
             return std::unexpected(annotated.error());
         }
     }
 
-    auto aggregate = std::make_shared<TAggregateOperator>(
-        std::move(node.Plan), std::move(keys), std::move(specs), global);
+    auto aggregate = NQumir::MakeIntrusive<TAggregateOperator>(
+        types, std::move(node.Plan), std::move(keys), std::move(specs), global);
     if (multiSet) {
         aggregate->MutableGroupingSets() = std::move(groupingSets);
         auto aggregateInput = aggregate->Input()->OutputColumns();
-        aggregate->Type = std::make_shared<NAst::TFunctionType>(
+        aggregate->Type = types.MakeFunction(
             std::vector<NAst::TTypePtr>{aggregateInput},
-            ComputeAggregateOutputType(aggregateInput, aggregate->GroupKeys(), aggregate->Aggs(),
+            ComputeAggregateOutputType(types, aggregateInput, aggregate->GroupKeys(), aggregate->Aggs(),
                 !aggregate->GroupingSets().empty()));
     }
     // Plain group keys keep their input labels: correlated subqueries above the
@@ -2576,6 +2598,7 @@ struct TSelectOutput {
 };
 
 std::expected<TRelation, TError> BuildSelect(
+    NQumir::NAst::TTypeFactory& types,
     const NSql::TSqlSelect& select,
     TBuildContext& context,
     std::optional<TSelectOutput>* output)
@@ -2601,7 +2624,7 @@ std::expected<TRelation, TError> BuildSelect(
         [&](std::vector<TProjectionSpec>& projs, TRelation& n)
         -> std::expected<void, TError> {
         for (auto& p : projs) {
-            auto rewritten = ExtractScalarSubqueries(p.Expression, n, context, subqueries);
+            auto rewritten = ExtractScalarSubqueries(types, p.Expression, n, context, subqueries);
             if (!rewritten) {
                 return std::unexpected(rewritten.error());
             }
@@ -2612,8 +2635,8 @@ std::expected<TRelation, TError> BuildSelect(
     // Builds the pre-aggregate input (FROM + joins + WHERE).
     auto buildInput = [&]() -> std::expected<TRelation, TError> {
         auto base = select.From
-            ? BuildFrom(*select.From, context)
-            : Relation(std::make_shared<TOneRowOperator>());
+            ? BuildFrom(types, *select.From, context)
+            : Relation(NQumir::MakeIntrusive<TOneRowOperator>(types));
         if (!base) {
             return std::unexpected(base.error());
         }
@@ -2632,8 +2655,8 @@ std::expected<TRelation, TError> BuildSelect(
             for (const auto& conjunct : conjuncts) {
                 if (auto decorrelation = AsDecorrelation(conjunct)) {
                     auto joined = decorrelation->IsIn
-                        ? DecorrelateIn(node, *decorrelation->Subquery, decorrelation->Type, context)
-                        : DecorrelateExists(node, *decorrelation->Subquery, decorrelation->Type, context);
+                        ? DecorrelateIn(types, node, *decorrelation->Subquery, decorrelation->Type, context)
+                        : DecorrelateExists(types, node, *decorrelation->Subquery, decorrelation->Type, context);
                     if (!joined) {
                         return std::unexpected(joined.error());
                     }
@@ -2641,7 +2664,7 @@ std::expected<TRelation, TError> BuildSelect(
                     continue;
                 }
                 if (auto existsList = AsExistsOrDisjunction(conjunct); !existsList.empty()) {
-                    auto joined = DecorrelateExistsOr(node, existsList, context);
+                    auto joined = DecorrelateExistsOr(types, node, existsList, context);
                     if (!joined) {
                         return std::unexpected(joined.error());
                     }
@@ -2651,7 +2674,7 @@ std::expected<TRelation, TError> BuildSelect(
                     }
                     // Unsupported EXISTS-OR shape: fall through to the residual path.
                 }
-                auto rewritten = ExtractScalarSubqueries(conjunct, node, context, subqueries);
+                auto rewritten = ExtractScalarSubqueries(types, conjunct, node, context, subqueries);
                 if (!rewritten) {
                     return std::unexpected(rewritten.error());
                 }
@@ -2659,7 +2682,7 @@ std::expected<TRelation, TError> BuildSelect(
             }
 
             if (!residual.empty()) {
-                node.Plan = std::make_shared<TFilterOperator>(std::move(node.Plan), Conjoin(residual));
+                node.Plan = NQumir::MakeIntrusive<TFilterOperator>(types, std::move(node.Plan), Conjoin(residual));
             }
         }
         return node;
@@ -2746,11 +2769,11 @@ std::expected<TRelation, TError> BuildSelect(
         }
     }
     for (const auto& expr : bound) {
-        if (auto extracted = ExtractAggregateArgumentSubqueries(expr, node, context, subqueries); !extracted) {
+        if (auto extracted = ExtractAggregateArgumentSubqueries(types, expr, node, context, subqueries); !extracted) {
             return std::unexpected(extracted.error());
         }
     }
-    if (auto extracted = ExtractAggregateArgumentSubqueries(having, node, context, subqueries); !extracted) {
+    if (auto extracted = ExtractAggregateArgumentSubqueries(types, having, node, context, subqueries); !extracted) {
         return std::unexpected(extracted.error());
     }
 
@@ -2760,7 +2783,7 @@ std::expected<TRelation, TError> BuildSelect(
     // computed aggregate arguments materialized separately: collapsing `sum(k+1)`
     // to reducers over `k` would make the subtotal consume the masked key.
     TAggCollector collector(
-        inputSchema ? inputSchema.Cast().get() : nullptr,
+        inputSchema ? inputSchema.Cast() : nullptr,
         !multiSet,
         names,
         context.Annotation);
@@ -2820,7 +2843,7 @@ std::expected<TRelation, TError> BuildSelect(
         }
         std::string name = std::move(itemNames[i]);
         texts.push_back(std::move(boundTexts[i]));
-        auto expr = collector.Rewrite(std::move(bound[i]));
+        auto expr = collector.Rewrite(types, std::move(bound[i]));
         if (!expr) {
             return std::unexpected(expr.error());
         }
@@ -2844,7 +2867,7 @@ std::expected<TRelation, TError> BuildSelect(
     // A scalar subquery in HAVING is left intact by the aggregate collector
     // (it is opaque) and decorrelated below, once the aggregate node exists.
     if (having) {
-        auto rewritten = collector.Rewrite(std::move(having));
+        auto rewritten = collector.Rewrite(types, std::move(having));
         if (!rewritten) {
             return std::unexpected(rewritten.error());
         }
@@ -2855,11 +2878,10 @@ std::expected<TRelation, TError> BuildSelect(
     // Shared by both the aggregated and non-aggregated paths. Their outputs are
     // helper columns.
     auto applyWindows = [&](const TRelation& n) -> std::expected<TRelation, TError> {
-        auto windowInput = NAst::TMaybeType<NAst::TStructType>(n.Plan->OutputColumns());
-        TWindowCollector windows(
-            names, windowInput ? windowInput.Cast().get() : nullptr, context.Annotation);
+        auto windowInput = n.Plan->OutputColumns();
+        TWindowCollector windows(names, windowInput, context.Annotation);
         for (auto& projection : projections) {
-            auto rewritten = windows.Rewrite(projection.Expression);
+            auto rewritten = windows.Rewrite(types, projection.Expression);
             if (!rewritten) {
                 return std::unexpected(rewritten.error());
             }
@@ -2868,7 +2890,7 @@ std::expected<TRelation, TError> BuildSelect(
         if (windows.Empty()) {
             return n;
         }
-        auto windowed = windows.Build(n.Plan);
+        auto windowed = windows.Build(types, n.Plan);
         if (!windowed) {
             return std::unexpected(windowed.error());
         }
@@ -2890,10 +2912,10 @@ std::expected<TRelation, TError> BuildSelect(
     TPositionedOutputs positioned{.Helpers = helpers};
     if (groupPosition) {
         auto outputs = PositionedOutputs(
-            projections,
+            types, projections,
             helpers,
             collector,
-            inputSchema ? inputSchema.Cast().get() : nullptr,
+            inputSchema ? inputSchema.Cast() : nullptr,
             context.Annotation);
         if (!outputs) {
             return std::unexpected(outputs.error());
@@ -2909,8 +2931,8 @@ std::expected<TRelation, TError> BuildSelect(
         for (const auto& projection : projections) {
             named.push_back(!projection.ImplicitName && projection.ColumnAliases.empty());
         }
-        auto plan = std::make_shared<TProjectOperator>(n.Plan, std::move(projections));
-        if (auto annotated = Annotate(plan, context); !annotated) {
+        auto plan = NQumir::MakeIntrusive<TProjectOperator>(types, n.Plan, std::move(projections));
+        if (auto annotated = Annotate(types, plan, context); !annotated) {
             return std::unexpected(annotated.error());
         }
         // GROUP BY counted a projection typed only above the aggregate as one
@@ -2928,7 +2950,7 @@ std::expected<TRelation, TError> BuildSelect(
             }
         }
         auto labels = ColumnNames(plan);
-        auto projected = Relabel(TRelation{.Plan = plan}, labels, context);
+        auto projected = Relabel(types, TRelation{.Plan = plan}, labels, context);
         if (!projected) {
             return projected;
         }
@@ -2966,7 +2988,7 @@ std::expected<TRelation, TError> BuildSelect(
             return projected;
         }
         const auto columns = ColumnNames(projected->Plan);
-        return ApplyDistinct(std::move(*projected), columns, context);
+        return ApplyDistinct(types, std::move(*projected), columns, context);
     };
 
     bool aggregated = select.GroupBy != nullptr || !collector.Empty();
@@ -2992,7 +3014,7 @@ std::expected<TRelation, TError> BuildSelect(
     }
 
     auto aggregate = BuildAggregate(
-        std::move(node),
+        types, std::move(node),
         collector,
         names,
         std::move(parsedGrouping),
@@ -3013,13 +3035,13 @@ std::expected<TRelation, TError> BuildSelect(
         std::vector<NAst::TExprPtr> conjuncts;
         FlattenConjuncts(having, conjuncts);
         for (auto& conjunct : conjuncts) {
-            auto rewritten = ExtractScalarSubqueries(conjunct, node, context, subqueries);
+            auto rewritten = ExtractScalarSubqueries(types, conjunct, node, context, subqueries);
             if (!rewritten) {
                 return std::unexpected(rewritten.error());
             }
             conjunct = std::move(*rewritten);
         }
-        node.Plan = std::make_shared<TFilterOperator>(std::move(node.Plan), Conjoin(conjuncts));
+        node.Plan = NQumir::MakeIntrusive<TFilterOperator>(types, std::move(node.Plan), Conjoin(conjuncts));
     }
     {
         auto windowed = applyWindows(node);
@@ -3200,6 +3222,7 @@ std::expected<TOrderByKeys, TError> ResolveOrderBy(
 
 // Adds the hidden sort keys to the top projection of `relation`.
 std::expected<void, TError> AddHiddenKeys(
+    NQumir::NAst::TTypeFactory& types,
     TRelation& relation,
     std::vector<TProjectionSpec> hidden,
     const TBuildContext& context)
@@ -3211,12 +3234,12 @@ std::expected<void, TError> AddHiddenKeys(
     for (auto& h : hidden) {
         project->MutableProjections().push_back(std::move(h));
     }
-    return Annotate(project, context);
+    return Annotate(types, project, context);
 }
 
 // Projects `relation` back onto its outputs `columns` when operators added
 // columns of their own, such as hidden sort keys.
-TRelation KeepColumns(TRelation relation, const std::vector<std::string>& columns) {
+TRelation KeepColumns(NQumir::NAst::TTypeFactory& types, TRelation relation, const std::vector<std::string>& columns) {
     if (ColumnNames(relation.Plan).size() == columns.size()) {
         return relation;
     }
@@ -3225,11 +3248,12 @@ TRelation KeepColumns(TRelation relation, const std::vector<std::string>& column
     for (const auto& name : columns) {
         projections.push_back({ .Name = name, .Expression = Ident({}, name) });
     }
-    relation.Plan = std::make_shared<TProjectOperator>(std::move(relation.Plan), std::move(projections));
+    relation.Plan = NQumir::MakeIntrusive<TProjectOperator>(types, std::move(relation.Plan), std::move(projections));
     return relation;
 }
 
 std::expected<TRelation, TError> ApplyOrderBy(
+    NQumir::NAst::TTypeFactory& types,
     const NSql::TSqlQuery& query,
     TRelation relation,
     const TSelectOutput* select,
@@ -3243,11 +3267,11 @@ std::expected<TRelation, TError> ApplyOrderBy(
     if (!order) {
         return std::unexpected(order.error());
     }
-    if (auto added = AddHiddenKeys(relation, std::move(order->Hidden), context); !added) {
+    if (auto added = AddHiddenKeys(types, relation, std::move(order->Hidden), context); !added) {
         return std::unexpected(added.error());
     }
-    relation.Plan = std::make_shared<TSortOperator>(std::move(relation.Plan), std::move(order->Keys));
-    return KeepColumns(std::move(relation), columns);
+    relation.Plan = NQumir::MakeIntrusive<TSortOperator>(types, std::move(relation.Plan), std::move(order->Keys));
+    return KeepColumns(types, std::move(relation), columns);
 }
 
 std::expected<int64_t, TError> ConstNonNegativeI64(
@@ -3290,6 +3314,7 @@ std::expected<std::optional<TLimitClause>, TError> LimitClause(const NSql::TSqlQ
 }
 
 std::expected<TRelation, TError> ApplyLimit(
+    NQumir::NAst::TTypeFactory& types,
     const NSql::TSqlQuery& query,
     TRelation relation)
 {
@@ -3298,8 +3323,8 @@ std::expected<TRelation, TError> ApplyLimit(
         return std::unexpected(clause.error());
     }
     if (*clause) {
-        relation.Plan = std::make_shared<TLimitOperator>(
-            std::move(relation.Plan), (*clause)->Limit, (*clause)->Offset);
+        relation.Plan = NQumir::MakeIntrusive<TLimitOperator>(
+            types, std::move(relation.Plan), (*clause)->Limit, (*clause)->Offset);
     }
     return relation;
 }
@@ -3308,6 +3333,7 @@ std::expected<TRelation, TError> ApplyLimit(
 // binding: row_number() over the binding columns, in ORDER BY order, keeps the
 // rows OFFSET < n <= OFFSET + LIMIT. Without LIMIT the order is moot.
 std::expected<TRelation, TError> ApplyBindingLimit(
+    NQumir::NAst::TTypeFactory& types,
     const NSql::TSqlQuery& query,
     TRelation relation,
     const TSelectOutput* select,
@@ -3330,7 +3356,7 @@ std::expected<TRelation, TError> ApplyBindingLimit(
         return relation;
     }
     const auto columns = ColumnNames(relation.Plan);
-    if (auto added = AddHiddenKeys(relation, std::move(order.Hidden), context); !added) {
+    if (auto added = AddHiddenKeys(types, relation, std::move(order.Hidden), context); !added) {
         return std::unexpected(added.error());
     }
     TFreshNames names;
@@ -3338,8 +3364,8 @@ std::expected<TRelation, TError> ApplyBindingLimit(
         names.Reserve(column);
     }
     const auto rowNumber = names.Next("__row_number");
-    TOperatorPtr window = std::make_shared<TWindowOperator>(
-        std::move(relation.Plan),
+    TOperatorPtr window = NQumir::MakeIntrusive<TWindowOperator>(
+        types, std::move(relation.Plan),
         std::vector<std::string>(columns.begin(), columns.begin() + bindingColumns),
         std::move(order.Keys),
         std::nullopt,
@@ -3347,8 +3373,8 @@ std::expected<TRelation, TError> ApplyBindingLimit(
 
     const auto [limit, offset] = **clause;
     auto compare = [&](const char* op, int64_t bound) -> NAst::TExprPtr {
-        return std::make_shared<NAst::TBinaryExpr>(TLocation{}, NAst::TOperator(op),
-            Ident({}, rowNumber), std::make_shared<NAst::TNumberExpr>(TLocation{}, bound));
+        return NQumir::MakeIntrusive<NAst::TBinaryExpr>(TLocation{}, NAst::TOperator(op),
+            Ident({}, rowNumber), NQumir::MakeIntrusive<NAst::TNumberExpr>(TLocation{}, bound, types));
     };
     // OFFSET + LIMIT saturates: a bound past every row number keeps them all.
     const int64_t last = limit > std::numeric_limits<int64_t>::max() - offset
@@ -3358,34 +3384,37 @@ std::expected<TRelation, TError> ApplyBindingLimit(
     if (offset > 0) {
         keep.push_back(compare(">", offset));
     }
-    relation.Plan = std::make_shared<TFilterOperator>(std::move(window), Conjoin(keep));
-    return KeepColumns(std::move(relation), columns);
+    relation.Plan = NQumir::MakeIntrusive<TFilterOperator>(types, std::move(window), Conjoin(keep));
+    return KeepColumns(types, std::move(relation), columns);
 }
 
 std::expected<TRelation, TError> BuildSetOp(
+    NQumir::NAst::TTypeFactory& types,
     const NSql::TSqlSetOp& setOp,
     TBuildContext& context,
     std::optional<TSelectOutput>* output);
 
 // Builds a query body (a SELECT, a set operation, or a parenthesized query).
 std::expected<TRelation, TError> BuildQueryBody(
+    NQumir::NAst::TTypeFactory& types,
     const NSql::TSqlNodePtr& body,
     TBuildContext& context,
     std::optional<TSelectOutput>* output = nullptr)
 {
     if (auto select = NSql::TMaybeNode<NSql::TSqlSelect>(body)) {
-        return BuildSelect(*select.Cast(), context, output);
+        return BuildSelect(types, *select.Cast(), context, output);
     }
     if (auto setOp = NSql::TMaybeNode<NSql::TSqlSetOp>(body)) {
-        return BuildSetOp(*setOp.Cast(), context, output);
+        return BuildSetOp(types, *setOp.Cast(), context, output);
     }
     if (auto sub = NSql::TMaybeNode<NSql::TSqlQuery>(body)) {
-        return BuildQuery(*sub.Cast(), context, output);
+        return BuildQuery(types, *sub.Cast(), context, output);
     }
     return std::unexpected(TError("unsupported query body"));
 }
 
 std::expected<TRelation, TError> BuildSetOp(
+    NQumir::NAst::TTypeFactory& types,
     const NSql::TSqlSetOp& setOp,
     TBuildContext& context,
     std::optional<TSelectOutput>* output)
@@ -3405,7 +3434,7 @@ std::expected<TRelation, TError> BuildSetOp(
                 if (auto l = collect(inner.Cast()->Left); !l) return l;
                 return collect(inner.Cast()->Right);
             }
-            auto branch = BuildQueryBody(node, context);
+            auto branch = BuildQueryBody(types, node, context);
             if (!branch) {
                 return std::unexpected(branch.error());
             }
@@ -3420,8 +3449,8 @@ std::expected<TRelation, TError> BuildSetOp(
 
         // The union takes the column names and labels of its first branch.
         TRelation unionAll{
-            .Plan = std::make_shared<TUnionAllOperator>(std::move(branches)), .Labels = std::move(labels)};
-        if (auto annotated = Annotate(unionAll.Plan, context); !annotated) {
+            .Plan = NQumir::MakeIntrusive<TUnionAllOperator>(types, std::move(branches)), .Labels = std::move(labels)};
+        if (auto annotated = Annotate(types, unionAll.Plan, context); !annotated) {
             return std::unexpected(annotated.error());
         }
         if (setOp.Quantifier == NSql::ESetQuantifier::All) {
@@ -3435,7 +3464,7 @@ std::expected<TRelation, TError> BuildSetOp(
         if (output) {
             output->emplace().InputLabels = unionAll.Labels;
         }
-        return ApplyDistinct(std::move(unionAll), *outputNames, context);
+        return ApplyDistinct(types, std::move(unionAll), *outputNames, context);
     }
 
     if (setOp.Op == NSql::TSqlSetOp::EOp::Intersect
@@ -3447,11 +3476,11 @@ std::expected<TRelation, TError> BuildSetOp(
             return std::unexpected(TError(opName + " ALL is not supported yet"));
         }
 
-        auto left = BuildQueryBody(setOp.Left, context);
+        auto left = BuildQueryBody(types, setOp.Left, context);
         if (!left) {
             return std::unexpected(left.error());
         }
-        auto right = BuildQueryBody(setOp.Right, context);
+        auto right = BuildQueryBody(types, setOp.Right, context);
         if (!right) {
             return std::unexpected(right.error());
         }
@@ -3469,11 +3498,11 @@ std::expected<TRelation, TError> BuildSetOp(
                 opName + " branches must have the same number of columns"));
         }
 
-        auto leftDistinct = ApplyDistinct(std::move(*left), *leftNames, context);
+        auto leftDistinct = ApplyDistinct(types, std::move(*left), *leftNames, context);
         if (!leftDistinct) {
             return leftDistinct;
         }
-        auto rightDistinct = ApplyDistinct(std::move(*right), *rightNames, context);
+        auto rightDistinct = ApplyDistinct(types, std::move(*right), *rightNames, context);
         if (!rightDistinct) {
             return rightDistinct;
         }
@@ -3485,7 +3514,7 @@ std::expected<TRelation, TError> BuildSetOp(
         }
 
         auto join = MakeJoin(
-            leftDistinct->Plan, std::move(rightDistinct->Plan),
+            types, leftDistinct->Plan, std::move(rightDistinct->Plan),
             std::move(keys),
             isIntersect ? EJoinType::LeftSemi : EJoinType::LeftAnti);
         if (!join) {
@@ -3502,6 +3531,7 @@ std::expected<TRelation, TError> BuildSetOp(
 }
 
 std::expected<TRelation, TError> BuildQuery(
+    NQumir::NAst::TTypeFactory& types,
     const NSql::TSqlQuery& query,
     TBuildContext& context,
     std::optional<TSelectOutput>* output,
@@ -3521,17 +3551,17 @@ std::expected<TRelation, TError> BuildQuery(
         }
         if (bindingColumns > 0) {
             return ApplyBindingLimit(
-                query, std::move(*plan), select ? &*select : nullptr, scope, bindingColumns);
+                types, query, std::move(*plan), select ? &*select : nullptr, scope, bindingColumns);
         }
-        auto ordered = ApplyOrderBy(query, std::move(*plan), select ? &*select : nullptr, scope);
+        auto ordered = ApplyOrderBy(types, query, std::move(*plan), select ? &*select : nullptr, scope);
         if (!ordered) {
             return ordered;
         }
-        return ApplyLimit(query, std::move(*ordered));
+        return ApplyLimit(types, query, std::move(*ordered));
     };
     if (!query.WithClause) {
         std::optional<TSelectOutput> select;
-        return finish(BuildQueryBody(query.Body, context, &select), select, context);
+        return finish(BuildQueryBody(types, query.Body, context, &select), select, context);
     }
     if (query.WithClause->Recursive) {
         return std::unexpected(TError("WITH RECURSIVE is not supported yet"));
@@ -3567,14 +3597,14 @@ std::expected<TRelation, TError> BuildQuery(
             // A definition is optimized as a plan of its own and numbers its sources apart.
             auto aliases = std::exchange(inner.SourceAliases, {});
             const size_t outerVisible = std::exchange(visible, positions.at(lower));
-            auto plan = BuildQuery(*it->second->Query, inner);
+            auto plan = BuildQuery(types, *it->second->Query, inner);
             visible = outerVisible;
             inner.SourceAliases = std::move(aliases);
             if (!plan) {
                 return std::unexpected(plan.error());
             }
             if (it->second->Columns) {
-                plan = ApplyColumnAliases(std::move(*plan), it->second->Columns->Items, inner);
+                plan = ApplyColumnAliases(types, std::move(*plan), it->second->Columns->Items, inner);
                 if (!plan) {
                     return std::unexpected(plan.error());
                 }
@@ -3585,16 +3615,17 @@ std::expected<TRelation, TError> BuildQuery(
             cached = builtDefs.emplace(lower, TBuiltCte{std::move(definition), std::move(plan->Labels)}).first;
         }
         return TRelation{
-            .Plan = std::make_shared<TCteRef>(cached->second.Definition), .Labels = cached->second.Labels};
+            .Plan = NQumir::MakeIntrusive<TCteRef>(types, cached->second.Definition), .Labels = cached->second.Labels};
     };
 
     std::optional<TSelectOutput> select;
-    return finish(BuildQueryBody(query.Body, inner, &select), select, inner);
+    return finish(BuildQueryBody(types, query.Body, inner, &select), select, inner);
 }
 
 } // namespace
 
 std::expected<TOperatorPtr, TError> BuildPlan(
+    NQumir::NAst::TTypeFactory& types,
     const NQdb::NSql::TSqlNodePtr& query,
     const TTableSourceFactory& sources,
     const NKernel::TAnnotationContext& annotation)
@@ -3606,7 +3637,7 @@ std::expected<TOperatorPtr, TError> BuildPlan(
     std::unordered_set<std::string> sourceAliases;
     TBuildContext context{
         .Sources = [&](std::string_view table) -> std::expected<TRelation, TError> {
-            auto plan = sources(table);
+            auto plan = sources(types, table);
             if (!plan) {
                 return std::unexpected(plan.error());
             }
@@ -3615,12 +3646,12 @@ std::expected<TOperatorPtr, TError> BuildPlan(
         .Annotation = annotation,
         .SourceAliases = sourceAliases,
     };
-    auto relation = BuildQuery(*root.Cast(), context);
+    auto relation = BuildQuery(types, *root.Cast(), context);
     if (!relation) {
         return std::unexpected(relation.error());
     }
     // The query's output columns carry their SQL names, repeated ones included.
-    auto plan = RenameOutputs(relation->Plan, relation->Labels, context);
+    auto plan = RenameOutputs(types, relation->Plan, relation->Labels, context);
     if (!plan) {
         return plan;
     }

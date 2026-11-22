@@ -4,8 +4,10 @@
 #include <qdb/kernel/column_value.h>
 #include <qdb/kernel/finalize.h>
 #include <qdb/plan/clone_expr.h>
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
+#include <qdb/plan/types/type_text.h>
 #include <qdb/kernel/aggregate_key.h>
 #include <qdb/kernel/gen.h>
 #include <qdb/kernel/join_gen.h>
@@ -35,6 +37,8 @@ namespace NQdb {
 static_assert(sizeof(TRowSet) == TKernelCompiler::RowSetSize);
 
 namespace {
+
+using NQumir::NRegistry::QumirDbNamedType;
 
 void PrintKernelAst(
     std::ostream* out,
@@ -67,17 +71,18 @@ NQumir::NAst::TExprPtr ClonePredicate(
 // from both row stores. Predicate is null when the join has no residual.
 struct TJoinResidual {
     NQumir::NAst::TExprPtr Predicate;
-    NQumir::NAst::TTypePtr InnerType;
+    NQumir::NAst::TTypePtr InnerType = nullptr;
     size_t LeftFieldCount = 0;
 
     const NQumir::NAst::TStructType* Inner() const {
-        return static_cast<const NQumir::NAst::TStructType*>(InnerType.get());
+        return static_cast<const NQumir::NAst::TStructType*>(InnerType);
     }
 };
 
 TJoinResidual PrepareJoinResidual(
+    NQumir::NAst::TTypeFactory& types,
     const NKernel::TOperatorKernelSpec& spec,
-    const TExternalCatalogSnapshot* externalCatalog,
+    const NKernel::TAnnotationContext* annotation,
     const std::string& kernel)
 {
     using namespace NQumir::NAst;
@@ -85,24 +90,25 @@ TJoinResidual PrepareJoinResidual(
         return {};
     }
     auto innerOutput = ComputeJoinOutputType(
-        spec.InputSchemas[0], spec.InputSchemas[1], EJoinType::Inner);
+        types, spec.InputSchemas[0], spec.InputSchemas[1], EJoinType::Inner);
     if (!innerOutput) {
         throw NQumir::TError(
             kernel + ": residual filter: " + innerOutput.error().ToString());
     }
-    const auto* innerType = static_cast<const TStructType*>(innerOutput->get());
+    const auto* innerType = static_cast<const TStructType*>(*innerOutput);
     return TJoinResidual{
         .Predicate = NKernel::ExpandKernelPredicate(
-            ClonePredicate(spec.Expressions[0]), *innerType, externalCatalog).first,
+            types, ClonePredicate(spec.Expressions[0]), *innerType, annotation).first,
         .InnerType = *innerOutput,
         .LeftFieldCount =
-            static_cast<const TStructType*>(spec.InputSchemas[0].get())->Fields.size(),
+            static_cast<const TStructType*>(spec.InputSchemas[0])->Fields.size(),
     };
 }
 
 // Replaces the library's default jt_residual_filter (join_residual_default.oz)
 // with the generated one, keeping its position before the helpers that call it.
 void InjectJoinResidualFilter(
+    NQumir::NAst::TTypeFactory& types,
     std::vector<NQumir::NAst::TExprPtr>& library,
     const NQumir::NAst::TExprPtr& predicate,
     const NQumir::NAst::TStructType& innerType,
@@ -115,7 +121,7 @@ void InjectJoinResidualFilter(
         auto fun = NQumir::NAst::TMaybeNode<NQumir::NAst::TFunDecl>(f);
         if (fun && fun.Cast()->Name == "jt_residual_filter") {
             f = NKernel::GenJoinResidualFilterAst(
-                predicate, innerType, leftFieldCount,
+                types, predicate, innerType, leftFieldCount,
                 columnType, rowSetType, stringViewType);
             return;
         }
@@ -138,7 +144,7 @@ void EnsureQumirDbUse(const NQumir::NAst::TExprPtr& ast) {
     }
     block.Cast()->Stmts.insert(
         block.Cast()->Stmts.begin(),
-        std::make_shared<TUseExpr>(NQumir::TLocation{}, "qumirdb"));
+        NQumir::MakeIntrusive<TUseExpr>(NQumir::TLocation{}, "qumirdb"));
 }
 
 std::unordered_map<std::string, void*> CompileKernelAst(
@@ -200,10 +206,12 @@ NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
 }
 
 std::shared_ptr<TKernelSlot> TKernelCompiler::CompileInstrumentation() {
+    auto& types = *Types_;
     return EmitInstrumentation().Slot;
 }
 
 TGeneratedKernel TKernelCompiler::EmitInstrumentation() {
+    auto& types = *Types_;
     auto source = NUtils::KernelFile(".", "instrumentation.oz");
     std::ifstream input(source);
     if (!input) {
@@ -211,7 +219,7 @@ TGeneratedKernel TKernelCompiler::EmitInstrumentation() {
     }
     std::ostringstream text;
     text << input.rdbuf();
-    auto library = NKernel::ParseFunctionLibrary(text.str());
+    auto library = NKernel::ParseFunctionLibrary(types, text.str());
     if (!library) {
         throw library.error();
     }
@@ -225,6 +233,7 @@ TGeneratedKernel TKernelCompiler::EmitKernel(
     std::vector<std::string> entrypoints,
     NQumir::NAst::TExprPtr ast)
 {
+    NKernel::EraseDateTypes(*Types_, ast);
     TGeneratedKernel kernel{
         .Name = std::move(name),
         .Stage = Stage_,
@@ -241,7 +250,8 @@ TGeneratedKernel TKernelCompiler::EmitKernel(
     }
     if (BindNow_) {
         FinalizeKernels(
-            std::span(&kernel, 1), Backend_, Diagnostics_, ExternalCatalog_, JitCacheDir_);
+            std::span(&kernel, 1), Types_, Backend_, Diagnostics_,
+            Annotation_ ? Annotation_->ExternalCatalog : nullptr, JitCacheDir_);
     }
     return kernel;
 }
@@ -299,26 +309,23 @@ CompileKernelAstToObjectsCached(
 
 namespace {
 
-NQumir::NAst::TTypePtr QumirDbNamedType(const std::string& name) {
-    return std::make_shared<NQumir::NAst::TNamedType>(name, nullptr);
-}
 
-NQumir::NAst::TTypePtr SortCoreType(const NQumir::NAst::TTypePtr& type) {
+NQumir::NAst::TTypePtr SortCoreType(NQumir::NAst::TTypeFactory& types, const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
-    auto valueType = PhysicalValueType(type);
-    if (auto integer = TMaybeType<TIntegerType>(valueType)) {
-        return std::make_shared<TIntegerType>(integer.Cast()->Kind);
+    auto valueType = PhysicalValueType(types, type);
+    if (auto integer = MaybeIntegerType(valueType)) {
+        return types.MakeInteger(integer.Cast()->Kind);
     }
     if (auto floating = TMaybeType<TFloatType>(valueType)) {
-        return std::make_shared<TFloatType>(floating.Cast()->Kind);
+        return types.MakeFloat(floating.Cast()->Kind);
     }
     return nullptr;
 }
 
-int64_t SortRadixKeyBits(const NQumir::NAst::TTypePtr& type) {
+int64_t SortRadixKeyBits(NQumir::NAst::TTypeFactory& types, const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
-    auto valueType = PhysicalValueType(type);
-    if (auto integer = TMaybeType<TIntegerType>(valueType)) {
+    auto valueType = PhysicalValueType(types, type);
+    if (auto integer = MaybeIntegerType(valueType)) {
         return integer.Cast()->BitWidth();
     }
     if (auto floating = TMaybeType<TFloatType>(valueType)) {
@@ -333,13 +340,13 @@ int64_t SortRadixKeyBits(const NQumir::NAst::TTypePtr& type) {
 bool SortKeyIsString(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
     return static_cast<bool>(TMaybeType<TStringType>(
-        UnwrapNamedType(UnwrapNullableType(type))));
+        UnwrapNamedValueType(UnwrapNullableType(type))));
 }
 
 bool SortKeyIsBool(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
     return static_cast<bool>(TMaybeType<TBoolType>(
-        UnwrapNamedType(UnwrapNullableType(type))));
+        UnwrapNamedValueType(UnwrapNullableType(type))));
 }
 
 bool SortValueIsBinInt(const NQumir::NAst::TTypePtr& type) {
@@ -348,36 +355,38 @@ bool SortValueIsBinInt(const NQumir::NAst::TTypePtr& type) {
 
 // The kernel type a decimal window argument is loaded as: BinInt, or the i64 of a
 // decimal stored in i64.
-NQumir::NAst::TTypePtr WindowDecimalArgType(const NQumir::NAst::TTypePtr& type) {
+NQumir::NAst::TTypePtr WindowDecimalArgType(NQumir::NAst::TTypeFactory& types, const NQumir::NAst::TTypePtr& type) {
     return HasBinIntLayout(type)
-        ? BinIntStorageType()
-        : PhysicalValueType(type);
+        ? BinIntStorageType(types)
+        : PhysicalValueType(types, type);
 }
 
-bool SortValueIsInteger(const NQumir::NAst::TTypePtr& type) {
+bool SortValueIsInteger(NQumir::NAst::TTypeFactory& types, const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
-    return static_cast<bool>(TMaybeType<TIntegerType>(PhysicalValueType(type)));
+    const auto valueType = PhysicalValueType(types, type);
+    return static_cast<bool>(MaybeIntegerType(valueType));
 }
 
-NQumir::NAst::TExprPtr Int64Literal(int64_t value) {
-    auto expr = NKernel::NOz::Int(value);
-    expr->Type = std::make_shared<NQumir::NAst::TIntegerType>();
+NQumir::NAst::TExprPtr Int64Literal(NQumir::NAst::TTypeFactory& types, int64_t value) {
+    auto expr = NKernel::NOz::Int(types, value);
+    expr->Type = types.MakeInteger();
     return expr;
 }
 
-NQumir::NAst::TTypePtr Ptr(NQumir::NAst::TTypePtr type) {
-    return std::make_shared<NQumir::NAst::TPointerType>(std::move(type));
+NQumir::NAst::TTypePtr Ptr(NQumir::NAst::TTypeFactory& types, NQumir::NAst::TTypePtr type) {
+    return types.MakePointer(std::move(type));
 }
 
 NQumir::NAst::TExprPtr Cast(
     NQumir::NAst::TExprPtr expr,
     NQumir::NAst::TTypePtr type)
 {
-    return std::make_shared<NQumir::NAst::TCastExpr>(
+    return NQumir::MakeIntrusive<NQumir::NAst::TCastExpr>(
         NQumir::TLocation{}, std::move(expr), std::move(type));
 }
 
 NQumir::NAst::TExprPtr BuildRowIdSortCall(
+    NQumir::NAst::TTypeFactory& types,
     const TSortRadixKeyInput& key,
     bool nullable,
     NQumir::NAst::TExprPtr desc,
@@ -387,8 +396,8 @@ NQumir::NAst::TExprPtr BuildRowIdSortCall(
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
 
-    auto columnIndex = Int64Literal(key.ColumnIndex);
-    auto ptrU64 = Ptr(std::make_shared<TIntegerType>(TIntegerType::U64));
+    auto columnIndex = Int64Literal(types, key.ColumnIndex);
+    auto ptrU64 = Ptr(types, types.MakeInteger(TIntegerType::U64));
 
     if (SortKeyIsString(key.Type)) {
         std::vector<TExprPtr> args{
@@ -444,12 +453,12 @@ NQumir::NAst::TExprPtr BuildRowIdSortCall(
             std::move(args));
     }
 
-    auto coreType = SortCoreType(key.Type);
-    const int64_t keyBits = SortRadixKeyBits(key.Type);
+    auto coreType = SortCoreType(types, key.Type);
+    const int64_t keyBits = SortRadixKeyBits(types, key.Type);
     if (!coreType || keyBits == 0) {
         throw NQumir::TError(
             "CompileRadixSortComposite: unsupported key type " +
-            (key.Type ? key.Type->ToString() : std::string("<null>")));
+            SqlTypeName(key.Type));
     }
     std::vector<TExprPtr> args{
         Oz::Ident(storeName),
@@ -458,45 +467,47 @@ NQumir::NAst::TExprPtr BuildRowIdSortCall(
         Oz::Ident("work"),
         Oz::Ident("counts"),
         Oz::Ident("n"),
-        Int64Literal(keyBits),
+        Int64Literal(types, keyBits),
         std::move(desc),
     };
     if (nullable) {
         args.push_back(std::move(nullsFirst));
     }
-    args.push_back(Cast(Int64Literal(0), Ptr(std::move(coreType))));
+    args.push_back(Cast(Int64Literal(types, 0), Ptr(types, std::move(coreType))));
     return Oz::Call(
         nullable ? "sort_fixed_rowids_nullable" : "sort_fixed_rowids",
         std::move(args));
 }
 
 NQumir::NAst::TExprPtr BuildDynamicRowIdSortCall(
+    NQumir::NAst::TTypeFactory& types,
     const TSortRadixKeyInput& key,
     size_t keyIdx,
     bool nullable)
 {
     namespace Oz = NKernel::NOz;
-    auto desc = Oz::Index("descs", Int64Literal(static_cast<int64_t>(keyIdx)));
+    auto desc = Oz::Index("descs", Int64Literal(types, static_cast<int64_t>(keyIdx)));
     auto nullsFirst = Oz::Index(
-        "nulls_firsts", Int64Literal(static_cast<int64_t>(keyIdx)));
+        "nulls_firsts", Int64Literal(types, static_cast<int64_t>(keyIdx)));
     return BuildRowIdSortCall(
-        key, nullable, std::move(desc), std::move(nullsFirst), "store");
+        types, key, nullable, std::move(desc), std::move(nullsFirst), "store");
 }
 
 NQumir::NAst::TExprPtr BuildRadixCompositeWrapperAst(
+    NQumir::NAst::TTypeFactory& types,
     const std::vector<TSortRadixKeyInput>& keys,
     bool nullable)
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
 
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto u32Type = std::make_shared<TIntegerType>(TIntegerType::U32);
-    auto boolType = std::make_shared<TBoolType>();
-    auto rowSetPtrType = Ptr(QumirDbNamedType("TRowSet"));
-    auto ptrI64Type = Ptr(i64Type);
-    auto ptrU32Type = Ptr(u32Type);
-    auto ptrBoolType = Ptr(boolType);
+    auto i64Type = types.MakeInteger();
+    auto u32Type = types.MakeInteger(TIntegerType::U32);
+    auto boolType = types.Make<TBoolType>();
+    auto rowSetPtrType = Ptr(types, QumirDbNamedType(types, "TRowSet"));
+    auto ptrI64Type = Ptr(types, i64Type);
+    auto ptrU32Type = Ptr(types, u32Type);
+    auto ptrBoolType = Ptr(types, boolType);
 
     Oz::TFunBuilder builder(
         nullable
@@ -509,14 +520,14 @@ NQumir::NAst::TExprPtr BuildRadixCompositeWrapperAst(
         .Param("counts", ptrU32Type)
         .Param("n", i64Type)
         .Param("descs", ptrBoolType)
-        .Return(std::make_shared<TVoidType>());
+        .Return(types.Make<TVoidType>());
     if (nullable) {
         builder.Param("nulls_firsts", ptrBoolType);
     }
 
     for (size_t k = keys.size(); k > 0; --k) {
         const size_t keyIdx = k - 1;
-        builder.Stmt(BuildDynamicRowIdSortCall(keys[keyIdx], keyIdx, nullable));
+        builder.Stmt(BuildDynamicRowIdSortCall(types, keys[keyIdx], keyIdx, nullable));
     }
     return std::move(builder).Build();
 }
@@ -525,7 +536,7 @@ NQumir::NAst::TExprPtr Field(
     NQumir::NAst::TExprPtr object,
     std::string field)
 {
-    return std::make_shared<NQumir::NAst::TFieldAccessExpr>(
+    return NQumir::MakeIntrusive<NQumir::NAst::TFieldAccessExpr>(
         NQumir::TLocation{}, std::move(object), std::move(field));
 }
 
@@ -533,7 +544,7 @@ NQumir::NAst::TExprPtr Unary(
     std::string op,
     NQumir::NAst::TExprPtr value)
 {
-    return std::make_shared<NQumir::NAst::TUnaryExpr>(
+    return NQumir::MakeIntrusive<NQumir::NAst::TUnaryExpr>(
         NQumir::TLocation{}, NQumir::NAst::TOperator(op), std::move(value));
 }
 
@@ -544,33 +555,34 @@ NQumir::NAst::TExprPtr ArrayAssign(
 {
     std::vector<NQumir::NAst::TExprPtr> indices;
     indices.push_back(std::move(index));
-    return std::make_shared<NQumir::NAst::TArrayAssignExpr>(
+    return NQumir::MakeIntrusive<NQumir::NAst::TArrayAssignExpr>(
         NQumir::TLocation{}, std::move(name), std::move(indices), std::move(value));
 }
 
 NQumir::NAst::TExprPtr TypedInt(
+    NQumir::NAst::TTypeFactory& types,
     int64_t value,
     NQumir::NAst::TTypePtr type)
 {
-    auto expr = std::make_shared<NQumir::NAst::TNumberExpr>(
-        NQumir::TLocation{}, value);
+    auto expr = NQumir::MakeIntrusive<NQumir::NAst::TNumberExpr>(
+        NQumir::TLocation{}, value, types);
     expr->Type = std::move(type);
     return expr;
 }
 
-NQumir::NAst::TExprPtr BoolConst(bool value) {
-    return NKernel::NOz::Bool(value);
+NQumir::NAst::TExprPtr BoolConst(NQumir::NAst::TTypeFactory& types, bool value) {
+    return NKernel::NOz::Bool(types, value);
 }
 
-NQumir::NAst::TExprPtr Deref(NQumir::NAst::TExprPtr ptr) {
-    return NKernel::NOz::Index(std::move(ptr), Int64Literal(0));
+NQumir::NAst::TExprPtr Deref(NQumir::NAst::TTypeFactory& types, NQumir::NAst::TExprPtr ptr) {
+    return NKernel::NOz::Index(std::move(ptr), Int64Literal(types, 0));
 }
 
-NQumir::NAst::TExprPtr Low32(NQumir::NAst::TExprPtr value) {
+NQumir::NAst::TExprPtr Low32(NQumir::NAst::TTypeFactory& types, NQumir::NAst::TExprPtr value) {
     return NKernel::NOz::Bin(
         NQumir::NAst::TOperator("&"),
         std::move(value),
-        Int64Literal(4294967295LL));
+        Int64Literal(types, 4294967295LL));
 }
 
 void AppendSetup(
@@ -587,13 +599,14 @@ NQumir::NAst::TExprPtr ComparableValue(
     const NQumir::NAst::TTypePtr& i64Type)
 {
     using namespace NQumir::NAst;
-    if (TMaybeType<TBoolType>(UnwrapNamedType(value.ValueType))) {
+    if (TMaybeType<TBoolType>(UnwrapNamedValueType(value.ValueType))) {
         return Cast(value.Value, i64Type);
     }
     return value.Value;
 }
 
 void AppendSortLessBody(
+    NQumir::NAst::TTypeFactory& types,
     NKernel::NOz::TFunBuilder& builder,
     const std::vector<TSortRadixKeyInput>& keys,
     const std::string& leftColumns,
@@ -605,9 +618,9 @@ void AppendSortLessBody(
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
 
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto columnType = QumirDbNamedType("TColumn");
-    auto stringViewType = QumirDbNamedType("StringView");
+    auto i64Type = types.MakeInteger();
+    auto columnType = QumirDbNamedType(types, "TColumn");
+    auto stringViewType = QumirDbNamedType(types, "StringView");
 
     for (size_t k = 0; k < keys.size(); ++k) {
         const auto& key = keys[k];
@@ -618,16 +631,16 @@ void AppendSortLessBody(
         builder
             .Var(leftCol, columnType)
             .Assign(leftCol,
-                Oz::Index(leftColumns, Int64Literal(key.ColumnIndex)))
+                Oz::Index(leftColumns, Int64Literal(types, key.ColumnIndex)))
             .Var(rightCol, columnType)
             .Assign(rightCol,
-                Oz::Index(rightColumns, Int64Literal(key.ColumnIndex)));
+                Oz::Index(rightColumns, Int64Literal(types, key.ColumnIndex)));
 
         auto leftValue = NKernel::BuildColumnValueAst(
-            leftCol, leftRow, "left_key_" + suffix,
+            types, leftCol, leftRow, "left_key_" + suffix,
             key.Type, stringViewType);
         auto rightValue = NKernel::BuildColumnValueAst(
-            rightCol, rightRow, "right_key_" + suffix,
+            types, rightCol, rightRow, "right_key_" + suffix,
             key.Type, stringViewType);
         AppendSetup(builder, leftValue.Setup);
         AppendSetup(builder, rightValue.Setup);
@@ -651,26 +664,27 @@ void AppendSortLessBody(
         auto rightComparable = ComparableValue(rightValue, i64Type);
         builder.Stmt(Oz::If(
             Oz::Bin(TOperator("<"), leftComparable, rightComparable),
-            Oz::Block({Oz::Return(BoolConst(!key.Desc))})));
+            Oz::Block({Oz::Return(BoolConst(types, !key.Desc))})));
         builder.Stmt(Oz::If(
             Oz::Bin(TOperator("<"), rightComparable, leftComparable),
-            Oz::Block({Oz::Return(BoolConst(key.Desc))})));
+            Oz::Block({Oz::Return(BoolConst(types, key.Desc))})));
     }
 
     builder.Stmt(Oz::Return(std::move(equalResult)));
 }
 
 NQumir::NAst::TExprPtr BuildTopSortTempBeforeStateAst(
+    NQumir::NAst::TTypeFactory& types,
     const std::vector<TSortRadixKeyInput>& keys)
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
 
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto rowSetType = QumirDbNamedType("TRowSet");
-    auto rowSetPtrType = Ptr(rowSetType);
-    auto columnType = QumirDbNamedType("TColumn");
-    auto columnPtrType = Ptr(columnType);
+    auto i64Type = types.MakeInteger();
+    auto rowSetType = QumirDbNamedType(types, "TRowSet");
+    auto rowSetPtrType = Ptr(types, rowSetType);
+    auto columnType = QumirDbNamedType(types, "TColumn");
+    auto columnPtrType = Ptr(types, columnType);
 
     Oz::TFunBuilder builder("qdb_top_sort_temp_before_state");
     builder
@@ -678,53 +692,53 @@ NQumir::NAst::TExprPtr BuildTopSortTempBeforeStateAst(
         .Param("batch", rowSetPtrType)
         .Param("state_row", i64Type)
         .Param("temp_row", i64Type)
-        .Return(std::make_shared<TBoolType>())
+        .Return(types.Make<TBoolType>())
         .Var("state_rs", rowSetType)
-        .Assign("state_rs", Deref(Oz::Ident("state")))
+        .Assign("state_rs", Deref(types, Oz::Ident("state")))
         .Var("batch_rs", rowSetType)
-        .Assign("batch_rs", Deref(Oz::Ident("batch")))
+        .Assign("batch_rs", Deref(types, Oz::Ident("batch")))
         .Var("state_cols", columnPtrType)
         .Assign("state_cols", Field(Oz::Ident("state_rs"), "Columns"))
         .Var("batch_cols", columnPtrType)
         .Assign("batch_cols", Field(Oz::Ident("batch_rs"), "Columns"));
 
     AppendSortLessBody(
-        builder, keys,
+        types, builder, keys,
         "batch_cols", "temp_row",
         "state_cols", "state_row",
-        BoolConst(false));
+        BoolConst(types, false));
     return std::move(builder).Build();
 }
 
-NQumir::NAst::TExprPtr BuildTopSortMergePicksAst()
+NQumir::NAst::TExprPtr BuildTopSortMergePicksAst(NQumir::NAst::TTypeFactory& types)
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
 
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
-    auto u32Type = std::make_shared<TIntegerType>(TIntegerType::U32);
-    auto rowSetPtrType = Ptr(QumirDbNamedType("TRowSet"));
-    auto ptrI64Type = Ptr(i64Type);
-    auto ptrU8Type = Ptr(u8Type);
-    auto ptrU32Type = Ptr(u32Type);
+    auto i64Type = types.MakeInteger();
+    auto u8Type = types.MakeInteger(TIntegerType::U8);
+    auto u32Type = types.MakeInteger(TIntegerType::U32);
+    auto rowSetPtrType = Ptr(types, QumirDbNamedType(types, "TRowSet"));
+    auto ptrI64Type = Ptr(types, i64Type);
+    auto ptrU8Type = Ptr(types, u8Type);
+    auto ptrU32Type = Ptr(types, u32Type);
 
     auto makePickState = [&]() {
         return Oz::Block({
-            ArrayAssign("pick_src", Oz::Ident("out"), TypedInt(0, u8Type)),
+            ArrayAssign("pick_src", Oz::Ident("out"), TypedInt(types, 0, u8Type)),
             ArrayAssign("pick_idx", Oz::Ident("out"),
                 Cast(Oz::Ident("left"), u32Type)),
-            Oz::Assign("left", Oz::Add(Oz::Ident("left"), Int64Literal(1))),
+            Oz::Assign("left", Oz::Add(Oz::Ident("left"), Int64Literal(types, 1))),
         });
     };
     auto makePickTemp = [&]() {
         return Oz::Block({
             Oz::Assign("temp_id", Oz::Index("temp_row_ids", Oz::Ident("right"))),
-            Oz::Assign("temp_row", Low32(Oz::Ident("temp_id"))),
-            ArrayAssign("pick_src", Oz::Ident("out"), TypedInt(1, u8Type)),
+            Oz::Assign("temp_row", Low32(types, Oz::Ident("temp_id"))),
+            ArrayAssign("pick_src", Oz::Ident("out"), TypedInt(types, 1, u8Type)),
             ArrayAssign("pick_idx", Oz::Ident("out"),
                 Cast(Oz::Ident("temp_row"), u32Type)),
-            Oz::Assign("right", Oz::Add(Oz::Ident("right"), Int64Literal(1))),
+            Oz::Assign("right", Oz::Add(Oz::Ident("right"), Int64Literal(types, 1))),
         });
     };
 
@@ -738,20 +752,20 @@ NQumir::NAst::TExprPtr BuildTopSortMergePicksAst()
         .Param("pick_idx", ptrU32Type)
         .Param("limit", i64Type)
         .Return(i64Type)
-        .Var("state_rs", QumirDbNamedType("TRowSet"))
-        .Assign("state_rs", Deref(Oz::Ident("state")))
+        .Var("state_rs", QumirDbNamedType(types, "TRowSet"))
+        .Assign("state_rs", Deref(types, Oz::Ident("state")))
         .Var("state_n", i64Type)
         .Assign("state_n", Field(Oz::Ident("state_rs"), "RowCount"))
         .Var("left", i64Type)
-        .Assign("left", Int64Literal(0))
+        .Assign("left", Int64Literal(types, 0))
         .Var("right", i64Type)
-        .Assign("right", Int64Literal(0))
+        .Assign("right", Int64Literal(types, 0))
         .Var("out", i64Type)
-        .Assign("out", Int64Literal(0))
+        .Assign("out", Int64Literal(types, 0))
         .Var("temp_id", i64Type)
-        .Assign("temp_id", Int64Literal(0))
+        .Assign("temp_id", Int64Literal(types, 0))
         .Var("temp_row", i64Type)
-        .Assign("temp_row", Int64Literal(0));
+        .Assign("temp_row", Int64Literal(types, 0));
 
     auto hasOutputRoom = Oz::Bin(TOperator("<"), Oz::Ident("out"), Oz::Ident("limit"));
     auto hasState = Oz::Bin(TOperator("<"), Oz::Ident("left"), Oz::Ident("state_n"));
@@ -766,7 +780,7 @@ NQumir::NAst::TExprPtr BuildTopSortMergePicksAst()
     });
     auto chooseByCompare = Oz::Block({
         Oz::Assign("temp_id", Oz::Index("temp_row_ids", Oz::Ident("right"))),
-        Oz::Assign("temp_row", Low32(Oz::Ident("temp_id"))),
+        Oz::Assign("temp_row", Low32(types, Oz::Ident("temp_id"))),
         Oz::If(std::move(tempBeforeState), makePickTemp(), makePickState()),
     });
     auto loopBody = Oz::Block({
@@ -777,7 +791,7 @@ NQumir::NAst::TExprPtr BuildTopSortMergePicksAst()
                 Oz::Bin(TOperator("=="), Oz::Ident("left"), Oz::Ident("state_n")),
                 makePickTemp(),
                 std::move(chooseByCompare))),
-        Oz::Assign("out", Oz::Add(Oz::Ident("out"), Int64Literal(1))),
+        Oz::Assign("out", Oz::Add(Oz::Ident("out"), Int64Literal(types, 1))),
     });
     builder.Stmt(Oz::While(std::move(loopCond), std::move(loopBody)));
     builder.Stmt(Oz::Return(Oz::Ident("out")));
@@ -785,23 +799,24 @@ NQumir::NAst::TExprPtr BuildTopSortMergePicksAst()
 }
 
 NQumir::NAst::TExprPtr BuildTopSortUpdateAst(
+    NQumir::NAst::TTypeFactory& types,
     const std::vector<TSortRadixKeyInput>& keys,
     bool materializeOutput)
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
 
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto i8Type = std::make_shared<TIntegerType>(TIntegerType::I8);
-    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
-    auto u32Type = std::make_shared<TIntegerType>(TIntegerType::U32);
-    auto rowSetType = QumirDbNamedType("TRowSet");
-    auto rowSetPtrType = Ptr(rowSetType);
-    auto rowSetRefType = std::make_shared<TReferenceType>(rowSetType);
-    auto ptrI64Type = Ptr(i64Type);
-    auto ptrU32Type = Ptr(u32Type);
-    auto ptrU8Type = Ptr(u8Type);
-    auto boolType = std::make_shared<TBoolType>();
+    auto i64Type = types.MakeInteger();
+    auto i8Type = types.MakeInteger(TIntegerType::I8);
+    auto u8Type = types.MakeInteger(TIntegerType::U8);
+    auto u32Type = types.MakeInteger(TIntegerType::U32);
+    auto rowSetType = QumirDbNamedType(types, "TRowSet");
+    auto rowSetPtrType = Ptr(types, rowSetType);
+    auto rowSetRefType = types.MakeReference(rowSetType);
+    auto ptrI64Type = Ptr(types, i64Type);
+    auto ptrU32Type = Ptr(types, u32Type);
+    auto ptrU8Type = Ptr(types, u8Type);
+    auto boolType = types.Make<TBoolType>();
 
     bool anyNullableKey = false;
     for (const auto& key : keys) {
@@ -829,10 +844,10 @@ NQumir::NAst::TExprPtr BuildTopSortUpdateAst(
     for (size_t k = keys.size(); k > 0; --k) {
         const size_t keyIdx = k - 1;
         sortStmts.push_back(BuildRowIdSortCall(
-            keys[keyIdx],
+            types, keys[keyIdx],
             anyNullableKey,
-            BoolConst(keys[keyIdx].Desc),
-            BoolConst(keys[keyIdx].NullsFirst),
+            BoolConst(types, keys[keyIdx].Desc),
+            BoolConst(types, keys[keyIdx].NullsFirst),
             "batch"));
     }
     builder.Stmt(Oz::If(
@@ -854,18 +869,18 @@ NQumir::NAst::TExprPtr BuildTopSortUpdateAst(
     }
 
     builder.Stmt(Oz::If(
-        Oz::Bin(TOperator("<="), Oz::Ident("out_count"), Int64Literal(0)),
-        Oz::Block({Oz::Return(Int64Literal(0))})));
+        Oz::Bin(TOperator("<="), Oz::Ident("out_count"), Int64Literal(types, 0)),
+        Oz::Block({Oz::Return(Int64Literal(types, 0))})));
     builder
         .Var("materialize_store", rowSetPtrType)
         .Assign("materialize_store", Oz::Cast(
-            Oz::Call("qdb_alloc", {Oz::Mul(Int64Literal(2),
-                Int64Literal(static_cast<int64_t>(TKernelCompiler::RowSetSize)))}),
+            Oz::Call("qdb_alloc", {Oz::Mul(Int64Literal(types, 2),
+                Int64Literal(types, static_cast<int64_t>(TKernelCompiler::RowSetSize)))}),
             rowSetPtrType))
-        .Stmt(Oz::ArrayAssign("materialize_store", Int64Literal(0), Deref(Oz::Ident("state"))))
-        .Stmt(Oz::ArrayAssign("materialize_store", Int64Literal(1), Deref(Oz::Ident("batch"))))
+        .Stmt(Oz::ArrayAssign("materialize_store", Int64Literal(types, 0), Deref(types, Oz::Ident("state"))))
+        .Stmt(Oz::ArrayAssign("materialize_store", Int64Literal(types, 1), Deref(types, Oz::Ident("batch"))))
         .Var("i", i64Type)
-        .Assign("i", Int64Literal(0))
+        .Assign("i", Int64Literal(types, 0))
         .Stmt(Oz::While(
             Oz::Bin(TOperator("<"), Oz::Ident("i"), Oz::Ident("out_count")),
             Oz::Block({
@@ -873,28 +888,28 @@ NQumir::NAst::TExprPtr BuildTopSortUpdateAst(
                     Oz::Bin(TOperator("|"),
                         Oz::Bin(TOperator("<<"),
                             Oz::Cast(Oz::Index("pick_src", Oz::Ident("i")), i64Type),
-                            Int64Literal(32)),
+                            Int64Literal(types, 32)),
                         Oz::Cast(Oz::Index("pick_idx", Oz::Ident("i")), i64Type))),
-                Oz::Assign("i", Oz::Add(Oz::Ident("i"), Int64Literal(1))),
+                Oz::Assign("i", Oz::Add(Oz::Ident("i"), Int64Literal(types, 1))),
             })))
         .Var("materialized", i64Type)
         .Assign("materialized", Oz::Call("sort_materialize_row_ids", {
             Oz::Ident("materialize_store"),
             Oz::Ident("row_ids"),
-            Int64Literal(0),
+            Int64Literal(types, 0),
             Oz::Ident("out_count"),
             Oz::Ident("out_rowset"),
         }))
         .Stmt(Oz::Call("qdb_free", {
-            Oz::Cast(Oz::Ident("materialize_store"), Ptr(i8Type)),
+            Oz::Cast(Oz::Ident("materialize_store"), Ptr(types, i8Type)),
         }))
         .Stmt(Oz::Return(Oz::Ident("materialized")));
     return std::move(builder).Build();
 }
 
 // Only integer and float columns take the fixed-column materialize path.
-int64_t MaterializeFixedWidth(const NQumir::NAst::TTypePtr& type) {
-    return SortCoreType(type) ? NKernel::FixedValueWidth(type) : 0;
+int64_t MaterializeFixedWidth(NQumir::NAst::TTypeFactory& types, const NQumir::NAst::TTypePtr& type) {
+    return SortCoreType(types, type) ? NKernel::FixedValueWidth(type) : 0;
 }
 
 // Emits an entry that gathers `inputType`'s columns from a sorted row-id slice.
@@ -909,6 +924,7 @@ using TExtraColumnEmitter = std::function<void(
     int64_t&)>;
 
 NQumir::NAst::TExprPtr BuildSortMaterializeWrapperAst(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& inputType,
     const std::string& entryName = "sort_materialize_row_ids",
     int64_t extraColumnCount = 0,
@@ -918,13 +934,13 @@ NQumir::NAst::TExprPtr BuildSortMaterializeWrapperAst(
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
 
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto rowSetType = QumirDbNamedType("TRowSet");
-    auto columnType = QumirDbNamedType("TColumn");
-    auto rowSetPtrType = Ptr(rowSetType);
-    auto rowSetRefType = std::make_shared<TReferenceType>(rowSetType);
-    auto columnPtrType = Ptr(columnType);
-    auto ptrI64Type = Ptr(i64Type);
+    auto i64Type = types.MakeInteger();
+    auto rowSetType = QumirDbNamedType(types, "TRowSet");
+    auto columnType = QumirDbNamedType(types, "TColumn");
+    auto rowSetPtrType = Ptr(types, rowSetType);
+    auto rowSetRefType = types.MakeReference(rowSetType);
+    auto columnPtrType = Ptr(types, columnType);
+    auto ptrI64Type = Ptr(types, i64Type);
 
     const int64_t columnCount =
         static_cast<int64_t>(inputType.Fields.size()) + extraColumnCount;
@@ -935,7 +951,7 @@ NQumir::NAst::TExprPtr BuildSortMaterializeWrapperAst(
     ownedPtrCount += extraOwnerCount;
 
     auto column = [&](size_t idx) -> TExprPtr {
-        return Oz::Index("columns", Int64Literal(static_cast<int64_t>(idx)));
+        return Oz::Index("columns", Int64Literal(types, static_cast<int64_t>(idx)));
     };
 
     Oz::TFunBuilder builder(entryName);
@@ -949,12 +965,12 @@ NQumir::NAst::TExprPtr BuildSortMaterializeWrapperAst(
         .Var("n", i64Type)
         .Assign("n", Oz::Ident("limit"))
         .Stmt(Oz::If(
-            Oz::Bin(TOperator("<="), Oz::Ident("n"), Int64Literal(0)),
-            Oz::Block({Oz::Return(Int64Literal(0))})))
+            Oz::Bin(TOperator("<="), Oz::Ident("n"), Int64Literal(types, 0)),
+            Oz::Block({Oz::Return(Int64Literal(types, 0))})))
         .Var("columns", columnPtrType)
         .Assign("columns", Oz::Call("sort_materialize_begin", {
-            Int64Literal(columnCount),
-            Int64Literal(ownedPtrCount),
+            Int64Literal(types, columnCount),
+            Int64Literal(types, ownedPtrCount),
             Oz::Ident("n"),
             Oz::Ident("out_rowset"),
         }));
@@ -962,7 +978,7 @@ NQumir::NAst::TExprPtr BuildSortMaterializeWrapperAst(
     int64_t ownerIdx = 2;
     for (size_t c = 0; c < inputType.Fields.size(); ++c) {
         const auto& type = inputType.Fields[c].second;
-        const auto srcCol = Int64Literal(static_cast<int64_t>(c));
+        const auto srcCol = Int64Literal(types, static_cast<int64_t>(c));
         if (SortKeyIsString(type)) {
             const int64_t offsetsOwner = ownerIdx++;
             const int64_t dataOwner = ownerIdx++;
@@ -975,9 +991,9 @@ NQumir::NAst::TExprPtr BuildSortMaterializeWrapperAst(
                 srcCol,
                 column(c),
                 Oz::Ident("out_rowset"),
-                Int64Literal(offsetsOwner),
-                Int64Literal(dataOwner),
-                Int64Literal(maskOwner),
+                Int64Literal(types, offsetsOwner),
+                Int64Literal(types, dataOwner),
+                Int64Literal(types, maskOwner),
             }));
             continue;
         }
@@ -992,8 +1008,8 @@ NQumir::NAst::TExprPtr BuildSortMaterializeWrapperAst(
                 srcCol,
                 column(c),
                 Oz::Ident("out_rowset"),
-                Int64Literal(dataOwner),
-                Int64Literal(maskOwner),
+                Int64Literal(types, dataOwner),
+                Int64Literal(types, maskOwner),
             }));
             continue;
         }
@@ -1006,17 +1022,17 @@ NQumir::NAst::TExprPtr BuildSortMaterializeWrapperAst(
                 srcCol,
                 column(c),
                 Oz::Ident("out_rowset"),
-                Int64Literal(dataOwner),
-                Int64Literal(maskOwner),
+                Int64Literal(types, dataOwner),
+                Int64Literal(types, maskOwner),
             }));
             continue;
         }
-        auto coreType = SortCoreType(type);
-        const int64_t width = MaterializeFixedWidth(type);
+        auto coreType = SortCoreType(types, type);
+        const int64_t width = MaterializeFixedWidth(types, type);
         if (!coreType || width == 0) {
             throw NQumir::TError(
                 "BuildSortMaterializeWrapperAst: unsupported column type " +
-                (type ? type->ToString() : std::string("<null>")));
+                SqlTypeName(type));
         }
         builder.Stmt(Oz::Call("sort_materialize_fixed_column", {
             Oz::Ident("store"),
@@ -1026,10 +1042,10 @@ NQumir::NAst::TExprPtr BuildSortMaterializeWrapperAst(
             srcCol,
             column(c),
             Oz::Ident("out_rowset"),
-            Int64Literal(dataOwner),
-            Int64Literal(maskOwner),
-            Int64Literal(width),
-            Cast(Int64Literal(0), Ptr(std::move(coreType))),
+            Int64Literal(types, dataOwner),
+            Int64Literal(types, maskOwner),
+            Int64Literal(types, width),
+            Cast(Int64Literal(types, 0), Ptr(types, std::move(coreType))),
         }));
     }
     if (emitExtraColumns) {
@@ -1043,6 +1059,7 @@ NQumir::NAst::TExprPtr BuildSortMaterializeWrapperAst(
 // `keys`, then materializes the [start, limit) slice via `materializeEntry`.
 // Shared by sort (sort_materialize_row_ids) and window (window_materialize_row_ids).
 NQumir::NAst::TExprPtr BuildSortRunWrapperAst(
+    NQumir::NAst::TTypeFactory& types,
     const std::string& runName,
     const std::vector<TSortRadixKeyInput>& keys,
     bool nullable,
@@ -1051,14 +1068,14 @@ NQumir::NAst::TExprPtr BuildSortRunWrapperAst(
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
 
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto u32Type = std::make_shared<TIntegerType>(TIntegerType::U32);
-    auto boolType = std::make_shared<TBoolType>();
-    auto rowSetPtrType = Ptr(QumirDbNamedType("TRowSet"));
-    auto rowSetRefType = std::make_shared<TReferenceType>(QumirDbNamedType("TRowSet"));
-    auto ptrI64Type = Ptr(i64Type);
-    auto ptrU32Type = Ptr(u32Type);
-    auto ptrBoolType = Ptr(boolType);
+    auto i64Type = types.MakeInteger();
+    auto u32Type = types.MakeInteger(TIntegerType::U32);
+    auto boolType = types.Make<TBoolType>();
+    auto rowSetPtrType = Ptr(types, QumirDbNamedType(types, "TRowSet"));
+    auto rowSetRefType = types.MakeReference(QumirDbNamedType(types, "TRowSet"));
+    auto ptrI64Type = Ptr(types, i64Type);
+    auto ptrU32Type = Ptr(types, u32Type);
+    auto ptrBoolType = Ptr(types, boolType);
 
     Oz::TFunBuilder builder(runName);
     builder
@@ -1078,16 +1095,16 @@ NQumir::NAst::TExprPtr BuildSortRunWrapperAst(
     std::vector<TExprPtr> sortStmts;
     for (size_t k = keys.size(); k > 0; --k) {
         const size_t keyIdx = k - 1;
-        auto desc = Oz::Index("descs", Int64Literal(static_cast<int64_t>(keyIdx)));
+        auto desc = Oz::Index("descs", Int64Literal(types, static_cast<int64_t>(keyIdx)));
         auto nullsFirst = Oz::Index(
-            "nulls_firsts", Int64Literal(static_cast<int64_t>(keyIdx)));
+            "nulls_firsts", Int64Literal(types, static_cast<int64_t>(keyIdx)));
         sortStmts.push_back(BuildRowIdSortCall(
-            keys[keyIdx], nullable, std::move(desc), std::move(nullsFirst), "store"));
+            types, keys[keyIdx], nullable, std::move(desc), std::move(nullsFirst), "store"));
     }
     builder.Stmt(Oz::If(Oz::Ident("do_sort"), Oz::Block(std::move(sortStmts))));
     builder.Stmt(Oz::If(
-        Oz::Bin(TOperator("<="), Oz::Ident("limit"), Int64Literal(0)),
-        Oz::Block({Oz::Return(Int64Literal(0))})));
+        Oz::Bin(TOperator("<="), Oz::Ident("limit"), Int64Literal(types, 0)),
+        Oz::Block({Oz::Return(Int64Literal(types, 0))})));
     builder.Stmt(Oz::Return(Oz::Call(materializeEntry, {
         Oz::Ident("store"),
         Oz::Ident("row_ids"),
@@ -1099,12 +1116,13 @@ NQumir::NAst::TExprPtr BuildSortRunWrapperAst(
 }
 
 void AddSortMaterializeLibrary(
+    NQumir::NAst::TTypeFactory& types,
     std::vector<NQumir::NAst::TExprPtr>& programStmts,
     const char* errorPrefix)
 {
     using namespace NQumir::NAst;
     for (const auto& name : {"materialize.oz"}) {
-        auto library = NKernel::ParseFunctionLibrary(NKernel::ReadSortKernel(name));
+        auto library = NKernel::ParseFunctionLibrary(types, NKernel::ReadSortKernel(name));
         if (!library) {
             throw NQumir::TError(
                 std::string(errorPrefix) + ": " + library.error().ToString());
@@ -1117,7 +1135,7 @@ void AddSortMaterializeLibrary(
         }
     }
     auto stringOps = NKernel::ParseFunctionLibrary(
-        NKernel::ReadAggregationKernel("string_ops.oz"));
+        types, NKernel::ReadAggregationKernel("string_ops.oz"));
     if (!stringOps) {
         throw NQumir::TError(
             std::string(errorPrefix) + ": string_ops.oz: " +
@@ -1136,6 +1154,7 @@ void AddSortMaterializeLibrary(
 // (entry window_materialize_row_ids). Each window column is filled by a scan
 // over the sorted row-id slice (window.oz).
 NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& inputType,
     const std::vector<TWindowFuncInput>& funcs)
 {
@@ -1164,7 +1183,7 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
                     Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
                     Oz::Ident("n"),
                     column(static_cast<size_t>(inputColumnCount) + f),
-                    Oz::Ident("out_rowset"), Int64Literal(dataOwner),
+                    Oz::Ident("out_rowset"), Int64Literal(types, dataOwner),
                 }));
             } else if (funcs[f].Func == "avg_partition") {
                 const int64_t maskOwner = ownerIdx++;
@@ -1180,39 +1199,39 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
                     const int64_t scaleDelta =
                         (argSpec && resSpec) ? (resSpec->Scale - argSpec->Scale) : 0;
                     auto outType = resSpec
-                        ? DecimalStorageType(*resSpec)
-                        : BinIntStorageType();
+                        ? DecimalStorageType(types, *resSpec)
+                        : BinIntStorageType(types);
                     const int64_t outBytes = resSpec
                         ? DecimalStorageBytes(*resSpec)
                         : 16;
                     builder.Stmt(Oz::Call("window_fill_partition_avg_binint", {
                         Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
                         Oz::Ident("n"),
-                        Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
-                        Cast(Int64Literal(0), Ptr(WindowDecimalArgType(argType))),
-                        Cast(Int64Literal(0), Ptr(std::move(outType))),
-                        Int64Literal(outBytes),
+                        Int64Literal(types, static_cast<int64_t>(funcs[f].ArgColumn)),
+                        Cast(Int64Literal(types, 0), Ptr(types, WindowDecimalArgType(types, argType))),
+                        Cast(Int64Literal(types, 0), Ptr(types, std::move(outType))),
+                        Int64Literal(types, outBytes),
                         column(static_cast<size_t>(inputColumnCount) + f),
-                        Oz::Ident("out_rowset"), Int64Literal(dataOwner),
-                        Int64Literal(maskOwner),
-                        Int64Literal(scaleDelta),
+                        Oz::Ident("out_rowset"), Int64Literal(types, dataOwner),
+                        Int64Literal(types, maskOwner),
+                        Int64Literal(types, scaleDelta),
                     }));
                     continue;
                 }
-                auto argCoreType = SortCoreType(argType);
+                auto argCoreType = SortCoreType(types, argType);
                 if (!argCoreType) {
                     throw NQumir::TError(
                         "BuildWindowMaterializeWrapperAst: unsupported avg argument type " +
-                        (argType ? argType->ToString() : std::string("<null>")));
+                        SqlTypeName(argType));
                 }
                 builder.Stmt(Oz::Call("window_fill_partition_avg_f64", {
                     Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
                     Oz::Ident("n"),
-                    Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
-                    Cast(Int64Literal(0), Ptr(std::move(argCoreType))),
+                    Int64Literal(types, static_cast<int64_t>(funcs[f].ArgColumn)),
+                    Cast(Int64Literal(types, 0), Ptr(types, std::move(argCoreType))),
                     column(static_cast<size_t>(inputColumnCount) + f),
-                    Oz::Ident("out_rowset"), Int64Literal(dataOwner),
-                    Int64Literal(maskOwner),
+                    Oz::Ident("out_rowset"), Int64Literal(types, dataOwner),
+                    Int64Literal(types, maskOwner),
                 }));
             } else if (funcs[f].Func == "sum_prefix" ||
                        funcs[f].Func == "sum_partition" ||
@@ -1235,28 +1254,28 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
                     std::vector<TExprPtr> args = {
                         Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
                         Oz::Ident("n"),
-                        Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
+                        Int64Literal(types, static_cast<int64_t>(funcs[f].ArgColumn)),
                     };
                     if (isSum) {
-                        args.push_back(Cast(Int64Literal(0), Ptr(WindowDecimalArgType(argType))));
+                        args.push_back(Cast(Int64Literal(types, 0), Ptr(types, WindowDecimalArgType(types, argType))));
                     }
                     args.insert(args.end(), {
                         column(static_cast<size_t>(inputColumnCount) + f),
-                        Oz::Ident("out_rowset"), Int64Literal(dataOwner),
-                        Int64Literal(maskOwner),
+                        Oz::Ident("out_rowset"), Int64Literal(types, dataOwner),
+                        Int64Literal(types, maskOwner),
                     });
                     if (isPrefix) {
-                        args.push_back(Oz::Bool(funcs[f].PeerInclusive));
+                        args.push_back(Oz::Bool(types, funcs[f].PeerInclusive));
                     }
                     builder.Stmt(Oz::Call(filler, std::move(args)));
                     continue;
                 }
-                auto argCoreType = SortCoreType(argType);
-                const int64_t width = MaterializeFixedWidth(argType);
+                auto argCoreType = SortCoreType(types, argType);
+                const int64_t width = MaterializeFixedWidth(types, argType);
                 if (!argCoreType || width == 0) {
                     throw NQumir::TError(
                         "BuildWindowMaterializeWrapperAst: unsupported window argument type " +
-                        (argType ? argType->ToString() : std::string("<null>")));
+                        SqlTypeName(argType));
                 }
                 const char* filler = funcs[f].Func == "sum_prefix"
                     ? "window_fill_prefix_sum_fixed"
@@ -1265,35 +1284,36 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
                         : "window_fill_prefix_max_fixed";
                 const bool integerSum =
                     (funcs[f].Func == "sum_prefix" || funcs[f].Func == "sum_partition") &&
-                    SortValueIsInteger(argType);
+                    SortValueIsInteger(types, argType);
                 std::vector<TExprPtr> args = {
                     Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
-                    Oz::Ident("n"), Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
-                    Cast(Int64Literal(0), Ptr(std::move(argCoreType))),
+                    Oz::Ident("n"), Int64Literal(types, static_cast<int64_t>(funcs[f].ArgColumn)),
+                    Cast(Int64Literal(types, 0), Ptr(types, std::move(argCoreType))),
                 };
                 if (funcs[f].Func == "sum_prefix" || funcs[f].Func == "sum_partition") {
                     // Integer sums widen to i64 and float sums to f64, as AggregateResultType.
-                    const bool floatSum = !integerSum && TMaybeType<TFloatType>(PhysicalValueType(argType));
+                    const auto argValueType = PhysicalValueType(types, argType);
+                    const bool floatSum = !integerSum && TMaybeType<TFloatType>(argValueType);
                     TTypePtr outCoreType = integerSum
-                        ? TTypePtr(std::make_shared<TIntegerType>())
-                        : (floatSum ? TTypePtr(std::make_shared<TFloatType>()) : SortCoreType(argType));
+                        ? TTypePtr(types.MakeInteger())
+                        : (floatSum ? TTypePtr(types.MakeFloat()) : SortCoreType(types, argType));
                     const int64_t outWidth = (integerSum || floatSum) ? 8 : width;
                     if (!outCoreType || outWidth == 0) {
                         throw NQumir::TError(
                             "BuildWindowMaterializeWrapperAst: unsupported window sum result type " +
-                            (argType ? argType->ToString() : std::string("<null>")));
+                            SqlTypeName(argType));
                     }
-                    args.push_back(Cast(Int64Literal(0), Ptr(std::move(outCoreType))));
-                    args.push_back(Int64Literal(outWidth));
+                    args.push_back(Cast(Int64Literal(types, 0), Ptr(types, std::move(outCoreType))));
+                    args.push_back(Int64Literal(types, outWidth));
                 } else {
-                    args.push_back(Int64Literal(width));
+                    args.push_back(Int64Literal(types, width));
                 }
                 args.push_back(column(static_cast<size_t>(inputColumnCount) + f));
                 args.push_back(Oz::Ident("out_rowset"));
-                args.push_back(Int64Literal(dataOwner));
-                args.push_back(Int64Literal(maskOwner));
+                args.push_back(Int64Literal(types, dataOwner));
+                args.push_back(Int64Literal(types, maskOwner));
                 if (isPrefix) {
-                    args.push_back(Oz::Bool(funcs[f].PeerInclusive));
+                    args.push_back(Oz::Bool(types, funcs[f].PeerInclusive));
                 }
                 builder.Stmt(Oz::Call(filler, std::move(args)));
             } else {
@@ -1305,7 +1325,7 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
     };
 
     return BuildSortMaterializeWrapperAst(
-        inputType,
+        types, inputType,
         "window_materialize_row_ids",
         static_cast<int64_t>(funcs.size()),
         extraOwnerCount,
@@ -1313,15 +1333,16 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
 }
 
 NQumir::NAst::TExprPtr BuildWindowKeyComparatorAst(
+    NQumir::NAst::TTypeFactory& types,
     std::string name,
     const std::vector<TSortRadixKeyInput>& keys)
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
 
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto boolType = std::make_shared<TBoolType>();
-    auto rowSetPtrType = Ptr(QumirDbNamedType("TRowSet"));
+    auto i64Type = types.MakeInteger();
+    auto boolType = types.Make<TBoolType>();
+    auto rowSetPtrType = Ptr(types, QumirDbNamedType(types, "TRowSet"));
 
     Oz::TFunBuilder builder(std::move(name));
     builder
@@ -1332,7 +1353,7 @@ NQumir::NAst::TExprPtr BuildWindowKeyComparatorAst(
 
     for (size_t i = 0; i < keys.size(); ++i) {
         const auto& key = keys[i];
-        const auto columnIdx = Int64Literal(static_cast<int64_t>(key.ColumnIndex));
+        const auto columnIdx = Int64Literal(types, static_cast<int64_t>(key.ColumnIndex));
         const std::string leftValid = "left_valid_" + std::to_string(i);
         const std::string rightValid = "right_valid_" + std::to_string(i);
 
@@ -1344,11 +1365,11 @@ NQumir::NAst::TExprPtr BuildWindowKeyComparatorAst(
             .Var(rightValid, boolType)
             .Assign(rightValid, Oz::Call("sr_row_valid", {
                 Oz::Ident("store"), Oz::Ident("right_row_id"),
-                Int64Literal(static_cast<int64_t>(key.ColumnIndex)),
+                Int64Literal(types, static_cast<int64_t>(key.ColumnIndex)),
             }))
             .Stmt(Oz::If(
                 Oz::Bin(TOperator("!="), Oz::Ident(leftValid), Oz::Ident(rightValid)),
-                Oz::Block({Oz::Return(Oz::Bool(false))})));
+                Oz::Block({Oz::Return(Oz::Bool(types, false))})));
 
         std::vector<TExprPtr> compareStmts;
         if (SortKeyIsString(key.Type)) {
@@ -1356,73 +1377,73 @@ NQumir::NAst::TExprPtr BuildWindowKeyComparatorAst(
                 Oz::Bin(TOperator("!="),
                     Oz::Call("sr_sort_compare", {
                         Oz::Ident("store"),
-                        Int64Literal(static_cast<int64_t>(key.ColumnIndex)),
+                        Int64Literal(types, static_cast<int64_t>(key.ColumnIndex)),
                         Oz::Ident("left_row_id"),
                         Oz::Ident("right_row_id"),
                     }),
-                    Int64Literal(0)),
-                Oz::Block({Oz::Return(Oz::Bool(false))})));
+                    Int64Literal(types, 0)),
+                Oz::Block({Oz::Return(Oz::Bool(types, false))})));
         } else if (SortKeyIsBool(key.Type)) {
             compareStmts.push_back(Oz::If(
                 Oz::Bin(TOperator("!="),
                     Oz::Call("sr_load_bool_key", {
                         Oz::Ident("store"),
                         Oz::Ident("left_row_id"),
-                        Int64Literal(static_cast<int64_t>(key.ColumnIndex)),
+                        Int64Literal(types, static_cast<int64_t>(key.ColumnIndex)),
                     }),
                     Oz::Call("sr_load_bool_key", {
                         Oz::Ident("store"),
                         Oz::Ident("right_row_id"),
-                        Int64Literal(static_cast<int64_t>(key.ColumnIndex)),
+                        Int64Literal(types, static_cast<int64_t>(key.ColumnIndex)),
                     })),
-                Oz::Block({Oz::Return(Oz::Bool(false))})));
+                Oz::Block({Oz::Return(Oz::Bool(types, false))})));
         } else {
             auto coreType = SortValueIsBinInt(key.Type)
-                ? BinIntStorageType()
-                : SortCoreType(key.Type);
+                ? BinIntStorageType(types)
+                : SortCoreType(types, key.Type);
             if (!coreType) {
                 throw NQumir::TError(
                     "BuildWindowKeyComparatorAst: unsupported key type " +
-                    (key.Type ? key.Type->ToString() : std::string("<null>")));
+                    SqlTypeName(key.Type));
             }
             auto witness = [&]() {
-                return Cast(Int64Literal(0), Ptr(coreType));
+                return Cast(Int64Literal(types, 0), Ptr(types, coreType));
             };
             compareStmts.push_back(Oz::If(
                 Oz::Bin(TOperator("!="),
                     Oz::Call("sr_load_fixed_key", {
                         Oz::Ident("store"),
                         Oz::Ident("left_row_id"),
-                        Int64Literal(static_cast<int64_t>(key.ColumnIndex)),
+                        Int64Literal(types, static_cast<int64_t>(key.ColumnIndex)),
                         witness(),
                     }),
                     Oz::Call("sr_load_fixed_key", {
                         Oz::Ident("store"),
                         Oz::Ident("right_row_id"),
-                        Int64Literal(static_cast<int64_t>(key.ColumnIndex)),
+                        Int64Literal(types, static_cast<int64_t>(key.ColumnIndex)),
                         witness(),
                     })),
-                Oz::Block({Oz::Return(Oz::Bool(false))})));
+                Oz::Block({Oz::Return(Oz::Bool(types, false))})));
         }
         builder.Stmt(Oz::If(
             Oz::Ident(leftValid),
             Oz::Block(std::move(compareStmts))));
     }
 
-    builder.Stmt(Oz::Return(Oz::Bool(true)));
+    builder.Stmt(Oz::Return(Oz::Bool(types, true)));
     return std::move(builder).Build();
 }
 
-NQumir::NAst::TExprPtr BuildHeapTopKEntryAst()
+NQumir::NAst::TExprPtr BuildHeapTopKEntryAst(NQumir::NAst::TTypeFactory& types)
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
 
-    auto i64Type = std::make_shared<TIntegerType>();
+    auto i64Type = types.MakeInteger();
     Oz::TFunBuilder builder("qdb_top_k_select");
     builder
-        .Param("store", Ptr(QumirDbNamedType("TRowSet")))
-        .Param("row_ids", Ptr(i64Type))
+        .Param("store", Ptr(types, QumirDbNamedType(types, "TRowSet")))
+        .Param("row_ids", Ptr(types, i64Type))
         .Param("size", i64Type)
         .Param("limit", i64Type)
         .Return(i64Type)
@@ -1436,7 +1457,7 @@ NQumir::NAst::TExprPtr BuildHeapTopKEntryAst()
 }
 
 // The two struct input schemas of a binary join kernel spec.
-std::pair<std::shared_ptr<NQumir::NAst::TStructType>, std::shared_ptr<NQumir::NAst::TStructType>>
+std::pair<const NQumir::NAst::TStructType*, const NQumir::NAst::TStructType*>
 JoinInputTypes(const NKernel::TOperatorKernelSpec& spec, const std::string& caller) {
     using namespace NQumir::NAst;
     if (spec.Kind != NKernel::EOperatorKernelKind::Binary || spec.OperatorName != "join") {
@@ -1450,7 +1471,10 @@ JoinInputTypes(const NKernel::TOperatorKernelSpec& spec, const std::string& call
     if (!leftType || !rightType) {
         throw NQumir::TError(caller + ": input schemas must be structs");
     }
-    return {leftType.Cast(), rightType.Cast()};
+    return {
+        leftType.Cast(),
+        rightType.Cast(),
+    };
 }
 
 std::vector<TJoinKey> JoinKeysOf(const NKernel::TOperatorKernelSpec& spec) {
@@ -1465,6 +1489,7 @@ std::vector<TJoinKey> JoinKeysOf(const NKernel::TOperatorKernelSpec& spec) {
 // The key descriptor of an equi-join, with each key's NULL-safe flag. Throws
 // on incompatible types or missing columns.
 NKernel::TJoinKeyDescriptor JoinKeyDescriptorOf(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& leftType,
     const NQumir::NAst::TStructType& rightType,
     const std::vector<TJoinKey>& keys)
@@ -1474,7 +1499,7 @@ NKernel::TJoinKeyDescriptor JoinKeyDescriptorOf(
     for (const auto& key : keys) {
         keyNames.emplace_back(key.Left, key.Right);
     }
-    auto keyDesc = NKernel::BuildJoinKeyDescriptor(leftType, rightType, keyNames);
+    auto keyDesc = NKernel::BuildJoinKeyDescriptor(types, leftType, rightType, keyNames);
     for (size_t i = 0; i < keys.size(); ++i) {
         keyDesc.Fields[i].NullsEqual = keys[i].NullsEqual;
     }
@@ -1485,6 +1510,7 @@ NKernel::TJoinKeyDescriptor JoinKeyDescriptorOf(
 // the key overloads call (when a key or the output has strings), then the
 // per-key overloads (rh_hash, rh_key_equal).
 void AppendJoinKeyDecls(
+    NQumir::NAst::TTypeFactory& types,
     std::vector<NQumir::NAst::TExprPtr>& program,
     const NKernel::TJoinKeyDescriptor& keyDesc,
     bool hasString,
@@ -1495,7 +1521,7 @@ void AppendJoinKeyDecls(
     }
     if (hasString || keyDesc.HasDistinctLookupType()) {
         auto stringOps = NKernel::ParseFunctionLibrary(
-            NKernel::ReadAggregationKernel("string_ops.oz"));
+            types, NKernel::ReadAggregationKernel("string_ops.oz"));
         if (!stringOps) {
             throw NQumir::TError(caller + ": string_ops.oz: " + stringOps.error().ToString());
         }
@@ -1503,7 +1529,7 @@ void AppendJoinKeyDecls(
             program.push_back(std::move(f));
         }
     }
-    for (auto& f : NKernel::GenJoinKeyOpsFunDecls(keyDesc)) {
+    for (auto& f : NKernel::GenJoinKeyOpsFunDecls(types, keyDesc)) {
         program.push_back(std::move(f));
     }
 }
@@ -1511,6 +1537,7 @@ void AppendJoinKeyDecls(
 } // namespace
 
 NQumir::NAst::TExprPtr BuildSortRowIdLessAst(
+    NQumir::NAst::TTypeFactory& types,
     const std::vector<TSortRadixKeyInput>& keys)
 {
     using namespace NQumir::NAst;
@@ -1520,10 +1547,10 @@ NQumir::NAst::TExprPtr BuildSortRowIdLessAst(
         throw NQumir::TError("BuildSortRowIdLessAst: empty key list");
     }
 
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto rowSetType = QumirDbNamedType("TRowSet");
-    auto rowSetPtrType = Ptr(rowSetType);
-    auto columnPtrType = Ptr(QumirDbNamedType("TColumn"));
+    auto i64Type = types.MakeInteger();
+    auto rowSetType = QumirDbNamedType(types, "TRowSet");
+    auto rowSetPtrType = Ptr(types, rowSetType);
+    auto columnPtrType = Ptr(types, QumirDbNamedType(types, "TColumn"));
 
     // Overloads heap_less on the store pointer, so the heap items stay bare
     // packed row ids instead of carrying the store in every element.
@@ -1532,17 +1559,17 @@ NQumir::NAst::TExprPtr BuildSortRowIdLessAst(
         .Param("store", rowSetPtrType)
         .Param("left_id", i64Type)
         .Param("right_id", i64Type)
-        .Return(std::make_shared<TBoolType>())
+        .Return(types.Make<TBoolType>())
         .Var("left_batch", i64Type)
         .Assign("left_batch", Oz::Bin(
-            TOperator(">>"), Oz::Ident("left_id"), Int64Literal(32)))
+            TOperator(">>"), Oz::Ident("left_id"), Int64Literal(types, 32)))
         .Var("right_batch", i64Type)
         .Assign("right_batch", Oz::Bin(
-            TOperator(">>"), Oz::Ident("right_id"), Int64Literal(32)))
+            TOperator(">>"), Oz::Ident("right_id"), Int64Literal(types, 32)))
         .Var("left_row", i64Type)
-        .Assign("left_row", Low32(Oz::Ident("left_id")))
+        .Assign("left_row", Low32(types, Oz::Ident("left_id")))
         .Var("right_row", i64Type)
-        .Assign("right_row", Low32(Oz::Ident("right_id")))
+        .Assign("right_row", Low32(types, Oz::Ident("right_id")))
         .Var("left_row_set", rowSetType)
         .Assign("left_row_set", Oz::Index("store", Oz::Ident("left_batch")))
         .Var("right_row_set", rowSetType)
@@ -1553,7 +1580,7 @@ NQumir::NAst::TExprPtr BuildSortRowIdLessAst(
         .Assign("right_cols", Field(Oz::Ident("right_row_set"), "Columns"));
 
     AppendSortLessBody(
-        builder, keys,
+        types, builder, keys,
         "left_cols", "left_row",
         "right_cols", "right_row",
         Oz::Bin(TOperator("<"), Oz::Ident("left_id"), Oz::Ident("right_id")));
@@ -1562,6 +1589,7 @@ NQumir::NAst::TExprPtr BuildSortRowIdLessAst(
 }
 
 NQumir::NAst::TExprPtr BuildHeapTopKProgramAst(
+    NQumir::NAst::TTypeFactory& types,
     const std::vector<TSortRadixKeyInput>& keys)
 {
     using namespace NQumir::NAst;
@@ -1571,7 +1599,7 @@ NQumir::NAst::TExprPtr BuildHeapTopKProgramAst(
     }
 
     auto library = NKernel::ParseFunctionLibrary(
-        NKernel::ReadSortKernel("heap.oz"));
+        types, NKernel::ReadSortKernel("heap.oz"));
     if (!library) {
         throw NQumir::TError(
             "BuildHeapTopKProgramAst: " + library.error().ToString());
@@ -1581,13 +1609,14 @@ NQumir::NAst::TExprPtr BuildHeapTopKProgramAst(
     for (auto& stmt : *library) {
         programStmts.push_back(std::move(stmt));
     }
-    programStmts.push_back(BuildSortRowIdLessAst(keys));
-    programStmts.push_back(BuildHeapTopKEntryAst());
-    return std::make_shared<TBlockExpr>(
+    programStmts.push_back(BuildSortRowIdLessAst(types, keys));
+    programStmts.push_back(BuildHeapTopKEntryAst(types));
+    return NQumir::MakeIntrusive<TBlockExpr>(
         NQumir::TLocation{}, std::move(programStmts));
 }
 
 NQumir::NAst::TExprPtr BuildWindowProgramAst(
+    NQumir::NAst::TTypeFactory& types,
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType& inputType,
     const std::vector<TSortRadixKeyInput>& partitionKeys,
@@ -1600,7 +1629,7 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
     }
     std::vector<TExprPtr> programStmts;
     auto addLibrary = [&](const std::string& name, bool skipUse) {
-        auto library = NKernel::ParseFunctionLibrary(NKernel::ReadSortKernel(name));
+        auto library = NKernel::ParseFunctionLibrary(types, NKernel::ReadSortKernel(name));
         if (!library) {
             throw NQumir::TError("BuildWindowProgramAst: " + library.error().ToString());
         }
@@ -1613,25 +1642,26 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
     };
     addLibrary("radix.oz", false);
     addLibrary("sort_rowids.oz", true);
-    AddSortMaterializeLibrary(programStmts, "BuildWindowProgramAst");
+    AddSortMaterializeLibrary(types, programStmts, "BuildWindowProgramAst");
     programStmts.push_back(BuildWindowKeyComparatorAst(
-        "window_same_partition", partitionKeys));
+        types, "window_same_partition", partitionKeys));
     programStmts.push_back(BuildWindowKeyComparatorAst(
-        "window_same_order", orderKeys));
+        types, "window_same_order", orderKeys));
     addLibrary("window.oz", true);
     programStmts.push_back(BuildWindowMaterializeWrapperAst(
-        inputType, funcs));
+        types, inputType, funcs));
     // Nullable keys need the null-aware radix (nulls segregated to FIRST/LAST);
     // the non-nullable variant would bucket NULL rows by raw value bytes and
     // scatter a partition.
     const bool nullable = std::any_of(keys.begin(), keys.end(),
         [](const TSortRadixKeyInput& key) { return IsNullableType(key.Type); });
     programStmts.push_back(BuildSortRunWrapperAst(
-        "qdb_window_run", keys, nullable, "window_materialize_row_ids"));
-    return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
+        types, "qdb_window_run", keys, nullable, "window_materialize_row_ids"));
+    return NQumir::MakeIntrusive<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
 }
 
 NQumir::NAst::TExprPtr BuildRadixSortProgramAst(
+    NQumir::NAst::TTypeFactory& types,
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType* materializeType)
 {
@@ -1641,7 +1671,7 @@ NQumir::NAst::TExprPtr BuildRadixSortProgramAst(
     }
     std::vector<TExprPtr> programStmts;
     auto addLibrary = [&](const std::string& name, bool skipUse) {
-        auto library = NKernel::ParseFunctionLibrary(NKernel::ReadSortKernel(name));
+        auto library = NKernel::ParseFunctionLibrary(types, NKernel::ReadSortKernel(name));
         if (!library) {
             throw NQumir::TError(
                 "BuildRadixSortProgramAst: " + library.error().ToString());
@@ -1655,16 +1685,17 @@ NQumir::NAst::TExprPtr BuildRadixSortProgramAst(
     };
     addLibrary("radix.oz", false);
     addLibrary("sort_rowids.oz", true);
-    programStmts.push_back(BuildRadixCompositeWrapperAst(keys, false));
+    programStmts.push_back(BuildRadixCompositeWrapperAst(types, keys, false));
     if (materializeType) {
-        AddSortMaterializeLibrary(programStmts, "BuildRadixSortProgramAst");
-        programStmts.push_back(BuildSortMaterializeWrapperAst(*materializeType));
-        programStmts.push_back(BuildSortRunWrapperAst("qdb_sort_run", keys, false, "sort_materialize_row_ids"));
+        AddSortMaterializeLibrary(types, programStmts, "BuildRadixSortProgramAst");
+        programStmts.push_back(BuildSortMaterializeWrapperAst(types, *materializeType));
+        programStmts.push_back(BuildSortRunWrapperAst(types, "qdb_sort_run", keys, false, "sort_materialize_row_ids"));
     }
-    return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
+    return NQumir::MakeIntrusive<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
 }
 
 NQumir::NAst::TExprPtr BuildRadixSortNullableProgramAst(
+    NQumir::NAst::TTypeFactory& types,
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType* materializeType)
 {
@@ -1674,7 +1705,7 @@ NQumir::NAst::TExprPtr BuildRadixSortNullableProgramAst(
     }
     std::vector<TExprPtr> programStmts;
     auto addLibrary = [&](const std::string& name, bool skipUse) {
-        auto library = NKernel::ParseFunctionLibrary(NKernel::ReadSortKernel(name));
+        auto library = NKernel::ParseFunctionLibrary(types, NKernel::ReadSortKernel(name));
         if (!library) {
             throw NQumir::TError(
                 "BuildRadixSortNullableProgramAst: " + library.error().ToString());
@@ -1688,16 +1719,17 @@ NQumir::NAst::TExprPtr BuildRadixSortNullableProgramAst(
     };
     addLibrary("radix.oz", false);
     addLibrary("sort_rowids.oz", true);
-    programStmts.push_back(BuildRadixCompositeWrapperAst(keys, true));
+    programStmts.push_back(BuildRadixCompositeWrapperAst(types, keys, true));
     if (materializeType) {
-        AddSortMaterializeLibrary(programStmts, "BuildRadixSortNullableProgramAst");
-        programStmts.push_back(BuildSortMaterializeWrapperAst(*materializeType));
-        programStmts.push_back(BuildSortRunWrapperAst("qdb_sort_run", keys, true, "sort_materialize_row_ids"));
+        AddSortMaterializeLibrary(types, programStmts, "BuildRadixSortNullableProgramAst");
+        programStmts.push_back(BuildSortMaterializeWrapperAst(types, *materializeType));
+        programStmts.push_back(BuildSortRunWrapperAst(types, "qdb_sort_run", keys, true, "sort_materialize_row_ids"));
     }
-    return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
+    return NQumir::MakeIntrusive<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
 }
 
 NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
+    NQumir::NAst::TTypeFactory& types,
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType* materializeType)
 {
@@ -1707,7 +1739,7 @@ NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
     }
     std::vector<TExprPtr> programStmts;
     auto addLibrary = [&](const std::string& name, bool skipUse) {
-        auto library = NKernel::ParseFunctionLibrary(NKernel::ReadSortKernel(name));
+        auto library = NKernel::ParseFunctionLibrary(types, NKernel::ReadSortKernel(name));
         if (!library) {
             throw NQumir::TError(
                 "BuildTopSortMergeProgramAst: " + library.error().ToString());
@@ -1722,16 +1754,17 @@ NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
     addLibrary("radix.oz", false);
     addLibrary("sort_rowids.oz", true);
     if (materializeType) {
-        AddSortMaterializeLibrary(programStmts, "BuildTopSortMergeProgramAst");
-        programStmts.push_back(BuildSortMaterializeWrapperAst(*materializeType));
+        AddSortMaterializeLibrary(types, programStmts, "BuildTopSortMergeProgramAst");
+        programStmts.push_back(BuildSortMaterializeWrapperAst(types, *materializeType));
     }
-    programStmts.push_back(BuildTopSortTempBeforeStateAst(keys));
-    programStmts.push_back(BuildTopSortMergePicksAst());
-    programStmts.push_back(BuildTopSortUpdateAst(keys, materializeType != nullptr));
-    return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
+    programStmts.push_back(BuildTopSortTempBeforeStateAst(types, keys));
+    programStmts.push_back(BuildTopSortMergePicksAst(types));
+    programStmts.push_back(BuildTopSortUpdateAst(types, keys, materializeType != nullptr));
+    return NQumir::MakeIntrusive<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
 }
 
 TRuntimeFilterKernel TKernelCompiler::CompileRuntimeFilter() {
+    auto& types = *Types_;
     using namespace NQumir::NAst;
     // Type declarations go first, as in a source file.
     std::vector<TExprPtr> programStmts;
@@ -1741,7 +1774,7 @@ TRuntimeFilterKernel TKernelCompiler::CompileRuntimeFilter() {
         NKernel::ReadAggregationKernel("swiss_group.oz"),
         NKernel::ReadJoinKernel("runtime_filter.oz")})
     {
-        auto library = NKernel::ParseFunctionLibrary(source);
+        auto library = NKernel::ParseFunctionLibrary(types, source);
         if (!library) {
             throw NQumir::TError("CompileRuntimeFilter: " + library.error().ToString());
         }
@@ -1752,7 +1785,7 @@ TRuntimeFilterKernel TKernelCompiler::CompileRuntimeFilter() {
     }
     programStmts.insert(programStmts.end(),
         std::make_move_iterator(functions.begin()), std::make_move_iterator(functions.end()));
-    auto ast = std::make_shared<TBlockExpr>(
+    auto ast = NQumir::MakeIntrusive<TBlockExpr>(
         NQumir::TLocation{}, std::move(programStmts));
     PrintKernelAst(Diagnostics_, "runtime-filter", ast);
     auto kernel = EmitKernel("runtime-filter",
@@ -1766,6 +1799,7 @@ TRuntimeFilterKernel TKernelCompiler::CompileRuntimeFilter() {
 TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
     const NKernel::TOperatorKernelSpec& spec)
 {
+    auto& types = *Types_;
     using namespace NQumir::NAst;
 
     if (spec.InputSchemas.empty() || spec.Expressions.empty()) {
@@ -1783,12 +1817,12 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
         fieldIndices[fields[i].first] = i;
     }
 
-    auto columnType = QumirDbNamedType("TColumn");
-    auto rowSetType = QumirDbNamedType("TRowSet");
-    auto stringViewType = QumirDbNamedType("StringView");
+    auto columnType = QumirDbNamedType(types, "TColumn");
+    auto rowSetType = QumirDbNamedType(types, "TRowSet");
+    auto stringViewType = QumirDbNamedType(types, "StringView");
 
     auto kernelAst = NKernel::BuildFilterProgramAst(
-        ClonePredicate(predicate), *inputType.Cast(), fieldIndices, columnType,
+        types, ClonePredicate(predicate), *inputType.Cast(), fieldIndices, columnType,
         rowSetType, stringViewType);
     if (!kernelAst) {
         throw NQumir::TError(
@@ -1824,6 +1858,7 @@ void TKernelCompiler::TFilterDispatch::operator()(
 TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
     const NKernel::TOperatorKernelSpec& spec)
 {
+    auto& types = *Types_;
     using namespace NQumir::NAst;
 
     if (spec.InputSchemas.empty()) {
@@ -1849,9 +1884,9 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
         fieldIndices[fields[i].first] = i;
     }
 
-    auto columnType = QumirDbNamedType("TColumn");
-    auto rowSetType = QumirDbNamedType("TRowSet");
-    auto stringViewType = QumirDbNamedType("StringView");
+    auto columnType = QumirDbNamedType(types, "TColumn");
+    auto rowSetType = QumirDbNamedType(types, "TRowSet");
+    auto stringViewType = QumirDbNamedType(types, "StringView");
 
     std::vector<NQumir::NAst::TExprPtr> cloned;
     cloned.reserve(spec.Expressions.size());
@@ -1860,7 +1895,7 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
     }
 
     auto kernelAst = NKernel::GenProjectKernelAst(
-        std::move(cloned), computedTypes, *inputType.Cast(), fieldIndices,
+        types, std::move(cloned), computedTypes, *inputType.Cast(), fieldIndices,
         columnType, rowSetType, stringViewType);
 
     if (Diagnostics_) {
@@ -1900,6 +1935,7 @@ TKernelCompiler::TSortRadixCompositeDispatch TKernelCompiler::CompileRadixSortCo
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType* materializeType)
 {
+    auto& types = *Types_;
     using namespace NQumir::NAst;
 
     if (keys.empty()) {
@@ -1909,7 +1945,7 @@ TKernelCompiler::TSortRadixCompositeDispatch TKernelCompiler::CompileRadixSortCo
         throw NQumir::TError("CompileRadixSortComposite: materialize schema is required");
     }
 
-    auto program = BuildRadixSortProgramAst(keys, materializeType);
+    auto program = BuildRadixSortProgramAst(types, keys, materializeType);
     PrintKernelAst(Diagnostics_, "sort.run.fused", program);
 
     auto kernel = EmitKernel(
@@ -1931,13 +1967,14 @@ TKernelCompiler::CompileWindow(
     const std::vector<TSortRadixKeyInput>& orderKeys,
     const std::vector<TWindowFuncInput>& funcs)
 {
+    auto& types = *Types_;
     using namespace NQumir::NAst;
     if (keys.empty()) {
         throw NQumir::TError("CompileWindow: empty key list");
     }
 
     auto program = BuildWindowProgramAst(
-        keys, inputType, partitionKeys, orderKeys, funcs);
+        types, keys, inputType, partitionKeys, orderKeys, funcs);
     PrintKernelAst(Diagnostics_, "window.run.fused", program);
 
     auto kernel = EmitKernel(
@@ -1956,12 +1993,13 @@ TKernelCompiler::CompileRadixSortCompositeNullable(
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType* materializeType)
 {
+    auto& types = *Types_;
     using namespace NQumir::NAst;
     if (!materializeType) {
         throw NQumir::TError("CompileRadixSortCompositeNullable: materialize schema is required");
     }
 
-    auto program = BuildRadixSortNullableProgramAst(keys, materializeType);
+    auto program = BuildRadixSortNullableProgramAst(types, keys, materializeType);
     PrintKernelAst(Diagnostics_, "sort.run.nullable.fused", program);
 
     auto kernel = EmitKernel(
@@ -1979,12 +2017,13 @@ TKernelCompiler::TTopSortDispatch TKernelCompiler::CompileTopSort(
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType* materializeType)
 {
+    auto& types = *Types_;
     using namespace NQumir::NAst;
 
     if (!materializeType) {
         throw NQumir::TError("CompileTopSort: materialize schema is required");
     }
-    auto program = BuildTopSortMergeProgramAst(keys, materializeType);
+    auto program = BuildTopSortMergeProgramAst(types, keys, materializeType);
     PrintKernelAst(Diagnostics_, "top-sort.fused", program);
 
     auto kernel = EmitKernel(
@@ -2001,7 +2040,8 @@ TKernelCompiler::TTopSortDispatch TKernelCompiler::CompileTopSort(
 TKernelCompiler::THeapTopKDispatch TKernelCompiler::CompileHeapTopK(
     const std::vector<TSortRadixKeyInput>& keys)
 {
-    auto program = BuildHeapTopKProgramAst(keys);
+    auto& types = *Types_;
+    auto program = BuildHeapTopKProgramAst(types, keys);
     PrintKernelAst(Diagnostics_, "top-k.heap", program);
 
     auto kernel = EmitKernel(
@@ -2067,6 +2107,7 @@ int64_t TKernelCompiler::THeapTopKDispatch::operator()(
 TAggregateKernels TKernelCompiler::CompileAggregate(
     const NKernel::TOperatorKernelSpec& spec)
 {
+    auto& types = *Types_;
     if (spec.Kind != NKernel::EOperatorKernelKind::UnaryBlocking ||
         spec.OperatorName != "aggregate") {
         throw NQumir::TError("CompileAggregate: expected aggregate kernel spec");
@@ -2075,8 +2116,8 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
         throw NQumir::TError("CompileAggregate: expected one input schema");
     }
 
-    const auto* inputTypePtr = static_cast<NQumir::NAst::TStructType*>(
-        spec.InputSchemas[0].get());
+    const auto* inputTypePtr = static_cast<const NQumir::NAst::TStructType*>(
+        spec.InputSchemas[0]);
     if (!inputTypePtr) {
         throw NQumir::TError("CompileAggregate: input schema must be a struct");
     }
@@ -2124,12 +2165,12 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
         }
         return type;
     };
-    const auto keyDescriptor = NKernel::BuildAggregateKeyDescriptor(inputType, groupKeys);
+    const auto keyDescriptor = NKernel::BuildAggregateKeyDescriptor(types, inputType, groupKeys);
     for (const auto& field : keyDescriptor.Fields) {
         const auto valueType = UnwrapNullableType(field.Type);
-        const auto type = PhysicalValueType(valueType);
+        const auto type = PhysicalValueType(types, valueType);
         if (!IsBinIntStorageType(valueType) &&
-            !TMaybeType<TIntegerType>(type) && !TMaybeType<TFloatType>(type) &&
+            !MaybeIntegerType(type) && !TMaybeType<TFloatType>(type) &&
             !TMaybeType<TStringType>(type) && !TMaybeType<TBoolType>(type)) {
             throw NQumir::TError(
                 "CompileAggregate: group key column '" + field.ColumnName +
@@ -2171,9 +2212,9 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
             // SUM over a decimal stored in i64 keeps an i128 state (DECIMAL(38, s)).
             const bool isBinInt = IsBinIntStorageType(valueType) || IsDecimal128Type(valueType) ||
                 (IsDecimalType(valueType) && agg.Func == "sum");
-            const auto unwrapped = isBinInt ? valueType : PhysicalValueType(valueType);
+            const auto unwrapped = isBinInt ? valueType : PhysicalValueType(types, valueType);
             const bool isFloat = static_cast<bool>(TMaybeType<TFloatType>(unwrapped));
-            const bool isInteger = static_cast<bool>(TMaybeType<TIntegerType>(unwrapped));
+            const bool isInteger = static_cast<bool>(MaybeIntegerType(unwrapped));
             const bool isString = static_cast<bool>(TMaybeType<TStringType>(unwrapped));
             const bool isBool = static_cast<bool>(TMaybeType<TBoolType>(unwrapped));
             if ((isString || isBool) && agg.Func == "sum") {
@@ -2200,15 +2241,15 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     }
     const auto layout = NKernel::BuildAggReducerLayout(funcs, args);
 
-    auto columnType = QumirDbNamedType("TColumn");
-    auto rowSetType = QumirDbNamedType("TRowSet");
-    auto hashTableType = QumirDbNamedType("HashTable");
+    auto columnType = QumirDbNamedType(types, "TColumn");
+    auto rowSetType = QumirDbNamedType(types, "TRowSet");
+    auto hashTableType = QumirDbNamedType(types, "HashTable");
 
     const auto rows = spec.AggregateRowLayout
         ? NKernel::BuildAggRowLayout(keyDescriptor, layout, !spec.EmptyInputGroups.empty())
         : std::nullopt;
     auto program = NKernel::BuildGenericAggregateFusedProgramAst(
-        inputType, keyDescriptor, layout,
+        types, inputType, keyDescriptor, layout,
         columnType, rowSetType, hashTableType, spec.HasPrecomputedHash, spec.EmptyInputGroups,
         rows);
     if (!program) {
@@ -2231,7 +2272,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     }
     kernels.OutputKeys.reserve(keyDescriptor.Fields.size());
     for (const auto& field : keyDescriptor.Fields) {
-        const auto logicalType = UnwrapNamedType(field.Type);
+        const auto logicalType = UnwrapNamedValueType(field.Type);
         kernels.OutputKeys.push_back({
             .Kind = TMaybeType<TStringType>(logicalType)
                 ? EAggregateOutputKeyKind::String
@@ -2297,6 +2338,7 @@ TAggregateKernels BindAggregateKernels(
 TJoinKernels TKernelCompiler::CompileJoin(
     const NKernel::TOperatorKernelSpec& spec)
 {
+    auto& types = *Types_;
     using namespace NQumir::NAst;
 
     const auto [leftType, rightType] = JoinInputTypes(spec, "CompileJoin");
@@ -2308,7 +2350,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
         throw NQumir::TError(
             "CompileJoin: residual filter is not yet supported for this join type");
     }
-    const auto residual = PrepareJoinResidual(spec, ExternalCatalog_.get(), "CompileJoin");
+    const auto residual = PrepareJoinResidual(types, spec, Annotation_, "CompileJoin");
 
     if (Diagnostics_) {
         *Diagnostics_ << "\n========== KERNEL SPEC ==========\n";
@@ -2325,6 +2367,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
 TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
     const NKernel::TOperatorKernelSpec& spec)
 {
+    auto& types = *Types_;
     using namespace NQumir::NAst;
 
     if (spec.Kind != NKernel::EOperatorKernelKind::Binary ||
@@ -2347,24 +2390,24 @@ TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
         *Diagnostics_ << "=================================\n";
     }
 
-    auto columnType = QumirDbNamedType("TColumn");
-    auto rowSetType = QumirDbNamedType("TRowSet");
-    auto pairBufferType = QumirDbNamedType("PairBuffer");
-    auto stringViewType = QumirDbNamedType("StringView");
+    auto columnType = QumirDbNamedType(types, "TColumn");
+    auto rowSetType = QumirDbNamedType(types, "TRowSet");
+    auto pairBufferType = QumirDbNamedType(types, "PairBuffer");
+    auto stringViewType = QumirDbNamedType(types, "StringView");
     const auto residual = PrepareJoinResidual(
-        spec, ExternalCatalog_.get(), "CompileCrossJoin");
+        types, spec, Annotation_, "CompileCrossJoin");
     const bool includeRight =
         spec.JoinType != EJoinType::LeftSemi && spec.JoinType != EJoinType::LeftAnti;
 
     auto buildProgram = [&]() -> std::vector<TExprPtr> {
-        auto library = NKernel::BuildCrossJoinKernelLibrary();
+        auto library = NKernel::BuildCrossJoinKernelLibrary(types);
         if (!library) {
             throw NQumir::TError(
                 "CompileCrossJoin: " + library.error().ToString());
         }
         if (residual.Predicate) {
             InjectJoinResidualFilter(
-                *library, residual.Predicate, *residual.Inner(), residual.LeftFieldCount,
+                types, *library, residual.Predicate, *residual.Inner(), residual.LeftFieldCount,
                 columnType, rowSetType, stringViewType);
         }
 
@@ -2376,7 +2419,7 @@ TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
         const bool hasStringOutput = [&] {
             auto isString = [](const auto& field) {
                 return static_cast<bool>(TMaybeType<TStringType>(
-                    UnwrapNamedType(UnwrapNullableType(field.second))));
+                    UnwrapNamedValueType(UnwrapNullableType(field.second))));
             };
             return std::any_of(
                 leftType.Cast()->Fields.begin(), leftType.Cast()->Fields.end(), isString) ||
@@ -2385,7 +2428,7 @@ TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
         }();
         if (hasStringOutput) {
             auto stringOps = NKernel::ParseFunctionLibrary(
-                NKernel::ReadAggregationKernel("string_ops.oz"));
+                types, NKernel::ReadAggregationKernel("string_ops.oz"));
             if (!stringOps) {
                 throw NQumir::TError(
                     "CompileCrossJoin: string_ops.oz: " +
@@ -2397,9 +2440,9 @@ TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
         }
 
         program.push_back(NKernel::GenCrossJoinDispatchAst(
-            spec.JoinType, rowSetType, pairBufferType));
+            types, spec.JoinType, rowSetType, pairBufferType));
         program.push_back(NKernel::GenJoinMaterializeAst(
-            *leftType.Cast(), *rightType.Cast(),
+            types, *leftType.Cast(), *rightType.Cast(),
             includeRight
                 ? NKernel::EJoinOutputColumns::LeftRight
                 : NKernel::EJoinOutputColumns::Left,
@@ -2408,7 +2451,7 @@ TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
     };
 
     std::vector<std::string> entries = {"xj_dispatch", "jt_materialize"};
-    auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, buildProgram());
+    auto program = NQumir::MakeIntrusive<TBlockExpr>(NQumir::TLocation{}, buildProgram());
     PrintKernelAst(Diagnostics_, "cross-join", program);
 
     auto kernel = EmitKernel("cross-join", entries, std::move(program));
@@ -2461,6 +2504,7 @@ TCrossJoinKernels BindCrossJoinKernels(
 TJoinHashKernels TKernelCompiler::CompileJoinHash(
     const NKernel::TOperatorKernelSpec& spec)
 {
+    auto& types = *Types_;
     using namespace NQumir::NAst;
 
     if (spec.Kind != NKernel::EOperatorKernelKind::Binary ||
@@ -2483,13 +2527,13 @@ TJoinHashKernels TKernelCompiler::CompileJoinHash(
         keys.emplace_back(key.Left.Name, key.Right.Name);
     }
     const auto keyDesc = NKernel::BuildJoinKeyDescriptor(
-        *leftType.Cast(),
+        types, *leftType.Cast(),
         *rightType.Cast(),
         keys);
 
-    auto columnType = QumirDbNamedType("TColumn");
-    auto rowSetType = QumirDbNamedType("TRowSet");
-    auto stringViewType = QumirDbNamedType("StringView");
+    auto columnType = QumirDbNamedType(types, "TColumn");
+    auto rowSetType = QumirDbNamedType(types, "TRowSet");
+    auto stringViewType = QumirDbNamedType(types, "StringView");
 
     auto buildProgram = [&]() -> std::vector<TExprPtr> {
         std::vector<TExprPtr> program;
@@ -2500,26 +2544,26 @@ TJoinHashKernels TKernelCompiler::CompileJoinHash(
         // qdb_string_hash from string_ops.oz.
         if (keyDesc.HasDistinctLookupType()) {
             auto stringOps = NKernel::ParseFunctionLibrary(
-                NKernel::ReadAggregationKernel("string_ops.oz"));
+                types, NKernel::ReadAggregationKernel("string_ops.oz"));
             if (!stringOps) {
                 throw NQumir::TError(
                     "CompileJoinHash: string_ops.oz: " + stringOps.error().ToString());
             }
             for (auto& f : *stringOps) program.push_back(std::move(f));
         }
-        for (auto& f : NKernel::GenJoinKeyOpsFunDecls(keyDesc)) {
+        for (auto& f : NKernel::GenJoinKeyOpsFunDecls(types, keyDesc)) {
             program.push_back(std::move(f));
         }
         program.push_back(NKernel::GenJoinHashBatchAst(
-            keyDesc, "jt_hash_batch", columnType, rowSetType, stringViewType));
+            types, keyDesc, "jt_hash_batch", columnType, rowSetType, stringViewType));
         program.push_back(NKernel::GenJoinHashEntrypointAst(
-            keyDesc, "jt_hash_left", rowSetType));
+            types, keyDesc, "jt_hash_left", rowSetType));
         program.push_back(NKernel::GenJoinHashEntrypointAst(
-            keyDesc, "jt_hash_right", rowSetType));
+            types, keyDesc, "jt_hash_right", rowSetType));
         return program;
     };
 
-    auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, buildProgram());
+    auto program = NQumir::MakeIntrusive<TBlockExpr>(NQumir::TLocation{}, buildProgram());
     PrintKernelAst(Diagnostics_, "join_hash", program);
 
     auto kernel = EmitKernel(
@@ -2564,13 +2608,14 @@ TKernelCompiler::TAggregateHashDispatch TKernelCompiler::CompileAggregateHash(
     const NQumir::NAst::TStructType& inputType,
     const std::vector<std::string>& groupKeys)
 {
+    auto& types = *Types_;
     using namespace NQumir::NAst;
 
-    const auto keyDesc = NKernel::BuildAggregateKeyDescriptor(inputType, groupKeys);
+    const auto keyDesc = NKernel::BuildAggregateKeyDescriptor(types, inputType, groupKeys);
 
-    auto columnType = QumirDbNamedType("TColumn");
-    auto rowSetType = QumirDbNamedType("TRowSet");
-    auto stringViewType = QumirDbNamedType("StringView");
+    auto columnType = QumirDbNamedType(types, "TColumn");
+    auto rowSetType = QumirDbNamedType(types, "TRowSet");
+    auto stringViewType = QumirDbNamedType(types, "StringView");
 
     auto buildProgram = [&]() -> std::vector<TExprPtr> {
         std::vector<TExprPtr> program;
@@ -2579,24 +2624,24 @@ TKernelCompiler::TAggregateHashDispatch TKernelCompiler::CompileAggregateHash(
         }
         if (keyDesc.HasDistinctLookupType()) {
             auto stringOps = NKernel::ParseFunctionLibrary(
-                NKernel::ReadAggregationKernel("string_ops.oz"));
+                types, NKernel::ReadAggregationKernel("string_ops.oz"));
             if (!stringOps) {
                 throw NQumir::TError(
                     "CompileAggregateHash: string_ops.oz: " + stringOps.error().ToString());
             }
             for (auto& f : *stringOps) program.push_back(std::move(f));
         }
-        for (auto& f : NKernel::GenKeyOperationFunDecls(keyDesc)) {
+        for (auto& f : NKernel::GenKeyOperationFunDecls(types, keyDesc)) {
             program.push_back(std::move(f));
         }
         program.push_back(NKernel::GenKeyHashBatchAst(
-            keyDesc, "agg_hash_batch", columnType, rowSetType, stringViewType));
+            types, keyDesc, "agg_hash_batch", columnType, rowSetType, stringViewType));
         program.push_back(NKernel::GenKeyHashEntrypointAst(
-            keyDesc, "agg_hash", "agg_hash_batch", rowSetType));
+            types, keyDesc, "agg_hash", "agg_hash_batch", rowSetType));
         return program;
     };
 
-    auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, buildProgram());
+    auto program = NQumir::MakeIntrusive<TBlockExpr>(NQumir::TLocation{}, buildProgram());
     PrintKernelAst(Diagnostics_, "aggregate_hash", program);
 
     auto kernel = EmitKernel("aggregate_hash", {"agg_hash"}, std::move(program));
@@ -2634,6 +2679,7 @@ TRowJoinKernels TKernelCompiler::CompileRowJoin(
     const NKernel::TOperatorKernelSpec& spec,
     bool buildIsLeft)
 {
+    auto& types = *Types_;
     using namespace NQumir::NAst;
 
     const auto [leftType, rightType] = JoinInputTypes(spec, "CompileRowJoin");
@@ -2652,11 +2698,11 @@ TRowJoinKernels TKernelCompiler::CompileRowJoin(
             "equi-joins without a residual");
     }
 
-    const auto keyDesc = JoinKeyDescriptorOf(*leftType, *rightType, JoinKeysOf(spec));
+    const auto keyDesc = JoinKeyDescriptorOf(types, *leftType, *rightType, JoinKeysOf(spec));
     const auto& buildType = buildIsLeft
         ? *leftType
         : *rightType;
-    const auto layout = NKernel::BuildRowJoinLayout(buildType, keyDesc, marksBuild);
+    const auto layout = NKernel::BuildRowJoinLayout(types, buildType, keyDesc, marksBuild);
     const bool keepsNullKeyRows = marksBuild && spec.JoinType == EJoinType::LeftAnti;
 
     TRowJoinKernelMeta kernels;
@@ -2673,24 +2719,24 @@ TRowJoinKernels TKernelCompiler::CompileRowJoin(
         *Diagnostics_ << "=================================\n";
     }
 
-    const NKernel::TRowJoinGenTypes types{
-        .Column = QumirDbNamedType("TColumn"),
-        .RowSet = QumirDbNamedType("TRowSet"),
-        .PairBuffer = QumirDbNamedType("PairBuffer"),
-        .StringView = QumirDbNamedType("StringView"),
-        .Arena = QumirDbNamedType("RowArena"),
-        .Table = QumirDbNamedType("RowTable"),
-        .Scratch = QumirDbNamedType("RowScratch"),
+    const NKernel::TRowJoinGenTypes joinTypes{
+        .Column = QumirDbNamedType(types, "TColumn"),
+        .RowSet = QumirDbNamedType(types, "TRowSet"),
+        .PairBuffer = QumirDbNamedType(types, "PairBuffer"),
+        .StringView = QumirDbNamedType(types, "StringView"),
+        .Arena = QumirDbNamedType(types, "RowArena"),
+        .Table = QumirDbNamedType(types, "RowTable"),
+        .Scratch = QumirDbNamedType(types, "RowScratch"),
     };
     auto buildProgram = [&]() -> std::vector<TExprPtr> {
-        auto library = NKernel::BuildRowJoinKernelLibrary();
+        auto library = NKernel::BuildRowJoinKernelLibrary(types);
         if (!library) {
             throw NQumir::TError("CompileRowJoin: " + library.error().ToString());
         }
         const bool hasString = [&] {
             auto isString = [](const auto& field) {
                 return static_cast<bool>(TMaybeType<TStringType>(
-                    UnwrapNamedType(UnwrapNullableType(field.second))));
+                    UnwrapNamedValueType(UnwrapNullableType(field.second))));
             };
             return std::ranges::any_of(leftType->Fields, isString) ||
                 std::ranges::any_of(rightType->Fields, isString);
@@ -2699,32 +2745,32 @@ TRowJoinKernels TKernelCompiler::CompileRowJoin(
         // Same order as CompileJoin: the key declarations, then the library
         // and the generated functions.
         std::vector<TExprPtr> program;
-        AppendJoinKeyDecls(program, keyDesc, hasString, "CompileRowJoin");
+        AppendJoinKeyDecls(types, program, keyDesc, hasString, "CompileRowJoin");
         for (auto& f : *library) {
             program.push_back(std::move(f));
         }
         program.push_back(NKernel::GenRowJoinAppendAst(
-            keyDesc, layout, "jr_append_batch", types, spec.HasPrecomputedHash,
+            types, keyDesc, layout, "jr_append_batch", joinTypes, spec.HasPrecomputedHash,
             /*nullKeys=*/false));
         if (keepsNullKeyRows) {
             program.push_back(NKernel::GenRowJoinAppendAst(
-                keyDesc, layout, "jr_append_null_keys", types, spec.HasPrecomputedHash,
+                types, keyDesc, layout, "jr_append_null_keys", joinTypes, spec.HasPrecomputedHash,
                 /*nullKeys=*/true));
         }
         program.push_back(NKernel::GenRowJoinProbeAst(
-            keyDesc, layout, /*probeIsLeft=*/!buildIsLeft,
-            /*emitUnmatched=*/streamsPreserved, "jr_probe_batch", types,
+            types, keyDesc, layout, /*probeIsLeft=*/!buildIsLeft,
+            /*emitUnmatched=*/streamsPreserved, "jr_probe_batch", joinTypes,
             spec.HasPrecomputedHash));
-        program.push_back(NKernel::GenRowJoinDispatchAst(keyDesc, layout, types, spec.JoinType));
+        program.push_back(NKernel::GenRowJoinDispatchAst(types, keyDesc, layout, joinTypes, spec.JoinType));
         program.push_back(NKernel::GenRowJoinMaterializeAst(
-            *leftType, *rightType, buildIsLeft,
+            types, *leftType, *rightType, buildIsLeft,
             marksBuild ? NKernel::EJoinOutputColumns::Left : NKernel::EJoinOutputColumns::LeftRight,
-            layout, types));
+            layout, joinTypes));
         return program;
     };
 
     std::vector<std::string> entries = {"jr_dispatch", "jr_materialize"};
-    auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, buildProgram());
+    auto program = NQumir::MakeIntrusive<TBlockExpr>(NQumir::TLocation{}, buildProgram());
     PrintKernelAst(Diagnostics_, "row-join", program);
     auto kernel = EmitKernel("row-join", entries, std::move(program));
     FinishKernelDiagnostics(Diagnostics_);
@@ -2791,6 +2837,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
     size_t leftFieldCount,
     bool hasPrecomputedHash)
 {
+    auto& types = *Types_;
     using namespace NQumir::NAst;
 
     const bool isSemiAnti = (type == EJoinType::LeftSemi || type == EJoinType::LeftAnti);
@@ -2803,7 +2850,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
     }
 
     // Unified key descriptor (reuses the aggregation key machinery).
-    auto keyDesc = JoinKeyDescriptorOf(leftType, rightType, keys);
+    auto keyDesc = JoinKeyDescriptorOf(types, leftType, rightType, keys);
     if (isMark) {
         // IN compares with SQL equality.
         if (std::ranges::any_of(keys, [](const auto& key) { return key.NullsEqual; })) {
@@ -2827,22 +2874,22 @@ TJoinKernels TKernelCompiler::CompileJoin(
         kernels.RightKeyColumns.push_back(field.RightColumnIndex);
     }
 
-    auto columnType = QumirDbNamedType("TColumn");
-    auto rowSetType = QumirDbNamedType("TRowSet");
-    auto hashTableType = QumirDbNamedType("HashTable");
-    auto pairBufferType = QumirDbNamedType("PairBuffer");
-    auto stringViewType = QumirDbNamedType("StringView");
+    auto columnType = QumirDbNamedType(types, "TColumn");
+    auto rowSetType = QumirDbNamedType(types, "TRowSet");
+    auto hashTableType = QumirDbNamedType(types, "HashTable");
+    auto pairBufferType = QumirDbNamedType(types, "PairBuffer");
+    auto stringViewType = QumirDbNamedType(types, "StringView");
 
     // Fresh program per entry (CompileKernelAst consumes the AST): key type
     // decls + key-ops overloads + shared library + generated process functions.
     auto buildProgram = [&]() -> std::vector<TExprPtr> {
-        auto library = NKernel::BuildJoinKernelLibrary();
+        auto library = NKernel::BuildJoinKernelLibrary(types);
         if (!library) {
             throw NQumir::TError("CompileJoin: " + library.error().ToString());
         }
         if (residualPredicate && innerType) {
             InjectJoinResidualFilter(
-                *library, residualPredicate, *innerType, leftFieldCount,
+                types, *library, residualPredicate, *innerType, leftFieldCount,
                 columnType, rowSetType, stringViewType);
         }
 
@@ -2855,7 +2902,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
         const bool hasStringOutput = [&] {
             auto isString = [](const auto& field) {
                 return static_cast<bool>(TMaybeType<TStringType>(
-                    UnwrapNamedType(UnwrapNullableType(field.second))));
+                    UnwrapNamedValueType(UnwrapNullableType(field.second))));
             };
             return std::any_of(leftType.Fields.begin(), leftType.Fields.end(), isString) ||
                 (includeRight && std::any_of(
@@ -2863,11 +2910,11 @@ TJoinKernels TKernelCompiler::CompileJoin(
         }();
 
         std::vector<TExprPtr> program;
-        AppendJoinKeyDecls(program, keyDesc, hasStringOutput, "CompileJoin");
-        for (auto& f : NKernel::GenJoinKeyOwnershipFunDecls(keyDesc)) {
+        AppendJoinKeyDecls(types, program, keyDesc, hasStringOutput, "CompileJoin");
+        for (auto& f : NKernel::GenJoinKeyOwnershipFunDecls(types, keyDesc)) {
             program.push_back(std::move(f));
         }
-        auto dualKeyLibrary = NKernel::BuildJoinDualKeyLibrary();
+        auto dualKeyLibrary = NKernel::BuildJoinDualKeyLibrary(types);
         if (!dualKeyLibrary) {
             throw NQumir::TError("CompileJoin: " + dualKeyLibrary.error().ToString());
         }
@@ -2877,64 +2924,64 @@ TJoinKernels TKernelCompiler::CompileJoin(
         // ChooseJoinBuildSide selects it. FULL streams neither side, so its
         // symmetric probes mark the rows a residual accepted on both sides.
         const bool markBoth = type == EJoinType::Full && residualPredicate;
-        program.push_back(NKernel::GenJoinProcessAst(keyDesc, /*isLeft=*/true,
+        program.push_back(NKernel::GenJoinProcessAst(types, keyDesc, /*isLeft=*/true,
             "jt_process_left", columnType, rowSetType, hashTableType, pairBufferType,
             stringViewType, hasPrecomputedHash, markBoth));
-        program.push_back(NKernel::GenJoinProcessAst(keyDesc, /*isLeft=*/false,
+        program.push_back(NKernel::GenJoinProcessAst(types, keyDesc, /*isLeft=*/false,
             "jt_process_right", columnType, rowSetType, hashTableType, pairBufferType,
             stringViewType, hasPrecomputedHash, markBoth));
         // A streaming outer join builds its preserved side, so the stream of
         // the other side marks the build rows it matches.
-        program.push_back(NKernel::GenJoinProbeAst(keyDesc, /*isLeft=*/true,
+        program.push_back(NKernel::GenJoinProbeAst(types, keyDesc, /*isLeft=*/true,
             "jt_probe_left_stream", columnType, rowSetType, hashTableType, pairBufferType,
             stringViewType, hasPrecomputedHash, /*markMatched=*/type == EJoinType::Right));
-        program.push_back(NKernel::GenJoinProbeAst(keyDesc, /*isLeft=*/false,
+        program.push_back(NKernel::GenJoinProbeAst(types, keyDesc, /*isLeft=*/false,
             "jt_probe_right_stream", columnType, rowSetType, hashTableType, pairBufferType,
             stringViewType, hasPrecomputedHash, /*markMatched=*/type == EJoinType::Left));
         if (isSemiAnti) {
             program.push_back(NKernel::GenJoinInsertRowsOnlyAst(
-                keyDesc, /*isLeft=*/true, "jt_insert_left_only",
+                types, keyDesc, /*isLeft=*/true, "jt_insert_left_only",
                 columnType, rowSetType, hashTableType, pairBufferType,
                 stringViewType, hasPrecomputedHash));
             program.push_back(NKernel::GenJoinProbeMarkAst(
-                keyDesc, /*keyDecides=*/!residualPredicate, "jt_probe_right_mark",
+                types, keyDesc, /*keyDecides=*/!residualPredicate, "jt_probe_right_mark",
                 columnType, rowSetType, hashTableType, pairBufferType,
                 stringViewType, hasPrecomputedHash));
         }
         if (isSemiAnti && !residualPredicate) {
             program.push_back(NKernel::GenJoinInsertKeyOnlyAst(
-                keyDesc, "jt_insert_key_only",
+                types, keyDesc, "jt_insert_key_only",
                 columnType, rowSetType, hashTableType, pairBufferType,
                 stringViewType));
             program.push_back(NKernel::GenJoinFinalizeSemiAntiAst(
-                keyDesc, /*isAnti=*/type == EJoinType::LeftAnti,
+                types, keyDesc, /*isAnti=*/type == EJoinType::LeftAnti,
                 "jt_finalize_semi_anti", hashTableType, pairBufferType));
             program.push_back(NKernel::GenJoinProbeSemiAst(
-                keyDesc, /*isAnti=*/type == EJoinType::LeftAnti,
+                types, keyDesc, /*isAnti=*/type == EJoinType::LeftAnti,
                 "jt_probe_left_semi", columnType, rowSetType, hashTableType,
                 pairBufferType, stringViewType, hasPrecomputedHash));
         }
         if (isOuter) {
             // jt_finalize_outer: same logic as ANTI (emit own rows with no opp match)
             program.push_back(NKernel::GenJoinFinalizeSemiAntiAst(
-                keyDesc, /*isAnti=*/true,
+                types, keyDesc, /*isAnti=*/true,
                 "jt_finalize_outer", hashTableType, pairBufferType));
         }
         if (isMark) {
             program.push_back(NKernel::GenJoinInsertRowsOnlyAst(
-                keyDesc, /*isLeft=*/true, "jt_insert_left_only",
+                types, keyDesc, /*isLeft=*/true, "jt_insert_left_only",
                 columnType, rowSetType, hashTableType, pairBufferType,
                 stringViewType, hasPrecomputedHash));
             program.push_back(NKernel::GenJoinInsertKeyOnlyAst(
-                keyDesc, "jt_insert_key_only",
+                types, keyDesc, "jt_insert_key_only",
                 columnType, rowSetType, hashTableType, pairBufferType,
                 stringViewType));
             program.push_back(NKernel::GenMarkJoinProbeAst(
-                keyDesc, "mj_probe_left", columnType, rowSetType, hashTableType,
+                types, keyDesc, "mj_probe_left", columnType, rowSetType, hashTableType,
                 pairBufferType, stringViewType, hasPrecomputedHash));
         }
         program.push_back(NKernel::GenJoinDispatchAst(
-            keyDesc, type, static_cast<bool>(residualPredicate),
+            types, keyDesc, type, static_cast<bool>(residualPredicate),
             rowSetType, hashTableType, pairBufferType));
         // Output materializer: semi/anti joins emit only the left columns, a
         // mark join the left columns and its marker.
@@ -2945,14 +2992,14 @@ TJoinKernels TKernelCompiler::CompileJoin(
             output = NKernel::EJoinOutputColumns::LeftMarker;
         }
         program.push_back(NKernel::GenJoinMaterializeAst(
-            leftType, rightType, output,
+            types, leftType, rightType, output,
             columnType, rowSetType, pairBufferType, stringViewType));
         return program;
     };
 
     std::vector<std::string> entries = {"jt_dispatch", "jt_materialize"};
 
-    auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, buildProgram());
+    auto program = NQumir::MakeIntrusive<TBlockExpr>(NQumir::TLocation{}, buildProgram());
     PrintKernelAst(Diagnostics_, "join", program);
 
     auto kernel = EmitKernel("join", entries, std::move(program));

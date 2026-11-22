@@ -15,7 +15,7 @@ class TUnionAllOperator : public IOperator {
 public:
     static constexpr const char* OpId = "union-all";
 
-    explicit TUnionAllOperator(std::vector<TOperatorPtr> inputs);
+    explicit TUnionAllOperator(NQumir::NAst::TTypeFactory& types, std::vector<TOperatorPtr> inputs);
 
     std::string_view RelName() const override { return OpId; }
     std::vector<TColumnReference> ColumnReferences() const override { return {}; }

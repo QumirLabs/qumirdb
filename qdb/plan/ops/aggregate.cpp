@@ -18,9 +18,9 @@ namespace NQdb {
 
 using namespace NQumir::NAst;
 
-TTypePtr AggregateResultType(const std::string& func, const TTypePtr& argType) {
+TTypePtr AggregateResultType(NQumir::NAst::TTypeFactory& types, const std::string& func, const TTypePtr& argType) {
     if (func == "count") {
-        return std::make_shared<TIntegerType>(); // i64
+        return types.MakeInteger(); // i64
     }
     if (argType) {
         // Nullable must be unwrapped before the integer check, else a nullable
@@ -29,22 +29,22 @@ TTypePtr AggregateResultType(const std::string& func, const TTypePtr& argType) {
         const bool nullable = IsNullableType(argType);
         auto inner = nullable ? UnwrapNullableType(argType) : argType;
         if (IsDateType(inner) && (func == "min" || func == "max")) {
-            TTypePtr dateType = std::make_shared<TDateType>(TIntegerType::I64);
-            return nullable ? std::make_shared<TNullable>(std::move(dateType)) : dateType;
+            TTypePtr dateType = MakeDateType(types, TIntegerType::I64);
+            return nullable ? MakeNullableType(types, std::move(dateType)) : dateType;
         }
         if (IsDateType(inner) && (func == "sum" || func == "avg")) {
             throw NQumir::TError("function " + func + "(DATE) does not exist");
         }
         if (inner && inner->TypeName() == TIntegerType::TypeId) {
             // i64 state for every integer aggregate, incl. min/max over narrow ints.
-            TTypePtr i64Type = std::make_shared<TIntegerType>();
-            return nullable ? std::make_shared<TNullable>(std::move(i64Type)) : i64Type;
+            TTypePtr i64Type = types.MakeInteger();
+            return nullable ? MakeNullableType(types, std::move(i64Type)) : i64Type;
         }
         // A sum needs more digits than any of its terms: it keeps the scale and takes
         // the widest precision, as in DuckDB.
         if (auto decimal = DecimalSpecOfValueType(inner); decimal && func == "sum") {
-            auto sumType = MakeDecimalType({.Precision = MaxDecimalPrecision, .Scale = decimal->Scale});
-            return nullable ? std::make_shared<TNullable>(std::move(sumType)) : sumType;
+            auto sumType = MakeDecimalType(types, {.Precision = MaxDecimalPrecision, .Scale = decimal->Scale});
+            return nullable ? MakeNullableType(types, std::move(sumType)) : sumType;
         }
     }
     // A float argument feeds the f64 reducer state whatever its width.
@@ -52,8 +52,8 @@ TTypePtr AggregateResultType(const std::string& func, const TTypePtr& argType) {
         const bool nullable = IsNullableType(argType);
         auto inner = nullable ? UnwrapNullableType(argType) : argType;
         if (inner && TMaybeType<TFloatType>(inner)) {
-            TTypePtr f64Type = std::make_shared<TFloatType>();
-            return nullable ? std::make_shared<TNullable>(std::move(f64Type)) : f64Type;
+            TTypePtr f64Type = types.MakeFloat();
+            return nullable ? MakeNullableType(types, std::move(f64Type)) : f64Type;
         }
     }
     // Other reducers are not connected yet; preserve the declared type.
@@ -61,45 +61,46 @@ TTypePtr AggregateResultType(const std::string& func, const TTypePtr& argType) {
 }
 
 TTypePtr ComputeAggregateOutputType(
+    NQumir::NAst::TTypeFactory& types,
     const TTypePtr& inputSchema,
     const std::vector<std::string>& groupKeys,
     const std::vector<TAggregateSpec>& aggs,
     bool nullableKeys,
     bool global)
 {
-    auto* inputStruct = static_cast<TStructType*>(inputSchema.get());
+    auto* inputStruct = static_cast<const TStructType*>(inputSchema);
     std::vector<std::pair<std::string, TTypePtr>> outFields;
     // The kernel emits the grouping-set id as the leading key so masked-NULL and
     // real-NULL groups stay distinct; downstream references keys by name.
     if (nullableKeys) {
-        outFields.emplace_back("__grouping_id__", std::make_shared<TIntegerType>(TIntegerType::I32));
+        outFields.emplace_back("__grouping_id__", types.MakeInteger(TIntegerType::I32));
     }
     for (const auto& key : groupKeys) {
         auto type = FieldType(inputStruct, key);
         if (nullableKeys && type && !IsNullableType(type)) {
-            type = std::make_shared<TNullable>(std::move(type));
+            type = MakeNullableType(types, std::move(type));
         }
         outFields.emplace_back(key, std::move(type));
     }
     for (const auto& agg : aggs) {
-        TTypePtr argType;
+        TTypePtr argType = nullptr;
         if (agg.Arg) {
             if (auto ident = TMaybeNode<TIdentExpr>(agg.Arg)) {
                 argType = FieldType(inputStruct, ident.Cast()->Name);
             }
         }
-        auto resultType = AggregateResultType(agg.Func, argType);
+        auto resultType = AggregateResultType(types, agg.Func, argType);
         if (global && agg.Func != "count" && !agg.EmptyIsZero &&
             resultType && !IsNullableType(resultType))
         {
-            resultType = std::make_shared<TNullable>(std::move(resultType));
+            resultType = MakeNullableType(types, std::move(resultType));
         }
         outFields.emplace_back(agg.Name, std::move(resultType));
     }
-    return std::make_shared<TStructType>(std::move(outFields));
+    return types.MakeStruct(std::move(outFields));
 }
 
-TAggregateOperator::TAggregateOperator(TOperatorPtr input, std::vector<std::string> groupKeys,
+TAggregateOperator::TAggregateOperator(NQumir::NAst::TTypeFactory& types, TOperatorPtr input, std::vector<std::string> groupKeys,
     std::vector<TAggregateSpec> aggs, bool global)
     : Input_(std::move(input))
     , GroupKeys_(std::move(groupKeys))
@@ -107,9 +108,9 @@ TAggregateOperator::TAggregateOperator(TOperatorPtr input, std::vector<std::stri
     , Global_(global)
 {
     auto inputSchema = Input_->OutputColumns();
-    Type = std::make_shared<TFunctionType>(
+    Type = types.MakeFunction(
         std::vector<TTypePtr>{inputSchema},
-        ComputeAggregateOutputType(inputSchema, GroupKeys_, Aggs_, !GroupingSets_.empty(), !EmptyInputGroups().empty()));
+        ComputeAggregateOutputType(types, inputSchema, GroupKeys_, Aggs_, !GroupingSets_.empty(), !EmptyInputGroups().empty()));
 }
 
 std::vector<int64_t> TAggregateOperator::EmptyInputGroups() const {
@@ -157,7 +158,7 @@ const std::string TAggregateOperator::ToString() const {
 }
 
 std::expected<TOperatorPtr, NQumir::TError>
-MakeAggregate(TOperatorPtr input, std::vector<std::string> groupKeys,
+MakeAggregate(NQumir::NAst::TTypeFactory& types, TOperatorPtr input, std::vector<std::string> groupKeys,
     std::vector<std::tuple<std::string, std::string, std::string>> aggs)
 {
     std::vector<TAggregateSpec> specs;
@@ -167,7 +168,7 @@ MakeAggregate(TOperatorPtr input, std::vector<std::string> groupKeys,
         if (!exprStr.empty()) {
             std::istringstream ss(exprStr);
             NQumir::NAst::NCore::TTokenStream tokens(ss);
-            NQumir::NAst::NCore::TParser parser;
+            NQumir::NAst::NCore::TParser parser(types);
             auto parsed = parser.Parse(tokens);
             if (!parsed) {
                 return std::unexpected(parsed.error());
@@ -176,7 +177,7 @@ MakeAggregate(TOperatorPtr input, std::vector<std::string> groupKeys,
         }
         specs.push_back({std::move(name), std::move(func), std::move(arg)});
     }
-    return std::make_shared<TAggregateOperator>(std::move(input), std::move(groupKeys), std::move(specs));
+    return NQumir::MakeIntrusive<TAggregateOperator>(types, std::move(input), std::move(groupKeys), std::move(specs));
 }
 
 } // namespace NQdb

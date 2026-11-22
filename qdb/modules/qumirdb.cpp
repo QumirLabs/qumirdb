@@ -51,17 +51,17 @@ const void* const QumirDbRuntimeSymbolAnchors[] __attribute__((used)) = {
     reinterpret_cast<const void*>(&qdb_decimal_ge),
 };
 
-std::vector<TExternalType> BuildQumirDbExternalTypes() {
-    auto i8Type = std::make_shared<TIntegerType>(TIntegerType::I8);
-    auto i32Type = std::make_shared<TIntegerType>(TIntegerType::I32);
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
-    auto voidPtrType = std::make_shared<TPointerType>(i64Type);
-    auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
-    auto ptrI8Type = std::make_shared<TPointerType>(i8Type);
+std::vector<TExternalType> QumirDbExternalTypes(TTypeFactory& types) {
+    auto i8Type = types.MakeInteger(TIntegerType::I8);
+    auto i32Type = types.MakeInteger(TIntegerType::I32);
+    auto i64Type = types.MakeInteger();
+    auto u8Type = types.MakeInteger(TIntegerType::U8);
+    auto voidPtrType = types.MakePointer(i64Type);
+    auto ptrU8Type = types.MakePointer(u8Type);
+    auto ptrI8Type = types.MakePointer(i8Type);
 
     auto makeStringHandleType = [&]() {
-        return std::make_shared<TStructType>(
+        return types.MakeStruct(
             std::vector<std::pair<std::string, TTypePtr>>{
                 {"Data", ptrU8Type},
                 {"Size", i64Type},
@@ -70,7 +70,7 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
     auto stringViewType = makeStringHandleType();
     auto ownedStringType = makeStringHandleType();
 
-    auto columnType = std::make_shared<TStructType>(
+    auto columnType = types.MakeStruct(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"Data", ptrI8Type},
             {"DataBitOffset", i32Type},
@@ -79,12 +79,12 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
             {"Offsets", voidPtrType},
             {"OffsetWidth", u8Type},
         });
-    auto columnNamedType = std::make_shared<TNamedType>("TColumn", columnType);
-    auto ptrColumnType = std::make_shared<TPointerType>(columnNamedType);
+    auto columnNamedType = types.MakeNamed("TColumn", columnType);
+    auto ptrColumnType = types.MakePointer(columnNamedType);
 
-    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
-    auto ptrU64Type = std::make_shared<TPointerType>(u64Type);
-    auto rowSetType = std::make_shared<TStructType>(
+    auto u64Type = types.MakeInteger(TIntegerType::U64);
+    auto ptrU64Type = types.MakePointer(u64Type);
+    auto rowSetType = types.MakeStruct(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"Columns", ptrColumnType},
             {"ColumnCount", i64Type},
@@ -96,11 +96,11 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
             {"RefCount", i64Type},
         });
 
-    auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
-    auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
-    auto ptrPtrU8Type = std::make_shared<TPointerType>(ptrU8Type);
+    auto ptrI64Type = types.MakePointer(i64Type);
+    auto ptrPtrI64Type = types.MakePointer(ptrI64Type);
+    auto ptrPtrU8Type = types.MakePointer(ptrU8Type);
 
-    auto pairBufferType = std::make_shared<TStructType>(
+    auto pairBufferType = types.MakeStruct(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"Count", i64Type},
             {"Capacity", i64Type},
@@ -109,7 +109,7 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
 
     // Row table (kernel/row_table.oz); mirrored by TRowJoinProcessor's
     // state structs in exec/row_join_exec.h.
-    auto rowArenaType = std::make_shared<TStructType>(
+    auto rowArenaType = types.MakeStruct(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"Blocks", ptrPtrU8Type},
             {"BlockCount", i64Type},
@@ -119,7 +119,7 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
             {"Rows", i64Type},
             {"CurRows", i64Type},
         });
-    auto rowTableType = std::make_shared<TStructType>(
+    auto rowTableType = types.MakeStruct(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"Entries", ptrU64Type},
             {"Capacity", i64Type},
@@ -128,7 +128,7 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
             {"Rows", i64Type},
             {"Keys", i64Type},
         });
-    auto rowScratchType = std::make_shared<TStructType>(
+    auto rowScratchType = types.MakeStruct(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"Hashes", ptrU64Type},
             {"Salts", ptrU64Type},
@@ -140,7 +140,7 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
             {"Capacity", i64Type},
         });
 
-    auto hashTableType = std::make_shared<TStructType>(
+    auto hashTableType = types.MakeStruct(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"Keys", ptrU8Type},
             {"Ctrl", ptrU8Type},
@@ -155,9 +155,9 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
             {"NumAggs", i64Type},
             {"NumKeys", i64Type},
             {"KeySize", i64Type},
-            {"RowArena", std::make_shared<TNamedType>("RowArena", rowArenaType)},
-            {"RowTable", std::make_shared<TNamedType>("RowTable", rowTableType)},
-            {"RowScratch", std::make_shared<TNamedType>("RowScratch", rowScratchType)},
+            {"RowArena", types.MakeNamed("RowArena", rowArenaType)},
+            {"RowTable", types.MakeNamed("RowTable", rowTableType)},
+            {"RowScratch", types.MakeNamed("RowScratch", rowScratchType)},
             {"RowSwitchGroups", i64Type},
             {"RowExpectedGroups", i64Type},
             {"RowRebuilds", i64Type},
@@ -177,9 +177,13 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
     };
 }
 
-const std::vector<TExternalType>& QumirDbExternalTypes() {
-    static const auto types = BuildQumirDbExternalTypes();
-    return types;
+NAst::TTypePtr QumirDbNamedType(NAst::TTypeFactory& types, std::string_view name) {
+    for (const auto& type : QumirDbExternalTypes(types)) {
+        if (type.Name == name) {
+            return types.MakeNamed(std::string(name), type.Type);
+        }
+    }
+    throw std::logic_error("qumirdb.oz declares no type " + std::string(name));
 }
 
 void EnsureQumirDbRuntimeSymbolsLinked() {

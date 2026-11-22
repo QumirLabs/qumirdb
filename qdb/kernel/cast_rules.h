@@ -28,6 +28,7 @@ namespace NKernel {
 // TError naming the SQL types for a cast to VARCHAR that neither implements; Qumir would
 // report the unresolved cast only when the kernel is compiled.
 NQumir::NAst::TExprPtr ApplyCastRule(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TTypePtr& from,
     const NQumir::NAst::TTypePtr& to,
     const NQumir::NAst::TExprPtr& operand,
@@ -37,6 +38,7 @@ NQumir::NAst::TExprPtr ApplyCastRule(
 // nullptr. Throws a TError for a DECIMAL conversion a rule covers but cannot perform
 // (a scale down, an integer width that is not a SQL type).
 NQumir::NAst::TExprPtr ApplyDecimalCastRule(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TTypePtr& from,
     const NQumir::NAst::TTypePtr& to,
     const NQumir::NAst::TExprPtr& operand,

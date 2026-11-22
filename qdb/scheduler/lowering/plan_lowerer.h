@@ -18,6 +18,9 @@
 
 namespace NQdb {
 class TExternalCatalogSnapshot;
+namespace NKernel {
+struct TAnnotationContext;
+} // namespace NKernel
 struct TRuntimeContext;
 class TAggregateOperator;
 class IRuntimeFilterBindingFactory;
@@ -39,8 +42,10 @@ struct TRuntimeFilterDiagnostic {
 // diagnostic text only. A finalizer must bind or compile them before a consumer
 // executes the lowered plan.
 struct TLoweredPlan {
+    // The query's type factory: OutputType and the kernel ASTs are its types.
+    std::shared_ptr<NQumir::NAst::TTypeFactory> Types;
     std::unique_ptr<TTaskGraph> Graph;
-    NQumir::NAst::TTypePtr OutputType;
+    NQumir::NAst::TTypePtr OutputType = nullptr;
     IConnection* FinalGather = nullptr;
     std::vector<TTaskNode*> Producers;
     size_t Lanes = 0;
@@ -86,14 +91,16 @@ bool ShouldCascadeGlobalAggregate(
     size_t inputLanes,
     const TSettings& settings);
 
-// Lower a logical plan into a scheduler graph (no terminal sink yet).
-// Kernels are generated but not compiled.
-// A custom filter factory replaces the local runtime filters.
+// Lower a logical plan, whose types are of `types`, into a scheduler graph (no
+// terminal sink yet). Kernels are generated in `types` and typed with the query's
+// `annotation`, but not compiled. A custom filter factory replaces the local
+// runtime filters.
 TLoweredPlan LowerPlanToGraph(
     const TOperatorPtr& root,
+    std::shared_ptr<NQumir::NAst::TTypeFactory> types,
     TSettings settings,
     std::ostream* diagnostics,
-    std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog = nullptr,
+    const NKernel::TAnnotationContext* annotation = nullptr,
     std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings = nullptr);
 
 // Attach the terminal sink task that writes every output rowset to `sink`; the

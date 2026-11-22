@@ -5,7 +5,10 @@
 // the deleted `IRuntimeNode`/`TPhysicalPlanner` pull engine keep working with a
 // one-line change (`RunPlan(root[, settings])` instead of building a planner).
 
+#include "test_types.h"
+
 #include <qdb/io/io.h>
+#include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/finalize.h>
 #include <qdb/scheduler/lowering/plan_lowerer.h>
 #include <qdb/scheduler/settings/settings.h>
@@ -48,7 +51,7 @@ public:
 private:
     std::vector<TRowSet> RowSets_;
     size_t Pos_ = 0;
-    NQumir::NAst::TTypePtr OutputType_;
+    NQumir::NAst::TTypePtr OutputType_ = nullptr;
 };
 
 namespace NTestDetail {
@@ -76,18 +79,20 @@ struct TPlanRunTimings {
     double ExecuteMs = 0;
 };
 
+// `types` is the factory the plan is built in.
 inline std::unique_ptr<TTestRuntime> RunPlan(
     const TOperatorPtr& root,
     NScheduler::TSettings settings = {},
     std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog = nullptr,
     std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings = nullptr,
-    TPlanRunTimings* timings = nullptr)
+    TPlanRunTimings* timings = nullptr,
+    std::shared_ptr<NQumir::NAst::TTypeFactory> types = SharedTestTypes())
 {
     using TClock = std::chrono::steady_clock;
     auto started = timings ? TClock::now() : TClock::time_point{};
+    const auto annotation = NKernel::MakeAnnotationContext(*types, std::move(externalCatalog));
     auto lowered = NScheduler::LowerPlanToGraph(
-        root, settings, nullptr, std::move(externalCatalog),
-        std::move(filterBindings));
+        root, types, settings, nullptr, &annotation, std::move(filterBindings));
     auto outputType = lowered.OutputType;
 
     if (timings) {
@@ -95,7 +100,7 @@ inline std::unique_ptr<TTestRuntime> RunPlan(
         timings->LowerMs = std::chrono::duration<double, std::milli>(now - started).count();
         started = now;
         FinalizeKernels(
-            lowered.Kernels, settings.Kernel.Backend, nullptr, lowered.ExternalCatalog,
+            lowered.Kernels, lowered.Types, settings.Kernel.Backend, nullptr, lowered.ExternalCatalog,
             settings.Jit.CacheDir);
         now = TClock::now();
         timings->JitMs = std::chrono::duration<double, std::milli>(now - started).count();

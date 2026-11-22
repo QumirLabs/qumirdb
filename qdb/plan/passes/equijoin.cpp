@@ -48,9 +48,9 @@ TExprPtr ConjuctExpr(const TConjuct& conj) {
         return conj.Expr;
     } else {
         return
-            std::make_shared<TBinaryExpr>(NQumir::TLocation{}, TOperator("=="),
-                std::make_shared<TIdentExpr>(NQumir::TLocation{}, conj.left),
-                std::make_shared<TIdentExpr>(NQumir::TLocation{}, conj.right));
+            NQumir::MakeIntrusive<TBinaryExpr>(NQumir::TLocation{}, TOperator("=="),
+                NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, conj.left),
+                NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, conj.right));
     }
 }
 
@@ -59,16 +59,16 @@ TExprPtr Conjoin(const std::vector<TConjuct>& conjucts) {
     for (const auto& conj : conjucts) {
         auto expr = ConjuctExpr(conj);
         result = result
-            ? std::make_shared<TBinaryExpr>(expr->Location, TOperator("&&"), result, expr)
+            ? NQumir::MakeIntrusive<TBinaryExpr>(expr->Location, TOperator("&&"), result, expr)
             : expr;
     }
     return result;
 }
 
-TOperatorPtr Materialize(TOperatorPtr result, const std::vector<TConjuct>& conjucts) {
+TOperatorPtr Materialize(NQumir::NAst::TTypeFactory& types, TOperatorPtr result, const std::vector<TConjuct>& conjucts) {
     return conjucts.empty()
         ? result
-        : std::make_shared<TFilterOperator>(std::move(result), Conjoin(conjucts));
+        : NQumir::MakeIntrusive<TFilterOperator>(types, std::move(result), Conjoin(conjucts));
 }
 
 std::vector<TJoinKey> ExtractJoinKeys(const std::set<std::string>& leftCols, std::set<std::string> rightCols, TUnionFind<std::string>& unionFind)
@@ -117,7 +117,7 @@ void ExtractConjucts(std::vector<TConjuct>& ret, const TExprPtr& expr) {
     }
 }
 
-std::unordered_set<std::string> JoinColumns(int side, const std::shared_ptr<TJoinOperator>& join) {
+std::unordered_set<std::string> JoinColumns(int side, const NQumir::TIntrusivePtr<TJoinOperator>& join) {
     std::unordered_set<std::string> ret;
     auto sideInput = side == 0
         ? join->Left()
@@ -175,7 +175,7 @@ TExprPtr Combine(const std::vector<TExprPtr>& parts, TOperator op) {
     TExprPtr result;
     for (const auto& part : parts) {
         result = result
-            ? std::make_shared<TBinaryExpr>(part->Location, op, result, part)
+            ? NQumir::MakeIntrusive<TBinaryExpr>(part->Location, op, result, part)
             : part;
     }
     return result;
@@ -245,12 +245,12 @@ struct TContext {
     TConstFolder& Folder;
 };
 
-TOperatorPtr Process(TOperatorPtr node, TContext ctx);
+TOperatorPtr Process(NQumir::NAst::TTypeFactory& types, TOperatorPtr node, TContext ctx);
 
-TOperatorPtr ProcessAggregate(std::shared_ptr<TAggregateOperator> aggregate, TContext ctx) {
+TOperatorPtr ProcessAggregate(NQumir::NAst::TTypeFactory& types, NQumir::TIntrusivePtr<TAggregateOperator> aggregate, TContext ctx) {
     if (!aggregate->GroupingSets().empty()) {
-        aggregate->MutableInput() = Process(aggregate->Input(), {{}, ctx.Mode, ctx.Folder});
-        return Materialize(aggregate, ctx.Conjucts);
+        aggregate->MutableInput() = Process(types, aggregate->Input(), {{}, ctx.Mode, ctx.Folder});
+        return Materialize(types, aggregate, ctx.Conjucts);
     }
 
     std::unordered_set<std::string> groupCols(
@@ -268,25 +268,25 @@ TOperatorPtr ProcessAggregate(std::shared_ptr<TAggregateOperator> aggregate, TCo
         }
     }
 
-    aggregate->MutableInput() = Process(aggregate->Input(), {pushable, ctx.Mode, ctx.Folder});
-    return Materialize(aggregate, keep);
+    aggregate->MutableInput() = Process(types, aggregate->Input(), {pushable, ctx.Mode, ctx.Folder});
+    return Materialize(types, aggregate, keep);
 }
 
-TOperatorPtr ProcessLimit(std::shared_ptr<TLimitOperator> limit, TContext ctx) {
-    limit->MutableInput() = Process(limit->Input(), {{}, ctx.Mode, ctx.Folder});
-    return Materialize(limit, ctx.Conjucts);
+TOperatorPtr ProcessLimit(NQumir::NAst::TTypeFactory& types, NQumir::TIntrusivePtr<TLimitOperator> limit, TContext ctx) {
+    limit->MutableInput() = Process(types, limit->Input(), {{}, ctx.Mode, ctx.Folder});
+    return Materialize(types, limit, ctx.Conjucts);
 }
 
 // In PushOnly mode a project is not a barrier: a predicate over its output
 // columns is rewritten into the input namespace (each output column replaced by
 // its defining projection expression) and pushed below.
-TOperatorPtr ProcessProject(std::shared_ptr<TProjectOperator> project, TContext ctx) {
+TOperatorPtr ProcessProject(NQumir::NAst::TTypeFactory& types, NQumir::TIntrusivePtr<TProjectOperator> project, TContext ctx) {
     // ExtractKeys keeps the barrier: its conjuncts carry equi-key info (the
     // `equiv` flag lifted into join keys downstream); rewriting `col == col`
     // through the projection would flatten it to a plain predicate and lose keys.
     if (ctx.Mode != EMode::PushOnly) {
-        project->MutableInput() = Process(project->Input(), {{}, ctx.Mode, ctx.Folder});
-        return Materialize(project, ctx.Conjucts);
+        project->MutableInput() = Process(types, project->Input(), {{}, ctx.Mode, ctx.Folder});
+        return Materialize(types, project, ctx.Conjucts);
     }
 
     std::unordered_map<std::string, TRemapTarget> rewrite;
@@ -313,25 +313,25 @@ TOperatorPtr ProcessProject(std::shared_ptr<TProjectOperator> project, TContext 
         pushable.push_back(TConjuct{std::move(rewritten)});
     }
 
-    project->MutableInput() = Process(project->Input(), {std::move(pushable), ctx.Mode, ctx.Folder});
-    return Materialize(project, keep);
+    project->MutableInput() = Process(types, project->Input(), {std::move(pushable), ctx.Mode, ctx.Folder});
+    return Materialize(types, project, keep);
 }
 
-TOperatorPtr ProcessSort(std::shared_ptr<TSortOperator> sort, TContext ctx) {
-    sort->MutableInput() = Process(sort->Input(), {{}, ctx.Mode, ctx.Folder});
-    return Materialize(sort, ctx.Conjucts);
+TOperatorPtr ProcessSort(NQumir::NAst::TTypeFactory& types, NQumir::TIntrusivePtr<TSortOperator> sort, TContext ctx) {
+    sort->MutableInput() = Process(types, sort->Input(), {{}, ctx.Mode, ctx.Folder});
+    return Materialize(types, sort, ctx.Conjucts);
 }
 
-TOperatorPtr ProcessTopSort(std::shared_ptr<TTopSortOperator> topSort, TContext ctx) {
-    topSort->MutableInput() = Process(topSort->Input(), {{}, ctx.Mode, ctx.Folder});
-    return Materialize(topSort, ctx.Conjucts);
+TOperatorPtr ProcessTopSort(NQumir::NAst::TTypeFactory& types, NQumir::TIntrusivePtr<TTopSortOperator> topSort, TContext ctx) {
+    topSort->MutableInput() = Process(types, topSort->Input(), {{}, ctx.Mode, ctx.Folder});
+    return Materialize(types, topSort, ctx.Conjucts);
 }
 
 // A window is a partial barrier: a predicate over PARTITION BY columns only can
 // pass below it (dropping whole partitions never changes a per-partition window
 // result), while predicates over its output columns or non-partition inputs stay
 // above.
-TOperatorPtr ProcessWindow(std::shared_ptr<TWindowOperator> window, TContext ctx) {
+TOperatorPtr ProcessWindow(NQumir::NAst::TTypeFactory& types, NQumir::TIntrusivePtr<TWindowOperator> window, TContext ctx) {
     std::unordered_set<std::string> partitionCols(
         window->PartitionKeys().begin(), window->PartitionKeys().end());
 
@@ -345,8 +345,8 @@ TOperatorPtr ProcessWindow(std::shared_ptr<TWindowOperator> window, TContext ctx
         }
     }
 
-    window->MutableInput() = Process(window->Input(), {std::move(pushable), ctx.Mode, ctx.Folder});
-    return Materialize(window, keep);
+    window->MutableInput() = Process(types, window->Input(), {std::move(pushable), ctx.Mode, ctx.Folder});
+    return Materialize(types, window, keep);
 }
 
 // A closed projection is a constant within its branch, so it can be substituted
@@ -370,8 +370,9 @@ TExprPtr ClosedBranchProjection(const TOperatorPtr& branch, size_t pos) {
     return expr;
 }
 
-TOperatorPtr ProcessUnion(std::shared_ptr<TUnionAllOperator> unionAll, TContext ctx) {
-    auto&& outFields = TMaybeType<NQumir::NAst::TStructType>(unionAll->OutputColumns()).Cast()->Fields;
+TOperatorPtr ProcessUnion(NQumir::NAst::TTypeFactory& types, NQumir::TIntrusivePtr<TUnionAllOperator> unionAll, TContext ctx) {
+    const auto outColumns = unionAll->OutputColumns();
+    const auto& outFields = outColumns->Fields;
     // 1: build column name -> column id mapping
     std::unordered_map<std::string, int> columnNameToId;
     for (const auto& [field, _] : outFields) {
@@ -382,7 +383,8 @@ TOperatorPtr ProcessUnion(std::shared_ptr<TUnionAllOperator> unionAll, TContext 
     std::vector<TOperatorPtr> newInputs; newInputs.reserve(branches.size());
     for (const auto& branch : branches) {
         std::unordered_map<std::string, TRemapTarget> remapFromTo;
-        auto&& branchFields = TMaybeType<NQumir::NAst::TStructType>(branch->OutputColumns()).Cast()->Fields;
+        const auto branchColumns = branch->OutputColumns();
+        const auto& branchFields = branchColumns->Fields;
         std::vector<TConjuct> branchConjucts;
         branchConjucts.reserve(ctx.Conjucts.size());
         std::vector<NQumir::NAst::TExprPtr> branchConstColumns(branchFields.size());
@@ -431,19 +433,19 @@ TOperatorPtr ProcessUnion(std::shared_ptr<TUnionAllOperator> unionAll, TContext 
         }
 
         if (!branchIsDead) {
-            newInputs.emplace_back(Process(branch, {std::move(branchConjucts), ctx.Mode, ctx.Folder}));
+            newInputs.emplace_back(Process(types, branch, {std::move(branchConjucts), ctx.Mode, ctx.Folder}));
         }
     }
 
     if (newInputs.empty()) {
         // all branches folded => empty operator
-        return std::make_shared<TLimitOperator>(branches.front(), 0);
+        return NQumir::MakeIntrusive<TLimitOperator>(types, branches.front(), 0);
     }
     if (newInputs.size() == 1) {
         return newInputs[0];
     }
     unionAll->SetInputs(std::move(newInputs));
-    return Materialize(unionAll, {});
+    return Materialize(types, unionAll, {});
 }
 
 // Outer joins are excluded: pushing onto the null-extended side changes results.
@@ -453,7 +455,7 @@ bool IsRedistributable(EJoinType type) {
         || type == EJoinType::RightSemi || type == EJoinType::RightAnti;
 }
 
-TOperatorPtr ProcessJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
+TOperatorPtr ProcessJoin(NQumir::NAst::TTypeFactory& types, NQumir::TIntrusivePtr<TJoinOperator> join, TContext ctx)
 {
     if (ctx.Mode == EMode::PushOnly) {
         auto leftCols = JoinColumns(0, join);
@@ -471,9 +473,9 @@ TOperatorPtr ProcessJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
                 keep.emplace_back(conj);
             }
         }
-        join->MutableLeft() = Process(join->Left(), {std::move(leftConjucts), ctx.Mode, ctx.Folder});
-        join->MutableRight() = Process(join->Right(), {std::move(rightConjucts), ctx.Mode, ctx.Folder});
-        return Materialize(join, keep);
+        join->MutableLeft() = Process(types, join->Left(), {std::move(leftConjucts), ctx.Mode, ctx.Folder});
+        join->MutableRight() = Process(types, join->Right(), {std::move(rightConjucts), ctx.Mode, ctx.Folder});
+        return Materialize(types, join, keep);
     }
 
     // An anti join returns the rows of one input that match nothing, and its
@@ -622,8 +624,8 @@ TOperatorPtr ProcessJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
         join->MutableDerivedSideFilters() = std::move(derivedFilters);
     }
 
-    join->MutableLeft() = Process(join->Left(), {std::move(leftConjucts), ctx.Mode, ctx.Folder});
-    join->MutableRight() = Process(join->Right(), {std::move(rightConjucts), ctx.Mode, ctx.Folder});
+    join->MutableLeft() = Process(types, join->Left(), {std::move(leftConjucts), ctx.Mode, ctx.Folder});
+    join->MutableRight() = Process(types, join->Right(), {std::move(rightConjucts), ctx.Mode, ctx.Folder});
     return join;
 }
 
@@ -648,8 +650,7 @@ std::unordered_map<std::string, TRemapTarget> EquatedNullExtendedColumns(
         auto leftType = leftTypes.find(left);
         auto rightType = rightTypes.find(right);
         if (leftType == leftTypes.end() || rightType == rightTypes.end()
-            || UnwrapNullableType(leftType->second)->ToString()
-                != UnwrapNullableType(rightType->second)->ToString())
+            || UnwrapNullableType(leftType->second) != UnwrapNullableType(rightType->second))
         {
             return;
         }
@@ -707,7 +708,7 @@ void TransferThroughEqualities(
 // different: a non-key ON conjunct constraining only the null-extended side can
 // be filtered on that side before the join - equivalent for an outer join, and
 // it keeps the conjunct out of the join residual.
-TOperatorPtr ProcessOuterJoin(std::shared_ptr<TJoinOperator> join, TContext ctx) {
+TOperatorPtr ProcessOuterJoin(NQumir::NAst::TTypeFactory& types, NQumir::TIntrusivePtr<TJoinOperator> join, TContext ctx) {
     EJoinType type = join->JoinType();
     auto leftCols = JoinColumns(0, join);
     auto rightCols = JoinColumns(1, join);
@@ -775,12 +776,12 @@ TOperatorPtr ProcessOuterJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
         }
     }
 
-    join->MutableLeft() = Process(join->Left(), {std::move(leftConjucts), ctx.Mode, ctx.Folder});
-    join->MutableRight() = Process(join->Right(), {std::move(rightConjucts), ctx.Mode, ctx.Folder});
-    return Materialize(join, keep);
+    join->MutableLeft() = Process(types, join->Left(), {std::move(leftConjucts), ctx.Mode, ctx.Folder});
+    join->MutableRight() = Process(types, join->Right(), {std::move(rightConjucts), ctx.Mode, ctx.Folder});
+    return Materialize(types, join, keep);
 }
 
-TOperatorPtr Process(TOperatorPtr node, TContext ctx) {
+TOperatorPtr Process(NQumir::NAst::TTypeFactory& types, TOperatorPtr node, TContext ctx) {
     if (auto maybeFilter = TMaybeOp<TFilterOperator>(node)) {
         auto filter = maybeFilter.Cast();
         if (ctx.Mode == EMode::PushOnly) {
@@ -796,41 +797,41 @@ TOperatorPtr Process(TOperatorPtr node, TContext ctx) {
                     kept.push_back(std::move(conj));
                 }
             }
-            auto inner = Process(filter->Input(), std::move(ctx));
-            return Materialize(inner, kept);
+            auto inner = Process(types, filter->Input(), std::move(ctx));
+            return Materialize(types, inner, kept);
         }
         ExtractConjucts(ctx.Conjucts, filter->Predicate());
         // drop the filter: its conjuncts move down into keys / lower nodes
-        return Process(filter->Input(), std::move(ctx));
+        return Process(types, filter->Input(), std::move(ctx));
     } else if (auto maybeJoin = TMaybeOp<TJoinOperator>(node)) {
         auto join = maybeJoin.Cast();
         return IsRedistributable(join->JoinType())
-            ? ProcessJoin(join, std::move(ctx))
-            : ProcessOuterJoin(join, std::move(ctx));
+            ? ProcessJoin(types, join, std::move(ctx))
+            : ProcessOuterJoin(types, join, std::move(ctx));
     } else if (auto maybeProject = TMaybeOp<TProjectOperator>(node)) {
         auto project = maybeProject.Cast();
-        return ProcessProject(project, std::move(ctx));
+        return ProcessProject(types, project, std::move(ctx));
     } else if (auto maybeAggregate = TMaybeOp<TAggregateOperator>(node)) {
         auto aggregate = maybeAggregate.Cast();
-        return ProcessAggregate(aggregate, std::move(ctx));
+        return ProcessAggregate(types, aggregate, std::move(ctx));
     } else if (auto maybeLimit = TMaybeOp<TLimitOperator>(node)) {
         auto limit = maybeLimit.Cast();
-        return ProcessLimit(limit, std::move(ctx));
+        return ProcessLimit(types, limit, std::move(ctx));
     } else if (auto maybeSort = TMaybeOp<TSortOperator>(node)) {
         auto sort = maybeSort.Cast();
-        return ProcessSort(sort, std::move(ctx));
+        return ProcessSort(types, sort, std::move(ctx));
     } else if (auto maybeTopSort = TMaybeOp<TTopSortOperator>(node)) {
         auto topSort = maybeTopSort.Cast();
-        return ProcessTopSort(topSort, std::move(ctx));
+        return ProcessTopSort(types, topSort, std::move(ctx));
     } else if (auto maybeWindow = TMaybeOp<TWindowOperator>(node)) {
         auto window = maybeWindow.Cast();
-        return ProcessWindow(window, std::move(ctx));
+        return ProcessWindow(types, window, std::move(ctx));
     } else if (auto maybeUnion = TMaybeOp<TUnionAllOperator>(node)) {
         auto unionAll = maybeUnion.Cast();
-        return ProcessUnion(unionAll, std::move(ctx));
+        return ProcessUnion(types, unionAll, std::move(ctx));
     }
 
-    return Materialize(node, ctx.Conjucts);
+    return Materialize(types, node, ctx.Conjucts);
 }
 
 bool IsNullJoinKey(
@@ -854,6 +855,7 @@ bool IsNullJoinKey(
 }
 
 TOperatorPtr RewriteAntiJoins(
+    NQumir::NAst::TTypeFactory& types,
     TOperatorPtr root,
     const std::unordered_set<std::string>& needed,
     bool& changed)
@@ -899,12 +901,12 @@ TOperatorPtr RewriteAntiJoins(
                         std::swap(key.Left, key.Right);
                     }
                 }
-                auto anti = std::make_shared<TJoinOperator>(
-                    swapped ? join.Cast()->Right() : join.Cast()->Left(),
+                auto anti = NQumir::MakeIntrusive<TJoinOperator>(
+                    types, swapped ? join.Cast()->Right() : join.Cast()->Left(),
                     swapped ? join.Cast()->Left() : join.Cast()->Right(), std::move(keys),
                     EJoinType::LeftAnti, join.Cast()->Filter());
                 anti->Location = join.Cast()->Location;
-                root = Materialize(std::move(anti), remaining);
+                root = Materialize(types, std::move(anti), remaining);
                 changed = true;
             }
         }
@@ -913,7 +915,7 @@ TOperatorPtr RewriteAntiJoins(
     auto inputs = root->MutableInputs();
     for (size_t index = 0; index < inputs.size(); ++index) {
         inputs[index] = RewriteAntiJoins(
-            inputs[index], root->RequiredColumnsForChild(index, needed), changed);
+            types, inputs[index], root->RequiredColumnsForChild(index, needed), changed);
     }
     return root;
 }
@@ -921,14 +923,14 @@ TOperatorPtr RewriteAntiJoins(
 } // namespace
 
 TOperatorPtr PushDownPredicates(TOperatorPtr root, TConstFolder& folder) {
-    return Process(root, {{}, EMode::PushOnly, folder});
+    return Process(folder.Types(), root, {{}, EMode::PushOnly, folder});
 }
 
 TOperatorPtr ExtractEquiJoins(TOperatorPtr root, TConstFolder& folder) {
-    return Process(root, {{}, EMode::ExtractKeys, folder});
+    return Process(folder.Types(), root, {{}, EMode::ExtractKeys, folder});
 }
 
-bool RewriteOuterJoinAsAnti(TOperatorPtr& root) {
+bool RewriteOuterJoinAsAnti(NQumir::NAst::TTypeFactory& types, TOperatorPtr& root) {
     if (!root) {
         return false;
     }
@@ -937,7 +939,7 @@ bool RewriteOuterJoinAsAnti(TOperatorPtr& root) {
         needed.insert(name);
     }
     bool changed = false;
-    root = RewriteAntiJoins(root, needed, changed);
+    root = RewriteAntiJoins(types, root, needed, changed);
     return changed;
 }
 

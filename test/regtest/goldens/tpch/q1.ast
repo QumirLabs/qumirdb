@@ -36,7 +36,7 @@
       (table lineitem)
     )
     (where
-      (<= l_shipdate (- (: 10561 i32) (: 81 i32)))
+      (<= l_shipdate (- (: 10561 <named DATE [i32]>) (: 81 i32)))
     )
     (group-by
       l_returnflag

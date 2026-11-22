@@ -22,7 +22,7 @@ class TAggregateOperator : public IOperator {
 public:
     static constexpr const char* OpId = "aggregate";
 
-    TAggregateOperator(TOperatorPtr input, std::vector<std::string> groupKeys,
+    TAggregateOperator(NQumir::NAst::TTypeFactory& types, TOperatorPtr input, std::vector<std::string> groupKeys,
         std::vector<TAggregateSpec> aggs, bool global = false);
 
     std::string_view RelName() const override { return OpId; }
@@ -73,6 +73,7 @@ private:
 // The result type of aggregate `func` over an argument of `argType`, which is
 // null for count(*).
 NQumir::NAst::TTypePtr AggregateResultType(
+    NQumir::NAst::TTypeFactory& types,
     const std::string& func,
     const NQumir::NAst::TTypePtr& argType);
 
@@ -81,6 +82,7 @@ NQumir::NAst::TTypePtr AggregateResultType(
 // constructor and by AnnotateTypes (after column pruning narrows inputSchema).
 // nullableKeys: GROUPING SETS make key columns nullable (NULL in sets that omit them).
 NQumir::NAst::TTypePtr ComputeAggregateOutputType(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TTypePtr& inputSchema,
     const std::vector<std::string>& groupKeys,
     const std::vector<TAggregateSpec>& aggs,
@@ -89,7 +91,7 @@ NQumir::NAst::TTypePtr ComputeAggregateOutputType(
 
 // aggs: (output_name, func, arg_expr_string) triples; arg_expr_string empty for count(*)
 std::expected<TOperatorPtr, NQumir::TError>
-MakeAggregate(TOperatorPtr input, std::vector<std::string> groupKeys,
+MakeAggregate(NQumir::NAst::TTypeFactory& types, TOperatorPtr input, std::vector<std::string> groupKeys,
     std::vector<std::tuple<std::string, std::string, std::string>> aggs);
 
 } // namespace NQdb

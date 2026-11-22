@@ -8,6 +8,7 @@
 #include <qdb/modules/qumirdb_types.h>
 
 #include "qumirdb_source_module.h"
+#include "test_types.h"
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/type.h>
@@ -24,12 +25,12 @@ namespace {
 using namespace NQumir::NAst;
 
 TTypePtr Nullable(TTypePtr type) {
-    return std::make_shared<NQdb::TNullable>(std::move(type));
+    return NQdb::MakeNullableType(NQdb::TestTypes(), std::move(type));
 }
 
-std::shared_ptr<TStructType> StructOf(const TTypePtr& type) {
+const TStructType* StructOf(const TTypePtr& type) {
     auto named = TMaybeType<TNamedType>(type);
-    auto concrete = named ? named.Cast()->UnderlyingType : type;
+    auto concrete = named ? named.Cast()->UnderlyingType() : type;
     auto structure = TMaybeType<TStructType>(concrete);
     return structure ? structure.Cast() : nullptr;
 }
@@ -53,26 +54,26 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileKeyOperation(
 
     std::vector<TExprPtr> stmts;
     if (!key.LookupTypeName.empty()) {
-        stmts.push_back(std::make_shared<TTypeDeclStmt>(
+        stmts.push_back(NQumir::MakeIntrusive<TTypeDeclStmt>(
             TLocation{}, key.LookupType));
     }
     if (!key.StoredTypeName.empty()) {
-        stmts.push_back(std::make_shared<TTypeDeclStmt>(
+        stmts.push_back(NQumir::MakeIntrusive<TTypeDeclStmt>(
             TLocation{}, key.StoredType));
     } else if (TMaybeType<TNamedType>(key.StoredType)) {
-        stmts.push_back(std::make_shared<TTypeDeclStmt>(
+        stmts.push_back(NQumir::MakeIntrusive<TTypeDeclStmt>(
             TLocation{}, key.StoredType));
     }
-    auto stringOps = NQdb::NKernel::ParseFunctionLibrary(
+    auto stringOps = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
         NQdb::NKernel::ReadAggregationKernel("string_ops.oz"));
     if (!stringOps) {
         ADD_FAILURE() << stringOps.error().ToString();
         return {};
     }
     stmts.insert(stmts.end(), stringOps->begin(), stringOps->end());
-    auto keyOps = NQdb::NKernel::GenKeyOperationFunDecls(key);
+    auto keyOps = NQdb::NKernel::GenKeyOperationFunDecls(NQdb::TestTypes(), key);
     stmts.insert(stmts.end(), keyOps.begin(), keyOps.end());
-    auto ownership = NQdb::NKernel::GenKeyOwnershipFunDecls(key);
+    auto ownership = NQdb::NKernel::GenKeyOwnershipFunDecls(NQdb::TestTypes(), key);
     stmts.insert(stmts.end(), ownership.begin(), ownership.end());
 
     std::vector<TParam> params;
@@ -81,27 +82,27 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileKeyOperation(
     for (size_t i = 0; i < paramTypes.size(); ++i) {
         const std::string name = "arg_" + std::to_string(i);
         TTypePtr wrapperType = pointerParams
-            ? std::make_shared<TPointerType>(paramTypes[i])
+            ? NQdb::TestTypes().MakePointer(paramTypes[i])
             : paramTypes[i];
-        params.push_back(std::make_shared<TVarStmt>(
+        params.push_back(NQumir::MakeIntrusive<TVarStmt>(
             TLocation{}, name, wrapperType));
         wrapperParamTypes.push_back(wrapperType);
-        TExprPtr argument = std::make_shared<TIdentExpr>(TLocation{}, name);
+        TExprPtr argument = NQumir::MakeIntrusive<TIdentExpr>(TLocation{}, name);
         args.push_back(pointerParams
-            ? std::make_shared<TIndexExpr>(TLocation{}, argument,
-                std::make_shared<TNumberExpr>(TLocation{}, int64_t{0}))
+            ? NQumir::MakeIntrusive<TIndexExpr>(TLocation{}, argument,
+                NQumir::MakeIntrusive<TNumberExpr>(TLocation{}, int64_t{0}, NQdb::TestTypes()))
             : argument);
     }
-    auto call = std::make_shared<TCallExpr>(TLocation{},
-        std::make_shared<TIdentExpr>(TLocation{}, operation), std::move(args));
-    auto function = std::make_shared<TFunDecl>(TLocation{}, entryName,
+    auto call = NQumir::MakeIntrusive<TCallExpr>(TLocation{},
+        NQumir::MakeIntrusive<TIdentExpr>(TLocation{}, operation), std::move(args));
+    auto function = NQumir::MakeIntrusive<TFunDecl>(TLocation{}, entryName,
         std::vector<TGenericParam>{},
-        std::move(params), std::make_shared<TBlockExpr>(TLocation{},
+        std::move(params), NQumir::MakeIntrusive<TBlockExpr>(TLocation{},
             std::vector<TExprPtr>{
-                std::make_shared<TReturnExpr>(TLocation{}, std::move(call))}),
+                NQumir::MakeIntrusive<TReturnExpr>(TLocation{}, std::move(call))}),
         resultType);
-    function->Type = std::make_shared<TFunctionType>(
-        wrapperParamTypes, resultType);
+    function->Type = NQdb::TestTypes().MakeFunction(
+        std::move(wrapperParamTypes), resultType);
     stmts.push_back(std::move(function));
 
     TLLVMRunnerOptions options;
@@ -109,8 +110,8 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileKeyOperation(
     options.NativeCode = true;
     options.AllowOverloads = true;
     NQdb::NTest::ConfigureQumirDbSourceModule(options);
-    auto runner = std::make_unique<TLLVMRunner>(options);
-    auto program = std::make_shared<TBlockExpr>(TLocation{}, std::move(stmts));
+    auto runner = std::make_unique<TLLVMRunner>(options, nullptr, &NQdb::TestTypes());
+    auto program = NQumir::MakeIntrusive<TBlockExpr>(TLocation{}, std::move(stmts));
     NQdb::NTest::AddQumirDbUse(program);
     std::string error;
     entry = runner->CompileKernelAst(program, entryName, &error);
@@ -127,64 +128,64 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileCloneEntry(
 
     std::vector<TExprPtr> stmts;
     if (!key.LookupTypeName.empty()) {
-        stmts.push_back(std::make_shared<TTypeDeclStmt>(
+        stmts.push_back(NQumir::MakeIntrusive<TTypeDeclStmt>(
             TLocation{}, key.LookupType));
     }
     if (!key.StoredTypeName.empty()) {
-        stmts.push_back(std::make_shared<TTypeDeclStmt>(
+        stmts.push_back(NQumir::MakeIntrusive<TTypeDeclStmt>(
             TLocation{}, key.StoredType));
     } else if (TMaybeType<TNamedType>(key.StoredType)) {
-        stmts.push_back(std::make_shared<TTypeDeclStmt>(
+        stmts.push_back(NQumir::MakeIntrusive<TTypeDeclStmt>(
             TLocation{}, key.StoredType));
     }
-    auto stringOps = NQdb::NKernel::ParseFunctionLibrary(
+    auto stringOps = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
         NQdb::NKernel::ReadAggregationKernel("string_ops.oz"));
     if (!stringOps) {
         ADD_FAILURE() << stringOps.error().ToString();
         return {};
     }
     stmts.insert(stmts.end(), stringOps->begin(), stringOps->end());
-    auto ownership = NQdb::NKernel::GenKeyOwnershipFunDecls(key);
+    auto ownership = NQdb::NKernel::GenKeyOwnershipFunDecls(NQdb::TestTypes(), key);
     stmts.insert(stmts.end(), ownership.begin(), ownership.end());
 
-    auto u8 = std::make_shared<TIntegerType>(TIntegerType::U8);
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto ptrU8 = std::make_shared<TPointerType>(u8);
-    auto ptrLookup = std::make_shared<TPointerType>(key.LookupType);
-    auto ptrStored = std::make_shared<TPointerType>(key.StoredType);
+    auto u8 = NQdb::TestTypes().MakeInteger(TIntegerType::U8);
+    auto i64 = NQdb::TestTypes().MakeInteger(TIntegerType::I64);
+    auto ptrU8 = NQdb::TestTypes().MakePointer(u8);
+    auto ptrLookup = NQdb::TestTypes().MakePointer(key.LookupType);
+    auto ptrStored = NQdb::TestTypes().MakePointer(key.StoredType);
     auto ident = [&](const std::string& name) -> TExprPtr {
-        return std::make_shared<TIdentExpr>(TLocation{}, name);
+        return NQumir::MakeIntrusive<TIdentExpr>(TLocation{}, name);
     };
     auto indexZero = [&](const std::string& name) -> TExprPtr {
-        auto zero = std::make_shared<TNumberExpr>(TLocation{}, int64_t{0});
+        auto zero = NQumir::MakeIntrusive<TNumberExpr>(TLocation{}, int64_t{0}, NQdb::TestTypes());
         zero->Type = i64;
-        return std::make_shared<TIndexExpr>(TLocation{}, ident(name), zero);
+        return NQumir::MakeIntrusive<TIndexExpr>(TLocation{}, ident(name), zero);
     };
-    auto cloneCall = std::make_shared<TCallExpr>(TLocation{},
+    auto cloneCall = NQumir::MakeIntrusive<TCallExpr>(TLocation{},
         ident("key_clone_owned"),
         std::vector<TExprPtr>{indexZero("lookup"), ident("buffer")});
-    auto assignOutput = std::make_shared<TArrayAssignExpr>(TLocation{}, "stored",
+    auto assignOutput = NQumir::MakeIntrusive<TArrayAssignExpr>(TLocation{}, "stored",
         std::vector<TExprPtr>{[&]() -> TExprPtr {
-            auto zero = std::make_shared<TNumberExpr>(TLocation{}, int64_t{0});
+            auto zero = NQumir::MakeIntrusive<TNumberExpr>(TLocation{}, int64_t{0}, NQdb::TestTypes());
             zero->Type = i64;
             return zero;
         }()}, std::move(cloneCall));
-    auto bytesCall = std::make_shared<TCallExpr>(TLocation{},
+    auto bytesCall = NQumir::MakeIntrusive<TCallExpr>(TLocation{},
         ident("key_owned_bytes"),
         std::vector<TExprPtr>{indexZero("lookup")});
     std::vector<TParam> params = {
-        std::make_shared<TVarStmt>(TLocation{}, "lookup", ptrLookup),
-        std::make_shared<TVarStmt>(TLocation{}, "buffer", ptrU8),
-        std::make_shared<TVarStmt>(TLocation{}, "stored", ptrStored),
+        NQumir::MakeIntrusive<TVarStmt>(TLocation{}, "lookup", ptrLookup),
+        NQumir::MakeIntrusive<TVarStmt>(TLocation{}, "buffer", ptrU8),
+        NQumir::MakeIntrusive<TVarStmt>(TLocation{}, "stored", ptrStored),
     };
-    auto function = std::make_shared<TFunDecl>(TLocation{}, "clone_key",
+    auto function = NQumir::MakeIntrusive<TFunDecl>(TLocation{}, "clone_key",
         std::vector<TGenericParam>{},
-        std::move(params), std::make_shared<TBlockExpr>(TLocation{},
+        std::move(params), NQumir::MakeIntrusive<TBlockExpr>(TLocation{},
             std::vector<TExprPtr>{
                 std::move(assignOutput),
-                std::make_shared<TReturnExpr>(TLocation{}, std::move(bytesCall)),
+                NQumir::MakeIntrusive<TReturnExpr>(TLocation{}, std::move(bytesCall)),
             }), i64);
-    function->Type = std::make_shared<TFunctionType>(
+    function->Type = NQdb::TestTypes().MakeFunction(
         std::vector<TTypePtr>{ptrLookup, ptrU8, ptrStored}, i64);
     stmts.push_back(std::move(function));
 
@@ -193,8 +194,8 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileCloneEntry(
     options.NativeCode = true;
     options.AllowOverloads = true;
     NQdb::NTest::ConfigureQumirDbSourceModule(options);
-    auto runner = std::make_unique<TLLVMRunner>(options);
-    auto program = std::make_shared<TBlockExpr>(TLocation{}, std::move(stmts));
+    auto runner = std::make_unique<TLLVMRunner>(options, nullptr, &NQdb::TestTypes());
+    auto program = NQumir::MakeIntrusive<TBlockExpr>(TLocation{}, std::move(stmts));
     NQdb::NTest::AddQumirDbUse(program);
     std::string error;
     entry = runner->CompileKernelAst(program, "clone_key", &error);
@@ -203,8 +204,8 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileCloneEntry(
 }
 
 TEST(StringKeyDescriptor, BuildsScalarLookupAndStoredTypes) {
-    TStructType input({{"name", Nullable(std::make_shared<TStringType>())}});
-    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(input, {"name"});
+    const auto& input = *NQdb::TestTypes().MakeStruct({{"name", Nullable(NQdb::TestTypes().Make<TStringType>())}});
+    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(NQdb::TestTypes(), input, {"name"});
 
     ASSERT_TRUE(key.IsScalar());
     EXPECT_TRUE(key.HasDistinctLookupType());
@@ -225,13 +226,13 @@ TEST(StringKeyDescriptor, BuildsScalarLookupAndStoredTypes) {
 }
 
 TEST(StringKeyDescriptor, BuildsParallelCompositeLayouts) {
-    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto string = std::make_shared<TStringType>();
-    TStructType input({
+    auto i32 = NQdb::TestTypes().MakeInteger(TIntegerType::I32);
+    auto i64 = NQdb::TestTypes().MakeInteger(TIntegerType::I64);
+    auto string = NQdb::TestTypes().Make<TStringType>();
+    const auto& input = *NQdb::TestTypes().MakeStruct({
         {"id", Nullable(i64)}, {"name", Nullable(string)},
         {"code", Nullable(i32)}});
-    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(
+    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(NQdb::TestTypes(),
         input, {"id", "name", "code"});
 
     ASSERT_FALSE(key.IsScalar());
@@ -263,12 +264,12 @@ TEST(StringKeyDescriptor, BuildsParallelCompositeLayouts) {
 }
 
 TEST(StringKeyDescriptor, RewritesNestedStringLeaves) {
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto nested = std::make_shared<TStructType>(
+    auto i64 = NQdb::TestTypes().MakeInteger(TIntegerType::I64);
+    auto nested = NQdb::TestTypes().MakeStruct(
         std::vector<std::pair<std::string, TTypePtr>>{
-            {"prefix", i64}, {"text", std::make_shared<TStringType>()}});
-    TStructType input({{"nested", Nullable(nested)}});
-    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(input, {"nested"});
+            {"prefix", i64}, {"text", NQdb::TestTypes().Make<TStringType>()}});
+    const auto& input = *NQdb::TestTypes().MakeStruct({{"nested", Nullable(nested)}});
+    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(NQdb::TestTypes(), input, {"nested"});
 
     ASSERT_TRUE(key.IsScalar());
     EXPECT_TRUE(key.HasDistinctLookupType());
@@ -286,23 +287,23 @@ TEST(StringKeyDescriptor, RewritesNestedStringLeaves) {
 }
 
 TEST(StringKeyDescriptor, NestedCompositeTypeNamesKeepComposition) {
-    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
-    auto pair = std::make_shared<TStructType>(
+    auto i32 = NQdb::TestTypes().MakeInteger(TIntegerType::I32);
+    auto pair = NQdb::TestTypes().MakeStruct(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"a", i32}, {"b", i32}});
-    auto wrappedPair = std::make_shared<TStructType>(
+    auto wrappedPair = NQdb::TestTypes().MakeStruct(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"pair", pair}});
-    auto wrappedScalarAndScalar = std::make_shared<TStructType>(
+    auto wrappedScalarAndScalar = NQdb::TestTypes().MakeStruct(
         std::vector<std::pair<std::string, TTypePtr>>{
-            {"first", std::make_shared<TStructType>(
+            {"first", NQdb::TestTypes().MakeStruct(
                 std::vector<std::pair<std::string, TTypePtr>>{{"a", i32}})},
             {"second", i32}});
 
-    TStructType leftInput({{"k", wrappedPair}});
-    TStructType rightInput({{"k", wrappedScalarAndScalar}});
-    auto left = NQdb::NKernel::BuildAggregateKeyDescriptor(leftInput, {"k"});
-    auto right = NQdb::NKernel::BuildAggregateKeyDescriptor(rightInput, {"k"});
+    const auto& leftInput = *NQdb::TestTypes().MakeStruct({{"k", wrappedPair}});
+    const auto& rightInput = *NQdb::TestTypes().MakeStruct({{"k", wrappedScalarAndScalar}});
+    auto left = NQdb::NKernel::BuildAggregateKeyDescriptor(NQdb::TestTypes(), leftInput, {"k"});
+    auto right = NQdb::NKernel::BuildAggregateKeyDescriptor(NQdb::TestTypes(), rightInput, {"k"});
 
     EXPECT_EQ(left.TypeName, "AggKey_Struct1_Struct2_i32_i32");
     EXPECT_EQ(right.TypeName, "AggKey_Struct2_Struct1_i32_i32");
@@ -310,9 +311,9 @@ TEST(StringKeyDescriptor, NestedCompositeTypeNamesKeepComposition) {
 }
 
 TEST(StringKeyDescriptor, KeepsFixedWidthRepresentationShared) {
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType input({{"first", i64}, {"second", i64}});
-    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(
+    auto i64 = NQdb::TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& input = *NQdb::TestTypes().MakeStruct({{"first", i64}, {"second", i64}});
+    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(NQdb::TestTypes(),
         input, {"first", "second"});
 
     EXPECT_FALSE(key.HasDistinctLookupType());
@@ -329,9 +330,9 @@ TEST(StringKeyDescriptor, KeepsFixedWidthRepresentationShared) {
 }
 
 TEST(StringKeyDescriptor, AddsValidityOnlyForNullableFields) {
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType input({{"plain", i64}, {"optional", Nullable(i64)}});
-    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(
+    auto i64 = NQdb::TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& input = *NQdb::TestTypes().MakeStruct({{"plain", i64}, {"optional", Nullable(i64)}});
+    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(NQdb::TestTypes(),
         input, {"plain", "optional"});
 
     auto stored = StructOf(key.StoredType);
@@ -349,10 +350,10 @@ TEST(StringKeyDescriptor, AddsValidityOnlyForNullableFields) {
 }
 
 TEST(StringKeyDescriptor, CompilesScalarCrossRepresentationOperations) {
-    TStructType input({{"name", Nullable(std::make_shared<TStringType>())}});
-    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(input, {"name"});
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto boolean = std::make_shared<TBoolType>();
+    const auto& input = *NQdb::TestTypes().MakeStruct({{"name", Nullable(NQdb::TestTypes().Make<TStringType>())}});
+    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(NQdb::TestTypes(), input, {"name"});
+    auto i64 = NQdb::TestTypes().MakeInteger(TIntegerType::I64);
+    auto boolean = NQdb::TestTypes().Make<TBoolType>();
     std::string bytes("same\0bytes", 10);
     struct TLookupKey {
         bool Valid;
@@ -421,12 +422,12 @@ static_assert(sizeof(TLookupPair) == 40);
 static_assert(sizeof(TStoredPair) == 40);
 
 TEST(StringKeyDescriptor, CompilesCompositeCrossRepresentationOperations) {
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType input({
+    auto i64 = NQdb::TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& input = *NQdb::TestTypes().MakeStruct({
         {"id", Nullable(i64)},
-        {"name", Nullable(std::make_shared<TStringType>())}});
-    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(input, {"id", "name"});
-    auto boolean = std::make_shared<TBoolType>();
+        {"name", Nullable(NQdb::TestTypes().Make<TStringType>())}});
+    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(NQdb::TestTypes(), input, {"id", "name"});
+    auto boolean = NQdb::TestTypes().Make<TBoolType>();
 
     void* equalEntry = nullptr;
     auto runner = CompileKeyOperation(key, "equal_pair", "rh_key_equal",
@@ -456,9 +457,9 @@ TEST(StringKeyDescriptor, CompilesCompositeCrossRepresentationOperations) {
 }
 
 TEST(StringKeyDescriptor, FixedWidthOwnershipCloneIsIdentity) {
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType input({{"id", Nullable(i64)}});
-    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(input, {"id"});
+    auto i64 = NQdb::TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& input = *NQdb::TestTypes().MakeStruct({{"id", Nullable(i64)}});
+    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(NQdb::TestTypes(), input, {"id"});
     void* entry = nullptr;
     auto runner = CompileCloneEntry(key, entry);
     ASSERT_NE(entry, nullptr);
@@ -473,8 +474,8 @@ TEST(StringKeyDescriptor, FixedWidthOwnershipCloneIsIdentity) {
 }
 
 TEST(StringKeyDescriptor, StringOwnershipCloneCopiesBytes) {
-    TStructType input({{"name", Nullable(std::make_shared<TStringType>())}});
-    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(input, {"name"});
+    const auto& input = *NQdb::TestTypes().MakeStruct({{"name", Nullable(NQdb::TestTypes().Make<TStringType>())}});
+    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(NQdb::TestTypes(), input, {"name"});
     void* entry = nullptr;
     auto runner = CompileCloneEntry(key, entry);
     ASSERT_NE(entry, nullptr);
@@ -528,12 +529,12 @@ static_assert(sizeof(TLookupStrings) == 64);
 static_assert(sizeof(TStoredStrings) == 64);
 
 TEST(StringKeyDescriptor, CompositeOwnershipCloneUsesOneBlock) {
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto string = std::make_shared<TStringType>();
-    TStructType input({
+    auto i64 = NQdb::TestTypes().MakeInteger(TIntegerType::I64);
+    auto string = NQdb::TestTypes().Make<TStringType>();
+    const auto& input = *NQdb::TestTypes().MakeStruct({
         {"id", Nullable(i64)}, {"first", Nullable(string)},
         {"second", Nullable(string)}});
-    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(
+    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(NQdb::TestTypes(),
         input, {"id", "first", "second"});
     void* entry = nullptr;
     auto runner = CompileCloneEntry(key, entry);

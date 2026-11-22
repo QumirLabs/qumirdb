@@ -18,6 +18,6 @@ bool RejectsNulls(
 // null-rejecting predicate above it would drop (LEFT or RIGHT to INNER, FULL to
 // LEFT, RIGHT or INNER). Requires qualified columns and annotated types.
 // Returns whether the plan changed; re-annotate after a rewrite.
-bool SimplifyOuterJoins(TOperatorPtr& root);
+bool SimplifyOuterJoins(NQumir::NAst::TTypeFactory& types, TOperatorPtr& root);
 
 } // namespace NQdb

@@ -8,6 +8,7 @@
 #include <qumir/parser/type.h>
 
 #include "plan_runner.h"
+#include "test_types.h"
 #include <qdb/exec/aggregate_exec.h>
 #include <qdb/io/io.h>
 #include <qdb/io/parquet/source.h>
@@ -61,10 +62,10 @@ namespace {
 TOperatorPtr ParsePlan(const std::string& sexp, ITable& source) {
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-        return std::make_shared<TSourceOperator>(Borrow(source), std::string(path));
+        return NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), std::string(path));
     };
 
-    NQumir::NAst::NCore::TParser parser;
+    NQumir::NAst::NCore::TParser parser(TestTypes());
     for (auto& [name, fn] : MakeRelParsers(std::move(opts))) {
         parser.NodeParsers[name] = std::move(fn);
     }
@@ -76,21 +77,21 @@ TOperatorPtr ParsePlan(const std::string& sexp, ITable& source) {
         throw std::runtime_error(result.error().ToString());
     }
 
-    auto root = std::static_pointer_cast<IOperator>(result.value());
-    AnnotateTypes(root);
-    ApplyColumnPruning(root);
+    auto root = NQumir::StaticPointerCast<IOperator>(result.value());
+    AnnotateTypes(TestTypes(), root);
+    ApplyColumnPruning(TestTypes(), root);
     return root;
 }
 
 TOperatorPtr BuildSqlPlan(const std::string& sql, const TTableSourceFactory& sources) {
     std::istringstream in(sql);
     NSql::TTokenStream tokens(in);
-    NSql::TParser parser;
+    NSql::TParser parser(TestTypes());
     auto parsed = parser.Parse(tokens);
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
     }
-    auto plan = BuildPlan(*parsed, sources);
+    auto plan = BuildPlan(TestTypes(), *parsed, sources);
     if (!plan) {
         throw std::runtime_error(plan.error().ToString());
     }
@@ -98,20 +99,20 @@ TOperatorPtr BuildSqlPlan(const std::string& sql, const TTableSourceFactory& sou
 }
 
 TOperatorPtr BuildSqlPlan(const std::string& sql, ITable& source) {
-    return BuildSqlPlan(sql, [&](std::string_view table)
+    return BuildSqlPlan(sql, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
-        return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
+        return NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), std::string(table));
     });
 }
 
-std::shared_ptr<TAggregateOperator> FindAggregate(const TOperatorPtr& op) {
+NQumir::TIntrusivePtr<TAggregateOperator> FindAggregate(const TOperatorPtr& op) {
     if (auto aggregate = TMaybeOp<TAggregateOperator>(op)) {
         return aggregate.Cast();
     }
     for (const auto& child : op->Children()) {
         if (auto childOp = TMaybeNode<IOperator>(child)) {
-            if (auto aggregate = FindAggregate(childOp.Cast())) {
+            if (auto aggregate = FindAggregate(TOperatorPtr(childOp.Cast()))) {
                 return aggregate;
             }
         }
@@ -239,9 +240,9 @@ TEST(AggregateE2E, GlobalIdentitySurvivesParallelCascade) {
                     }
                     return result;
                 };
-                TTypePtr type = std::make_shared<TIntegerType>();
+                TTypePtr type = TestTypes().MakeInteger();
                 if (nullable) {
-                    type = std::make_shared<TNullable>(type);
+                    type = MakeNullableType(TestTypes(), type);
                 }
                 TMockSource left({"v"}, batches(), {type});
                 TMockSource right({"v"}, batches(), {type});
@@ -250,15 +251,15 @@ TEST(AggregateE2E, GlobalIdentitySurvivesParallelCascade) {
                 if (input == 1) {
                     sql += " WHERE v > 100";
                 }
-                auto root = BuildSqlPlan(sql, [&](std::string_view table)
+                auto root = BuildSqlPlan(sql, [&](NQumir::NAst::TTypeFactory&, std::string_view table)
                     -> std::expected<TOperatorPtr, NQumir::TError>
                 {
                     ITable& source = table == "l"
                         ? left
                         : right;
-                    return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
+                    return NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), std::string(table));
                 });
-                ApplyPlanPasses(root);
+                ApplyPlanPasses(TestTypes(), root);
                 NScheduler::TSettings settings;
                 settings.Scheduler.WorkerCount = 2;
                 settings.Aggregate.CascadeGlobal = cascade
@@ -303,7 +304,7 @@ TEST(AggregateE2E, AutoCascadeFollowsTheParquetEstimate) {
     for (const uint64_t bound : {rows, rows + 1}) {
         SCOPED_TRACE(::testing::Message() << "partial_min_input_rows=" << bound);
         auto root = BuildSqlPlan("SELECT COUNT(*), SUM(v), MIN(v), MAX(v) FROM t", source);
-        ApplyPlanPasses(root);
+        ApplyPlanPasses(TestTypes(), root);
         auto aggregate = FindAggregate(root);
         ASSERT_NE(aggregate, nullptr);
         ASSERT_TRUE(aggregate->Input()->Stats_);
@@ -316,7 +317,7 @@ TEST(AggregateE2E, AutoCascadeFollowsTheParquetEstimate) {
         settings.Aggregate.PartialMinInputRows = bound;
         ASSERT_EQ(settings.Aggregate.CascadeGlobal, NScheduler::EGlobalCascadeMode::Auto);
 
-        auto lowered = NScheduler::LowerPlanToGraph(root, settings, nullptr);
+        auto lowered = NScheduler::LowerPlanToGraph(root, SharedTestTypes(), settings, nullptr);
         EXPECT_EQ(std::ranges::count_if(lowered.Graph->Nodes(),
             [](const auto& node) { return node->DebugKind == "source"; }), 4);
         std::vector<EAggregatePhase> phases;
@@ -370,17 +371,17 @@ struct TPartialGroup {
 // The partial processor hands rows through once its sample shows too little
 // reduction, and empties a table that reaches its group bound.
 TEST(AggregateE2E, PartialAggregateProcessorJudgesItsReduction) {
-    TStructType input({
-        {"k", std::make_shared<TIntegerType>()},
-        {"v", std::make_shared<TIntegerType>()},
+    const auto& input = *TestTypes().MakeStruct({
+        {"k", TestTypes().MakeInteger()},
+        {"v", TestTypes().MakeInteger()},
     });
     std::vector<TAggregateSpec> aggs = {{
         .Name = "v", .Func = "sum",
-        .Arg = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "v"),
+        .Arg = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "v"),
     }};
-    TKernelCompiler compiler;
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
     const auto kernels = compiler.CompileAggregate(
-        NKernel::BuildAggregateKernelSpec(input, {"k"}, aggs));
+        NKernel::BuildAggregateKernelSpec(TestTypes(), input, {"k"}, aggs));
     // The partial state of one row, (k, sum v), is the row itself.
     const TUnaryStreamProcess identity = [](TRowSet&, TUnaryStreamingKernelState&) {};
 
@@ -567,20 +568,21 @@ TEST(AggregateE2E, PartialAggregateModesAgree) {
     for (const auto& mode : modes) {
         SCOPED_TRACE(mode.Name);
         std::vector<TTypePtr> types = {
-            std::make_shared<TIntegerType>(),
-            std::make_shared<TStringType>(),
-            std::make_shared<TNullable>(std::make_shared<TIntegerType>(TIntegerType::I32)),
+            TestTypes().MakeInteger(),
+            TestTypes().Make<TStringType>(),
+            MakeNullableType(TestTypes(), TestTypes().MakeInteger(TIntegerType::I32)),
         };
         TStatsMockSource left({"k", "s", "v"}, batches(data[0]), types);
         TStatsMockSource right({"k", "s", "v"}, batches(data[1]), types);
         auto root = BuildSqlPlan(
             "SELECT k, s, COUNT(*), COUNT(v), SUM(v), MIN(v), MAX(v) "
             "FROM (SELECT k, s, v FROM l UNION ALL SELECT k, s, v FROM r) u GROUP BY k, s",
-            [&](std::string_view table) -> std::expected<TOperatorPtr, NQumir::TError> {
+            [&](NQumir::NAst::TTypeFactory&, std::string_view table)
+                -> std::expected<TOperatorPtr, NQumir::TError> {
                 ITable& source = table == "l" ? left : right;
-                return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
+                return NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), std::string(table));
             });
-        ApplyPlanPasses(root);
+        ApplyPlanPasses(TestTypes(), root);
         NScheduler::TSettings settings;
         settings.Scheduler.WorkerCount = 2;
         settings.Aggregate.EnablePartial = mode.Partial;
@@ -642,7 +644,7 @@ TEST(AggregateE2E, EmptyExplicitGroupsHaveNoIdentityRow) {
             TMockSource source({"v"});
             auto root = BuildSqlPlan(sql, source);
             ASSERT_FALSE(FindAggregate(root)->IsGlobal());
-            ApplyPlanPasses(root);
+            ApplyPlanPasses(TestTypes(), root);
             NScheduler::TSettings settings;
             settings.Scheduler.WorkerCount = 2;
             settings.Aggregate.CascadeGlobal = cascade
@@ -845,8 +847,8 @@ TEST(AggregateE2E, SumDecimalUsesBinIntState) {
         .Selection = nullptr, .RefCount = 1}};
     NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
-        {std::make_shared<TIntegerType>(),
-         std::make_shared<NQdb::TDecimal>(7, 2)});
+        {TestTypes().MakeInteger(),
+         MakeDecimalType(TestTypes(), {7, 2})});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k) (agg s sum v))",
         source);
@@ -962,8 +964,8 @@ TEST(AggregateE2E, ScalarI32KeyPreservesTypedOutput) {
     }};
     NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
-        {std::make_shared<TIntegerType>(TIntegerType::I32),
-         std::make_shared<TIntegerType>(TIntegerType::I64)});
+        {TestTypes().MakeInteger(TIntegerType::I32),
+         TestTypes().MakeInteger(TIntegerType::I64)});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k) "
         "(agg c count) (agg s sum v))",
@@ -1026,8 +1028,8 @@ TEST(AggregateE2E, ScalarStringKeyOwnsFinalizedOutput) {
     };
     NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
-        {std::make_shared<TStringType>(),
-         std::make_shared<TIntegerType>(TIntegerType::I64)});
+        {TestTypes().Make<TStringType>(),
+         TestTypes().MakeInteger(TIntegerType::I64)});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k) "
         "(agg c count) (agg s sum v))",
@@ -1080,7 +1082,7 @@ TEST(AggregateE2E, StringMinMaxOwnsAndGrowsReducerValues) {
     };
     TMockSource source(
         {"k", "v"}, std::move(batches),
-        {std::make_shared<TIntegerType>(), std::make_shared<TStringType>()});
+        {TestTypes().MakeInteger(), TestTypes().Make<TStringType>()});
     auto runtime = RunPlan(ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k) "
         "(agg c count v) (agg mn min v) (agg mx max v))", source));
@@ -1120,8 +1122,8 @@ TEST(AggregateE2E, NullableStringMinMaxReturnsNullForAllNullGroup) {
         .RefCount = 1}};
     TMockSource source(
         {"k", "v"}, std::move(batches),
-        {std::make_shared<TIntegerType>(),
-         std::make_shared<TNullable>(std::make_shared<TStringType>())});
+        {TestTypes().MakeInteger(),
+         MakeNullableType(TestTypes(), TestTypes().Make<TStringType>())});
     auto runtime = RunPlan(ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k) "
         "(agg mn min v) (agg mx max v))", source));
@@ -1165,8 +1167,8 @@ TEST(AggregateE2E, NullStringKeysGroupTogetherAndDifferFromEmpty) {
         .Selection = nullptr, .RefCount = 1}};
     NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
-        {std::make_shared<TNullable>(std::make_shared<TStringType>()),
-         std::make_shared<TIntegerType>(TIntegerType::I64)});
+        {MakeNullableType(TestTypes(), TestTypes().Make<TStringType>()),
+         TestTypes().MakeInteger(TIntegerType::I64)});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k) "
         "(agg c count) (agg s sum v))",
@@ -1205,7 +1207,7 @@ TEST(AggregateE2E, CountDistinctString) {
         .RefCount = 1}};
     TMockSource source(
         {"g", "v"}, std::move(batches),
-        {std::make_shared<TIntegerType>(), std::make_shared<TStringType>()});
+        {TestTypes().MakeInteger(), TestTypes().Make<TStringType>()});
     auto runtime = RunPlan(ParsePlan(
         "(rel aggregate "
         "  (rel aggregate (rel source \"data.parquet\") (keys g v)) "
@@ -1234,8 +1236,8 @@ TEST(AggregateE2E, CountDistinctNullableStringIgnoresNull) {
         .RefCount = 1}};
     TMockSource source(
         {"g", "v"}, std::move(batches),
-        {std::make_shared<TIntegerType>(),
-         std::make_shared<TNullable>(std::make_shared<TStringType>())});
+        {TestTypes().MakeInteger(),
+         MakeNullableType(TestTypes(), TestTypes().Make<TStringType>())});
     auto runtime = RunPlan(ParsePlan(
         "(rel aggregate "
         "  (rel aggregate (rel source \"data.parquet\") (keys g v)) "
@@ -1262,9 +1264,8 @@ TEST(AggregateE2E, NullIntegerKeysIgnorePayloadAndDifferFromZero) {
         .Selection = nullptr, .RefCount = 1}};
     NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
-        {std::make_shared<TNullable>(
-             std::make_shared<TIntegerType>(TIntegerType::I64)),
-         std::make_shared<TIntegerType>(TIntegerType::I64)});
+        {MakeNullableType(TestTypes(), TestTypes().MakeInteger(TIntegerType::I64)),
+         TestTypes().MakeInteger(TIntegerType::I64)});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k) "
         "(agg c count) (agg s sum v))",
@@ -1308,9 +1309,9 @@ TEST(AggregateE2E, CompositeNullKeysTrackValidityPerPosition) {
         .Selection = nullptr, .RefCount = 1}};
     NQdb::TMockSource source(
         {"k1", "k2", "v"}, std::move(batches),
-        {std::make_shared<TNullable>(std::make_shared<TIntegerType>()),
-         std::make_shared<TNullable>(std::make_shared<TIntegerType>()),
-         std::make_shared<TIntegerType>()});
+        {MakeNullableType(TestTypes(), TestTypes().MakeInteger()),
+         MakeNullableType(TestTypes(), TestTypes().MakeInteger()),
+         TestTypes().MakeInteger()});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k1 k2) "
         "(agg c count) (agg s sum v))",
@@ -1377,9 +1378,9 @@ TEST(AggregateE2E, MixedStringI32KeysFinalizeToSeparateColumns) {
     };
     NQdb::TMockSource source(
         {"id", "name", "v"}, std::move(batches),
-        {std::make_shared<TIntegerType>(TIntegerType::I32),
-         std::make_shared<TStringType>(),
-         std::make_shared<TIntegerType>(TIntegerType::I64)});
+        {TestTypes().MakeInteger(TIntegerType::I32),
+         TestTypes().Make<TStringType>(),
+         TestTypes().MakeInteger(TIntegerType::I64)});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys name id) "
         "(agg c count) (agg s sum v))",
@@ -1440,9 +1441,9 @@ TEST(AggregateE2E, MixedI32StringKeysPreserveReducersAcrossGrow) {
         .Selection = nullptr, .RefCount = 1}};
     NQdb::TMockSource source(
         {"id", "name", "v"}, std::move(batches),
-        {std::make_shared<TIntegerType>(TIntegerType::I32),
-         std::make_shared<TStringType>(),
-         std::make_shared<TIntegerType>(TIntegerType::I64)});
+        {TestTypes().MakeInteger(TIntegerType::I32),
+         TestTypes().Make<TStringType>(),
+         TestTypes().MakeInteger(TIntegerType::I64)});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys id name) "
         "(agg c count) (agg s sum v))",
@@ -1483,8 +1484,8 @@ TEST(AggregateE2E, TwoStringKeysFinalizeIndependentColumns) {
         .Selection = nullptr, .RefCount = 1}};
     NQdb::TMockSource source(
         {"left", "right", "v"}, std::move(batches),
-        {std::make_shared<TStringType>(), std::make_shared<TStringType>(),
-         std::make_shared<TIntegerType>(TIntegerType::I64)});
+        {TestTypes().Make<TStringType>(), TestTypes().Make<TStringType>(),
+         TestTypes().MakeInteger(TIntegerType::I64)});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys left right) "
         "(agg c count) (agg s sum v))",
@@ -1544,8 +1545,8 @@ TEST(AggregateE2E, ScalarF64KeyCanonicalizesSignedZero) {
     }};
     NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
-        {std::make_shared<TFloatType>(),
-         std::make_shared<TIntegerType>(TIntegerType::I64)});
+        {TestTypes().MakeFloat(),
+         TestTypes().MakeInteger(TIntegerType::I64)});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k) "
         "(agg c count) (agg s sum v))",
@@ -1617,9 +1618,9 @@ TEST(AggregateE2E, MixedI32F64CompositeKeyPreservesLayoutAndTypedColumns) {
     }
     NQdb::TMockSource source(
         {"k1", "k2", "v"}, std::move(batches),
-        {std::make_shared<TIntegerType>(TIntegerType::I32),
-         std::make_shared<TFloatType>(),
-         std::make_shared<TIntegerType>(TIntegerType::I64)});
+        {TestTypes().MakeInteger(TIntegerType::I32),
+         TestTypes().MakeFloat(),
+         TestTypes().MakeInteger(TIntegerType::I64)});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k1 k2) "
         "(agg c count) (agg s sum v))",
@@ -1668,8 +1669,8 @@ TEST(AggregateE2E, ScalarF32KeyCanonicalizesSignedZeroAndNaN) {
     }};
     NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
-        {std::make_shared<TFloatType>(TFloatType::F32),
-         std::make_shared<TIntegerType>(TIntegerType::I64)});
+        {TestTypes().MakeFloat(TFloatType::F32),
+         TestTypes().MakeInteger(TIntegerType::I64)});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k) "
         "(agg c count) (agg s sum v))",
@@ -1721,8 +1722,8 @@ TEST(AggregateE2E, NullableF32KeyGroupsNullSeparately) {
         .Columns = columns.data(), .ColumnCount = 2, .RowCount = 6, .RefCount = 1}};
     NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
-        {std::make_shared<TNullable>(std::make_shared<TFloatType>(TFloatType::F32)),
-         std::make_shared<TIntegerType>(TIntegerType::I64)});
+        {MakeNullableType(TestTypes(), TestTypes().MakeFloat(TFloatType::F32)),
+         TestTypes().MakeInteger(TIntegerType::I64)});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k) (agg s sum v))",
         source);
@@ -1764,10 +1765,10 @@ TEST(AggregateE2E, MixedI32F32I64CompositeKeyPreservesLayoutAndTypedColumns) {
         .Columns = columns.data(), .ColumnCount = 4, .RowCount = 8, .RefCount = 1}};
     NQdb::TMockSource source(
         {"k1", "k2", "k3", "v"}, std::move(batches),
-        {std::make_shared<TIntegerType>(TIntegerType::I32),
-         std::make_shared<TFloatType>(TFloatType::F32),
-         std::make_shared<TIntegerType>(TIntegerType::I64),
-         std::make_shared<TIntegerType>(TIntegerType::I64)});
+        {TestTypes().MakeInteger(TIntegerType::I32),
+         TestTypes().MakeFloat(TFloatType::F32),
+         TestTypes().MakeInteger(TIntegerType::I64),
+         TestTypes().MakeInteger(TIntegerType::I64)});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k1 k2 k3) "
         "(agg c count) (agg s sum v))",
@@ -1800,21 +1801,21 @@ TEST(AggregateE2E, PlannerUsesPhysicalPrunedSchemaForKeyDescriptor) {
     public:
         TPruningSource() {
             OriginalColumns_ = {
-                {"unused", std::make_shared<TStringType>()},
-                {"key_i32", std::make_shared<TIntegerType>(TIntegerType::I32)},
-                {"value", std::make_shared<TIntegerType>(TIntegerType::I64)},
-                {"key_f64", std::make_shared<TFloatType>()},
+                {"unused", TestTypes().Make<TStringType>()},
+                {"key_i32", TestTypes().MakeInteger(TIntegerType::I32)},
+                {"value", TestTypes().MakeInteger(TIntegerType::I64)},
+                {"key_f64", TestTypes().MakeFloat()},
             };
             PhysicalColumns_ = {
-                {"value", std::make_shared<TIntegerType>(TIntegerType::I64)},
-                {"key_f64", std::make_shared<TFloatType>()},
-                {"key_i32", std::make_shared<TIntegerType>(TIntegerType::I32)},
+                {"value", TestTypes().MakeInteger(TIntegerType::I64)},
+                {"key_f64", TestTypes().MakeFloat()},
+                {"key_i32", TestTypes().MakeInteger(TIntegerType::I32)},
             };
             CurrentSchema_ = TSchema{OriginalColumns_};
             PhysicalSchema_ = TSchema{PhysicalColumns_};
         }
 
-        const TSchema& Schema() const override {
+        TSchema Schema(NQumir::NAst::TTypeFactory&) const override {
             return CurrentSchema_;
         }
 
@@ -1842,6 +1843,7 @@ TEST(AggregateE2E, PlannerUsesPhysicalPrunedSchemaForKeyDescriptor) {
         }
 
         std::vector<NScheduler::TScanRowGroup> PruneRowGroups(
+            NQumir::NAst::TTypeFactory&,
             const NQumir::NAst::TExprPtr&,
             std::string_view,
             std::ostream*,
@@ -1880,7 +1882,7 @@ TEST(AggregateE2E, PlannerUsesPhysicalPrunedSchemaForKeyDescriptor) {
                 : Table(table)
             {}
 
-            const TSchema& Schema() const override {
+            TSchema Schema(NQumir::NAst::TTypeFactory&) const override {
                 return Table.PhysicalSchema_;
             }
 
@@ -1942,28 +1944,28 @@ TEST(AggregateE2E, PlannerUsesPhysicalPrunedSchemaForKeyDescriptor) {
 }
 
 TEST(AggregateE2E, CompilesNullableReducerArgumentWithUnwrappedAstType) {
-    TStructType inputType({
-        {"k", std::make_shared<TIntegerType>()},
-        {"v", std::make_shared<TNullable>(std::make_shared<TIntegerType>())},
+    const auto& inputType = *TestTypes().MakeStruct({
+        {"k", TestTypes().MakeInteger()},
+        {"v", MakeNullableType(TestTypes(), TestTypes().MakeInteger())},
     });
     NQumir::TLocation loc{};
     std::vector<NQdb::TAggregateSpec> aggs = {{
         .Name = "s",
         .Func = "sum",
-        .Arg = std::make_shared<TIdentExpr>(loc, "v"),
+        .Arg = NQumir::MakeIntrusive<TIdentExpr>(loc, "v"),
     }};
-    auto spec = NQdb::NKernel::BuildAggregateKernelSpec(inputType, {"k"}, aggs);
+    auto spec = NQdb::NKernel::BuildAggregateKernelSpec(TestTypes(), inputType, {"k"}, aggs);
     EXPECT_NO_THROW(
-        NQdb::TKernelCompiler().CompileAggregate(spec));
+        NQdb::TKernelCompiler({.Types = SharedTestTypes()}).CompileAggregate(spec));
 }
 
 // CompileAggregateHash uses the same rh_hash generator as the aggregate's table.
 TEST(AggregateE2E, CompileAggregateHashMatchesEqualCompositeKeys) {
-    TStructType inputType({
-        {"k1", std::make_shared<TIntegerType>()},
-        {"k2", std::make_shared<TIntegerType>()},
+    const auto& inputType = *TestTypes().MakeStruct({
+        {"k1", TestTypes().MakeInteger()},
+        {"k2", TestTypes().MakeInteger()},
     });
-    auto hash = NQdb::TKernelCompiler().CompileAggregateHash(inputType, {"k1", "k2"});
+    auto hash = NQdb::TKernelCompiler({.Types = SharedTestTypes()}).CompileAggregateHash(inputType, {"k1", "k2"});
 
     std::vector<int64_t> k1 = {1, 2, 1, 1};
     std::vector<int64_t> k2 = {10, 10, 10, 99};
@@ -1987,11 +1989,11 @@ TEST(AggregateE2E, CompileAggregateHashMatchesEqualCompositeKeys) {
 }
 
 TEST(AggregateE2E, CompileAggregateHashDistinguishesNullFromValue) {
-    TStructType inputType({
-        {"k", std::make_shared<TIntegerType>()},
-        {"v", std::make_shared<TNullable>(std::make_shared<TIntegerType>())},
+    const auto& inputType = *TestTypes().MakeStruct({
+        {"k", TestTypes().MakeInteger()},
+        {"v", MakeNullableType(TestTypes(), TestTypes().MakeInteger())},
     });
-    auto hash = NQdb::TKernelCompiler().CompileAggregateHash(inputType, {"k", "v"});
+    auto hash = NQdb::TKernelCompiler({.Types = SharedTestTypes()}).CompileAggregateHash(inputType, {"k", "v"});
 
     std::vector<int64_t> k = {1, 1};
     std::vector<int64_t> v = {5, 5};
@@ -2015,18 +2017,18 @@ TEST(AggregateE2E, CompileAggregateHashDistinguishesNullFromValue) {
 }
 
 TEST(AggregateE2E, RejectsUnsupportedStringReducer) {
-    TStructType inputType({
-        {"k", std::make_shared<TIntegerType>()},
-        {"v", std::make_shared<TStringType>()},
+    const auto& inputType = *TestTypes().MakeStruct({
+        {"k", TestTypes().MakeInteger()},
+        {"v", TestTypes().Make<TStringType>()},
     });
     NQumir::TLocation loc{};
     std::vector<NQdb::TAggregateSpec> aggs = {{
         .Name = "s",
         .Func = "sum",
-        .Arg = std::make_shared<TIdentExpr>(loc, "v"),
+        .Arg = NQumir::MakeIntrusive<TIdentExpr>(loc, "v"),
     }};
-    auto spec = NQdb::NKernel::BuildAggregateKernelSpec(inputType, {"k"}, aggs);
-    EXPECT_THROW(NQdb::TKernelCompiler().CompileAggregate(spec), NQumir::TError);
+    auto spec = NQdb::NKernel::BuildAggregateKernelSpec(TestTypes(), inputType, {"k"}, aggs);
+    EXPECT_THROW(NQdb::TKernelCompiler({.Types = SharedTestTypes()}).CompileAggregate(spec), NQumir::TError);
 }
 
 // M13.8: a nullable reducer argument must distinguish count(*) (every row) from
@@ -2049,8 +2051,8 @@ TEST(AggregateE2E, NullableReducerArgumentSeparatesCountStarFromCountArg) {
         .Selection = nullptr, .RefCount = 1}};
     NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
-        {std::make_shared<TIntegerType>(),
-         std::make_shared<TNullable>(std::make_shared<TIntegerType>())});
+        {TestTypes().MakeInteger(),
+         MakeNullableType(TestTypes(), TestTypes().MakeInteger())});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k) "
         "(agg c count) (agg cn count v) (agg s sum v) "
@@ -2125,8 +2127,8 @@ TEST(AggregateE2E, NullableReducerArgumentHonoursSelectionMask) {
         .Selection = selection.data(), .RefCount = 1}};
     NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
-        {std::make_shared<TIntegerType>(),
-         std::make_shared<TNullable>(std::make_shared<TIntegerType>())});
+        {TestTypes().MakeInteger(),
+         MakeNullableType(TestTypes(), TestTypes().MakeInteger())});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k) "
         "(agg c count) (agg cn count v) (agg s sum v) "
@@ -2210,8 +2212,8 @@ TEST(AggregateE2E, NullableReducerArgumentAccumulatesAcrossBatchesAndGrow) {
 
     NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
-        {std::make_shared<TIntegerType>(),
-         std::make_shared<TNullable>(std::make_shared<TIntegerType>())});
+        {TestTypes().MakeInteger(),
+         MakeNullableType(TestTypes(), TestTypes().MakeInteger())});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k) "
         "(agg c count) (agg cn count v) (agg s sum v) "
@@ -2259,8 +2261,8 @@ TEST(AggregateE2E, NonNullableReducerArgumentKeepsAggregateOutputNonNull) {
         .Selection = nullptr, .RefCount = 1}};
     NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
-        {std::make_shared<TIntegerType>(),
-         std::make_shared<TIntegerType>()});
+        {TestTypes().MakeInteger(),
+         TestTypes().MakeInteger()});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k) "
         "(agg c count) (agg cn count v) (agg s sum v) "
@@ -2319,9 +2321,9 @@ TEST(AggregateE2E, NullableReducerArgumentWithCompositeStringKey) {
         .Selection = nullptr, .RefCount = 1}};
     NQdb::TMockSource source(
         {"id", "name", "v"}, std::move(batches),
-        {std::make_shared<TIntegerType>(TIntegerType::I32),
-         std::make_shared<TStringType>(),
-         std::make_shared<TNullable>(std::make_shared<TIntegerType>())});
+        {TestTypes().MakeInteger(TIntegerType::I32),
+         TestTypes().Make<TStringType>(),
+         MakeNullableType(TestTypes(), TestTypes().MakeInteger())});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys id name) "
         "(agg c count) (agg cn count v) (agg s sum v) "
@@ -2385,8 +2387,8 @@ TEST(AggregateE2E, NullableReducerArgumentWithNullStringKey) {
         .Selection = nullptr, .RefCount = 1}};
     NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
-        {std::make_shared<TNullable>(std::make_shared<TStringType>()),
-         std::make_shared<TNullable>(std::make_shared<TIntegerType>())});
+        {MakeNullableType(TestTypes(), TestTypes().Make<TStringType>()),
+         MakeNullableType(TestTypes(), TestTypes().MakeInteger())});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k) "
         "(agg c count) (agg cn count v) (agg s sum v))",
@@ -2423,16 +2425,16 @@ namespace {
 
 void CheckAggregateStatesAcrossRepeatedGrowth(bool stringKeys) {
     auto keyType = stringKeys
-        ? TTypePtr(std::make_shared<TStringType>())
-        : TTypePtr(std::make_shared<TIntegerType>());
-    TStructType input({{"k", keyType}, {"v", std::make_shared<TIntegerType>()}});
+        ? TTypePtr(TestTypes().Make<TStringType>())
+        : TTypePtr(TestTypes().MakeInteger());
+    const auto& input = *TestTypes().MakeStruct({{"k", keyType}, {"v", TestTypes().MakeInteger()}});
     std::vector<TAggregateSpec> aggs = {{
         .Name = "s", .Func = "sum",
-        .Arg = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "v"),
+        .Arg = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "v"),
     }};
-    TKernelCompiler compiler;
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
     TAggregateProcessor processor(compiler.CompileAggregate(
-        NKernel::BuildAggregateKernelSpec(input, {"k"}, aggs)), {.InitialCapacity = 8});
+        NKernel::BuildAggregateKernelSpec(TestTypes(), input, {"k"}, aggs)), {.InitialCapacity = 8});
     std::map<int64_t, int64_t> expected;
     std::vector<int64_t> insertionOrder;
     // Interleave inserts with updates across enough batches to grow repeatedly.
@@ -2498,10 +2500,10 @@ TEST(AggregateE2E, StringKeyStatesPreserveOwnershipAcrossRepeatedGrowth) {
 }
 
 TEST(AggregateE2E, NullableFloatAndWideStatesSurviveRepeatedGrowth) {
-    TStructType input({
-        {"k", std::make_shared<TIntegerType>()},
-        {"f", std::make_shared<TNullable>(std::make_shared<TFloatType>())},
-        {"d", std::make_shared<TNullable>(std::make_shared<TDecimal>(28, 0))},
+    const auto& input = *TestTypes().MakeStruct({
+        {"k", TestTypes().MakeInteger()},
+        {"f", MakeNullableType(TestTypes(), TestTypes().MakeFloat())},
+        {"d", MakeNullableType(TestTypes(), MakeDecimalType(TestTypes(), {28, 0}))},
     });
     std::vector<TAggregateSpec> aggs;
     auto add = [&](const std::string& name, const std::string& func, const std::string& arg) {
@@ -2510,7 +2512,7 @@ TEST(AggregateE2E, NullableFloatAndWideStatesSurviveRepeatedGrowth) {
             .Func = func,
             .Arg = arg.empty()
                 ? nullptr
-                : std::make_shared<TIdentExpr>(NQumir::TLocation{}, arg),
+                : NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, arg),
         });
     };
     add("c", "count", "");
@@ -2520,9 +2522,9 @@ TEST(AggregateE2E, NullableFloatAndWideStatesSurviveRepeatedGrowth) {
             add(std::string(column) + func, func, column);
         }
     }
-    TKernelCompiler compiler;
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
     TAggregateProcessor processor(compiler.CompileAggregate(
-        NKernel::BuildAggregateKernelSpec(input, {"k"}, aggs)), {.InitialCapacity = 8});
+        NKernel::BuildAggregateKernelSpec(TestTypes(), input, {"k"}, aggs)), {.InitialCapacity = 8});
     struct TReference {
         int64_t Count = 0;
         int64_t ValidCount = 0;
@@ -2620,19 +2622,19 @@ TEST(AggregateE2E, NullableFloatAndWideStatesSurviveRepeatedGrowth) {
 }
 
 TEST(AggregateE2E, MixedStringAndNumericReducersSurviveRepeatedGrowth) {
-    TStructType input({
-        {"k", std::make_shared<TIntegerType>()},
-        {"v", std::make_shared<TIntegerType>()},
-        {"s", std::make_shared<TStringType>()},
+    const auto& input = *TestTypes().MakeStruct({
+        {"k", TestTypes().MakeInteger()},
+        {"v", TestTypes().MakeInteger()},
+        {"s", TestTypes().Make<TStringType>()},
     });
     std::vector<TAggregateSpec> aggs = {
-        {.Name = "sum", .Func = "sum", .Arg = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "v")},
-        {.Name = "min", .Func = "min", .Arg = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "s")},
-        {.Name = "max", .Func = "max", .Arg = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "s")},
+        {.Name = "sum", .Func = "sum", .Arg = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "v")},
+        {.Name = "min", .Func = "min", .Arg = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "s")},
+        {.Name = "max", .Func = "max", .Arg = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "s")},
     };
-    TKernelCompiler compiler;
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
     TAggregateProcessor processor(compiler.CompileAggregate(
-        NKernel::BuildAggregateKernelSpec(input, {"k"}, aggs)), {.InitialCapacity = 8});
+        NKernel::BuildAggregateKernelSpec(TestTypes(), input, {"k"}, aggs)), {.InitialCapacity = 8});
     struct TReference {
         int64_t Sum = 0;
         std::string Min;

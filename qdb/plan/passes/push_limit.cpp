@@ -5,19 +5,19 @@
 
 namespace NQdb {
 
-TOperatorPtr PushDownLimits(const TOperatorPtr& root) {
+TOperatorPtr PushDownLimits(NQumir::NAst::TTypeFactory& types, const TOperatorPtr& root) {
     if (!root) {
         return root;
     }
 
     if (auto limit = TMaybeOp<TLimitOperator>(root)) {
-        auto input = PushDownLimits(limit.Cast()->Input());
+        auto input = PushDownLimits(types, limit.Cast()->Input());
         if (auto project = TMaybeOp<TProjectOperator>(input)) {
-            auto pushed = std::make_shared<TLimitOperator>(
-                project.Cast()->Input(),
+            auto pushed = NQumir::MakeIntrusive<TLimitOperator>(
+                types, project.Cast()->Input(),
                 limit.Cast()->Limit(),
                 limit.Cast()->Offset());
-            project.Cast()->MutableInput() = PushDownLimits(pushed);
+            project.Cast()->MutableInput() = PushDownLimits(types, pushed);
             return project.Cast();
         }
         limit.Cast()->MutableInput() = input;
@@ -25,7 +25,7 @@ TOperatorPtr PushDownLimits(const TOperatorPtr& root) {
     }
 
     for (auto& input : root->MutableInputs()) {
-        input = PushDownLimits(input);
+        input = PushDownLimits(types, input);
     }
 
     return root;

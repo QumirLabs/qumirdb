@@ -24,9 +24,10 @@ struct TLateMaterializationDiagnostics {
     TLateMaterializationCost Cost;
 };
 
-void BindLateMaterializationSources(const TOperatorPtr& root);
+void BindLateMaterializationSources(NQumir::NAst::TTypeFactory& types, const TOperatorPtr& root);
 
 TOperatorPtr ApplyLateMaterialization(
+    NQumir::NAst::TTypeFactory& types,
     const TOperatorPtr& root,
     const TLateMaterializationSettings& settings = {},
     TLateMaterializationDiagnostics* diagnostics = nullptr);

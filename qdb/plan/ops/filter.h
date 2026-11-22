@@ -13,7 +13,7 @@ class TFilterOperator : public IOperator {
 public:
     static constexpr const char* OpId = "filter";
 
-    TFilterOperator(TOperatorPtr input, NQumir::NAst::TExprPtr predicate);
+    TFilterOperator(NQumir::NAst::TTypeFactory& types, TOperatorPtr input, NQumir::NAst::TExprPtr predicate);
 
     std::string_view RelName() const override { return OpId; }
     std::vector<TColumnReference> ColumnReferences() const override;
@@ -39,6 +39,6 @@ private:
 };
 
 std::expected<TOperatorPtr, NQumir::TError>
-MakeFilter(TOperatorPtr input, const std::string& predicate);
+MakeFilter(NQumir::NAst::TTypeFactory& types, TOperatorPtr input, const std::string& predicate);
 
 } // namespace NQdb

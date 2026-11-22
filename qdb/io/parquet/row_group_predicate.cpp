@@ -3,6 +3,7 @@
 #include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/vm_function.h>
 #include <qdb/plan/clone_expr.h>
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/utils/module_path.h>
@@ -28,13 +29,6 @@ namespace {
 
 constexpr const char* EvalFn = "__row_group_predicate__";
 
-TVmFrontendContext& RowGroupVmContext() {
-    static TVmFrontendContext context({
-        NUtils::ModuleFile("row_group_interval.oz"),
-    });
-    return context;
-}
-
 enum class ENumberKind {
     Invalid,
     Signed,
@@ -58,8 +52,8 @@ TNumberInfo NumberInfo(const TTypePtr& type) {
     if (auto decimal = DecimalSpecOfValueType(UnwrapNullableType(type))) {
         return {.Kind = ENumberKind::Decimal, .BitWidth = 128, .Scale = decimal->Scale};
     }
-    auto valueType = UnwrapNamedType(UnwrapNullableType(type));
-    if (auto integer = TMaybeType<TIntegerType>(valueType)) {
+    auto valueType = UnwrapNamedValueType(UnwrapNullableType(type));
+    if (auto integer = MaybeIntegerType(valueType)) {
         return {
             .Kind = integer.Cast()->IsSigned()
                 ? ENumberKind::Signed
@@ -73,16 +67,16 @@ TNumberInfo NumberInfo(const TTypePtr& type) {
     return {};
 }
 
-TTypePtr PrimitiveType(ENumberKind kind) {
+TTypePtr PrimitiveType(NQumir::NAst::TTypeFactory& types, ENumberKind kind) {
     switch (kind) {
         case ENumberKind::Signed:
-            return std::make_shared<TIntegerType>(TIntegerType::I64);
+            return types.MakeInteger(TIntegerType::I64);
         case ENumberKind::Unsigned:
-            return std::make_shared<TIntegerType>(TIntegerType::U64);
+            return types.MakeInteger(TIntegerType::U64);
         case ENumberKind::Float:
-            return std::make_shared<TFloatType>();
+            return types.MakeFloat();
         case ENumberKind::Decimal:
-            return std::make_shared<TIntegerType>(TIntegerType::I128);
+            return types.MakeInteger(TIntegerType::I128);
         case ENumberKind::Invalid:
             return nullptr;
     }
@@ -114,35 +108,35 @@ std::optional<__int128> Rescaled(__int128 unscaled, int32_t digits) {
 }
 
 TExprPtr Ident(std::string name) {
-    return std::make_shared<TIdentExpr>(NQumir::TLocation{}, std::move(name));
+    return NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, std::move(name));
 }
 
 TExprPtr Call(std::string name, std::vector<TExprPtr> args = {}) {
-    return std::make_shared<TCallExpr>(
+    return NQumir::MakeIntrusive<TCallExpr>(
         NQumir::TLocation{}, Ident(std::move(name)), std::move(args));
 }
 
-TExprPtr I64(int64_t value) {
-    return std::make_shared<TNumberExpr>(NQumir::TLocation{}, value);
+TExprPtr I64(NQumir::NAst::TTypeFactory& types, int64_t value) {
+    return NQumir::MakeIntrusive<TNumberExpr>(NQumir::TLocation{}, value, types);
 }
 
-TExprPtr U64(uint64_t value) {
-    auto out = std::make_shared<TNumberExpr>(
-        NQumir::TLocation{}, std::bit_cast<int64_t>(value));
-    out->Type = std::make_shared<TIntegerType>(TIntegerType::U64);
+TExprPtr U64(NQumir::NAst::TTypeFactory& types, uint64_t value) {
+    auto out = NQumir::MakeIntrusive<TNumberExpr>(
+        NQumir::TLocation{}, std::bit_cast<int64_t>(value), types);
+    out->Type = types.MakeInteger(TIntegerType::U64);
     return out;
 }
 
-TExprPtr F64(double value) {
-    return std::make_shared<TNumberExpr>(NQumir::TLocation{}, value);
+TExprPtr F64(NQumir::NAst::TTypeFactory& types, double value) {
+    return NQumir::MakeIntrusive<TNumberExpr>(NQumir::TLocation{}, value, types);
 }
 
 // The VM takes 64-bit arguments; an i128 travels as two words.
-TExprPtr I128(__int128 value) {
+TExprPtr I128(NQumir::NAst::TTypeFactory& types, __int128 value) {
     const auto bits = static_cast<unsigned __int128>(value);
     return Call("rg_i128_words", {
-        I64(static_cast<int64_t>(static_cast<uint64_t>(bits))),
-        I64(static_cast<int64_t>(static_cast<uint64_t>(bits >> 64))),
+        I64(types, static_cast<int64_t>(static_cast<uint64_t>(bits))),
+        I64(types, static_cast<int64_t>(static_cast<uint64_t>(bits >> 64))),
     });
 }
 
@@ -176,8 +170,9 @@ struct TLoweredNumber {
 
 class TPredicateLowerer {
 public:
-    TPredicateLowerer(const TSchema& schema, std::string_view sourceAlias)
-        : Schema_(schema)
+    TPredicateLowerer(NQumir::NAst::TTypeFactory& types, const TSchema& schema, std::string_view sourceAlias)
+        : Types_(types)
+        , Schema_(schema)
         , SourceAlias_(sourceAlias)
     {
         for (size_t i = 0; i < schema.Columns.size(); ++i) {
@@ -245,7 +240,7 @@ public:
     std::vector<TParam> Params() const {
         std::vector<TParam> out;
         auto param = [&](std::string name, TTypePtr type) {
-            out.push_back(std::make_shared<TVarStmt>(
+            out.push_back(NQumir::MakeIntrusive<TVarStmt>(
                 NQumir::TLocation{}, std::move(name), std::move(type)));
         };
         for (size_t column = 0; column < Schema_.Columns.size(); ++column) {
@@ -253,13 +248,13 @@ public:
             if (!info) {
                 continue;
             }
-            auto word = std::make_shared<TIntegerType>(TIntegerType::I64);
+            auto word = Types_.MakeInteger(TIntegerType::I64);
             if (info.Kind == ENumberKind::Decimal) {
                 for (const char* bound : {"lo_lo", "lo_hi", "hi_lo", "hi_hi"}) {
                     param(ParamName(column, bound), word);
                 }
             } else {
-                auto type = PrimitiveType(info.Kind);
+                auto type = PrimitiveType(Types_, info.Kind);
                 param(ParamName(column, "lo"), type);
                 param(ParamName(column, "hi"), type);
             }
@@ -312,7 +307,7 @@ private:
         if (value.Info.Scale < target.Scale) {
             value.Expr = Call("rg_i128_scale", {
                 std::move(value.Expr),
-                I128(Pow10(target.Scale - value.Info.Scale)),
+                I128(Types_, Pow10(target.Scale - value.Info.Scale)),
             });
         }
         value.Info = target;
@@ -385,7 +380,7 @@ private:
     // the target scale exactly or stay unknown.
     TLoweredNumber LowerDecimalLiteral(
         const TExprPtr& expr,
-        const std::shared_ptr<TNumberExpr>& number,
+        const TNumberExpr* number,
         bool negative,
         TNumberInfo target)
     {
@@ -405,13 +400,14 @@ private:
             return {};
         }
         return {
-            .Expr = Call("rg_const", {I128(*unscaled)}),
+            .Expr = Call("rg_const", {I128(Types_, *unscaled)}),
             .Info = target,
         };
     }
 
     TLoweredNumber LowerLiteral(
-        const std::shared_ptr<TNumberExpr>& number,
+        const TExprPtr& expr,
+        const TNumberExpr* number,
         std::optional<TNumberInfo> expected)
     {
         TNumberInfo target = expected.value_or(NumberInfo(number->Type));
@@ -419,14 +415,14 @@ private:
             return {};
         }
         if (target.Kind == ENumberKind::Decimal) {
-            return LowerDecimalLiteral(number, number, false, target);
+            return LowerDecimalLiteral(expr, number, false, target);
         }
         TExprPtr literal;
         switch (target.Kind) {
             case ENumberKind::Float:
                 // Not rounded to f32: the kernel compares an f32 column with a
                 // literal in f64, so 16777217 stays 16777217.
-                literal = F64(number->IsFloat()
+                literal = F64(Types_, number->IsFloat()
                     ? number->FloatValue
                     : static_cast<double>(number->IntValue));
                 break;
@@ -434,13 +430,13 @@ private:
                 if (number->IsFloat()) {
                     return {};
                 }
-                literal = I64(number->IntValue);
+                literal = I64(Types_, number->IntValue);
                 break;
             case ENumberKind::Unsigned:
                 if (number->IsFloat() || number->IntValue < 0) {
                     return {};
                 }
-                literal = U64(static_cast<uint64_t>(number->IntValue));
+                literal = U64(Types_, static_cast<uint64_t>(number->IntValue));
                 break;
             case ENumberKind::Decimal:
             case ENumberKind::Invalid:
@@ -453,7 +449,7 @@ private:
     }
 
     TLoweredNumber LowerIdentifier(
-        const std::shared_ptr<TIdentExpr>& ident,
+        const TIdentExpr* ident,
         std::optional<TNumberInfo> expected)
     {
         auto column = ResolveColumn(ident->Name);
@@ -527,7 +523,7 @@ private:
                 : op == "-" ? "rg_i64_sub"
                 : "rg_i64_mul";
             result = Call(fn, {
-                std::move(left.Expr), std::move(right.Expr), I64(low), I64(high),
+                std::move(left.Expr), std::move(right.Expr), I64(Types_, low), I64(Types_, high),
             });
         } else if (native.Kind == ENumberKind::Unsigned) {
             const std::string fn = op == "+" ? "rg_u64_add"
@@ -537,7 +533,7 @@ private:
                 std::move(left.Expr), std::move(right.Expr),
             };
             if (op != "-") {
-                args.push_back(U64(UnsignedHigh(native.BitWidth)));
+                args.push_back(U64(Types_, UnsignedHigh(native.BitWidth)));
             }
             result = Call(fn, std::move(args));
         } else if (native.Kind == ENumberKind::Float) {
@@ -561,7 +557,7 @@ private:
             return {};
         }
         if (auto number = TMaybeNode<TNumberExpr>(expr)) {
-            return LowerLiteral(number.Cast(), expected);
+            return LowerLiteral(expr, number.Cast(), expected);
         }
         if (auto ident = TMaybeNode<TIdentExpr>(expr)) {
             return LowerIdentifier(ident.Cast(), expected);
@@ -600,7 +596,7 @@ private:
             if (native.Kind == ENumberKind::Signed) {
                 auto [low, high] = SignedLimits(native.BitWidth);
                 result = Call("rg_i64_neg", {
-                    std::move(operand.Expr), I64(low), I64(high),
+                    std::move(operand.Expr), I64(Types_, low), I64(Types_, high),
                 });
             } else if (native.Kind == ENumberKind::Float) {
                 result = Call("rg_f64_neg", {std::move(operand.Expr)});
@@ -678,6 +674,7 @@ private:
     }
 
 private:
+    NQumir::NAst::TTypeFactory& Types_;
     const TSchema& Schema_;
     std::string SourceAlias_;
     std::unordered_map<std::string, size_t> BareColumns_;
@@ -698,6 +695,7 @@ TRowGroupPredicateEvaluator::TRowGroupPredicateEvaluator(std::unique_ptr<TImpl> 
 TRowGroupPredicateEvaluator::~TRowGroupPredicateEvaluator() = default;
 
 std::unique_ptr<TRowGroupPredicateEvaluator> TRowGroupPredicateEvaluator::Compile(
+    NQumir::NAst::TTypeFactory& types,
     const TExprPtr& predicate,
     const TSchema& schema,
     std::string_view sourceAlias,
@@ -709,7 +707,7 @@ std::unique_ptr<TRowGroupPredicateEvaluator> TRowGroupPredicateEvaluator::Compil
                 *diagnostics << "row-group predicate: " << message << '\n';
             }
         };
-        TPredicateLowerer lowerer(schema, sourceAlias);
+        TPredicateLowerer lowerer(types, schema, sourceAlias);
         auto typedPredicate = CloneExpr(predicate);
         std::vector<std::pair<std::string, TTypePtr>> fields;
         fields.reserve(schema.Columns.size() * (sourceAlias.empty() ? 1 : 2));
@@ -722,24 +720,25 @@ std::unique_ptr<TRowGroupPredicateEvaluator> TRowGroupPredicateEvaluator::Compil
             }
         }
         NKernel::AnnotateExprTreeTypes(
-            typedPredicate, TStructType(std::move(fields)));
+            types, typedPredicate, *types.MakeStruct(std::move(fields)));
         auto truth = lowerer.LowerTruth(typedPredicate);
         auto params = lowerer.Params();
 
         NQumir::TLocation loc{};
-        auto body = std::make_shared<TBlockExpr>(
+        auto body = NQumir::MakeIntrusive<TBlockExpr>(
             loc,
-            std::vector<TExprPtr>{std::make_shared<TReturnExpr>(loc, std::move(truth))});
+            std::vector<TExprPtr>{NQumir::MakeIntrusive<TReturnExpr>(loc, std::move(truth))});
         if (diagnostics) {
             diagnostic("compiled body " + NQumir::NAst::NCore::PrintAst(body));
         }
 
-        auto compiled = TVmFunction::Compile(RowGroupVmContext(), {
+        TVmFrontendContext frontend(types, {NUtils::ModuleFile("row_group_interval.oz")});
+        auto compiled = TVmFunction::Compile(frontend, {
             .NamePrefix = EvalFn,
             .Params = std::move(params),
             .Body = std::move(body),
             .ReturnType =
-                std::make_shared<TIntegerType>(TIntegerType::I64),
+                types.MakeInteger(TIntegerType::I64),
             .Imports = {"row_group_interval"},
         });
         if (!compiled) {

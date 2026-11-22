@@ -11,13 +11,13 @@
 
 namespace NQdb {
 
-TFilterOperator::TFilterOperator(TOperatorPtr input, NQumir::NAst::TExprPtr predicate)
+TFilterOperator::TFilterOperator(NQumir::NAst::TTypeFactory& types, TOperatorPtr input, NQumir::NAst::TExprPtr predicate)
     : Input_(std::move(input))
     , Predicate_(std::move(predicate))
 {
     // Filter is schema-preserving: output = required = input's output schema.
     auto schema = Input_->OutputColumns();
-    Type = std::make_shared<NQumir::NAst::TFunctionType>(
+    Type = types.MakeFunction(
         std::vector<NQumir::NAst::TTypePtr>{schema},
         schema);
 }
@@ -34,15 +34,15 @@ const std::string TFilterOperator::ToString() const {
 }
 
 std::expected<TOperatorPtr, NQumir::TError>
-MakeFilter(TOperatorPtr input, const std::string& predicate) {
+MakeFilter(NQumir::NAst::TTypeFactory& types, TOperatorPtr input, const std::string& predicate) {
     std::istringstream ss(predicate);
     NQumir::NAst::NCore::TTokenStream tokens(ss);
-    NQumir::NAst::NCore::TParser parser;
+    NQumir::NAst::NCore::TParser parser(types);
     auto parsed = parser.Parse(tokens);
     if (!parsed) {
         return std::unexpected(parsed.error());
     }
-    return std::make_shared<TFilterOperator>(std::move(input), std::move(*parsed));
+    return NQumir::MakeIntrusive<TFilterOperator>(types, std::move(input), std::move(*parsed));
 }
 
 } // namespace NQdb

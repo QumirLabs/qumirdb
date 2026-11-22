@@ -25,9 +25,13 @@ struct TKernelImage {
 // Deduplicates and fuses `kernels` as FinalizeKernels does and compiles them once; binds no slot.
 // With the llvm backend a non-empty cacheDir persists the library objects there (created if missing)
 // and the image carries them in Dependencies; tpde has no cache, vm throws (an image is native code).
-// Fusion rewrites the ASTs, so the kernels cannot be finalized afterwards.
+// Fusion rewrites the ASTs, so the kernels cannot be finalized afterwards. The kernels
+// are built in `types`.
 TKernelImage CompileKernelImage(
-    std::span<TGeneratedKernel> kernels, EKernelBackend backend = EKernelBackend::Llvm, const std::string& cacheDir = {});
+    std::span<TGeneratedKernel> kernels,
+    NQumir::NAst::TTypeFactory& types,
+    EKernelBackend backend = EKernelBackend::Llvm,
+    const std::string& cacheDir = {});
 
 // Links the image into this process and binds slots[i] to kernel i.
 void LoadKernelImage(const TKernelImage& image, std::span<const std::shared_ptr<TKernelSlot>> slots);

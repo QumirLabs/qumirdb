@@ -48,7 +48,7 @@
                       (== |n2.n_name| (cast "UNITED KINGDOM" <named StringView>)))
                     (&& (== |n1.n_name| (cast "UNITED KINGDOM" <named StringView>))
                       (== |n2.n_name| (cast "FRANCE" <named StringView>)))))
-                (&& (<= (: 9131 i32) l_shipdate) (<= l_shipdate (: 9861 i32))))
+                (&& (<= (: 9131 <named DATE [i32]>) l_shipdate) (<= l_shipdate (: 9861 <named DATE [i32]>))))
             )
           )
         )

@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "test_types.h"
 
 #include <set>
 
@@ -128,7 +129,7 @@ struct THeapFunctions {
 
 THeapFunctions CompileHeapFunctions() {
     std::vector<NQumir::NAst::TExprPtr> programStmts;
-    auto library = NQdb::NKernel::ParseFunctionLibrary(
+    auto library = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
         NQdb::NKernel::ReadSortKernel("heap.oz"));
     if (!library) {
         ADD_FAILURE() << library.error().ToString();
@@ -138,7 +139,7 @@ THeapFunctions CompileHeapFunctions() {
         programStmts.push_back(std::move(stmt));
     }
 
-    auto wrappers = NQdb::NKernel::ParseFunctionLibrary(TestHeapWrapperSource);
+    auto wrappers = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(), TestHeapWrapperSource);
     if (!wrappers) {
         ADD_FAILURE() << wrappers.error().ToString();
         return {};
@@ -151,8 +152,8 @@ THeapFunctions CompileHeapFunctions() {
     options.CoreInput = true;
     options.NativeCode = true;
     options.AllowOverloads = true;
-    auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
-    auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(options, nullptr, &NQdb::TestTypes());
+    auto program = NQumir::MakeIntrusive<NQumir::NAst::TBlockExpr>(
         NQumir::TLocation{}, std::move(programStmts));
     std::string error;
     auto entries = runner->CompileKernelAst(program,

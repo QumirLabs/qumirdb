@@ -9,13 +9,13 @@ namespace NQdb {
 
 using namespace NQumir::NAst;
 
-TLimitOperator::TLimitOperator(TOperatorPtr input, int64_t limit, int64_t offset)
+TLimitOperator::TLimitOperator(NQumir::NAst::TTypeFactory& types, TOperatorPtr input, int64_t limit, int64_t offset)
     : Input_(std::move(input))
     , Limit_(limit)
     , Offset_(offset)
 {
     auto inputSchema = Input_->OutputColumns();
-    Type = std::make_shared<TFunctionType>(
+    Type = types.MakeFunction(
         std::vector<TTypePtr>{inputSchema},
         inputSchema);
 }

@@ -84,27 +84,29 @@ TAggReducerLayout BuildAggReducerLayout(
 
 // Avoid re-wrapping an already same-named type (would self-reference).
 inline NQumir::NAst::TTypePtr AsNamed(
-    const std::string& name, const NQumir::NAst::TTypePtr& type)
+    NQumir::NAst::TTypeFactory& types, const std::string& name, const NQumir::NAst::TTypePtr& type)
 {
     using namespace NQumir::NAst;
     if (auto named = TMaybeType<TNamedType>(type); named && named.Cast()->Name == name) {
         return type;
     }
-    return std::make_shared<TNamedType>(name, type);
+    return types.MakeNamed(name, type);
 }
 
 // Generates concrete hash and equality overloads for lookup and stored keys.
 std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
+    NQumir::NAst::TTypeFactory& types,
     const TAggregateKeyDescriptor& key);
 
 // Generates key_owned_bytes(LookupKey) and key_clone_owned(LookupKey, u8*).
 std::vector<NQumir::NAst::TExprPtr> GenKeyOwnershipFunDecls(
+    NQumir::NAst::TTypeFactory& types,
     const TAggregateKeyDescriptor& key);
 
 // Builds a zero value of `type`: 0 / 0.0 / false / null pointer, or a struct
 // with every field zeroed. Used for the stored_witness argument that binds the
 // StoredKey template type at dual-key call sites.
-NQumir::NAst::TExprPtr ZeroValueExpr(const NQumir::NAst::TTypePtr& type);
+NQumir::NAst::TExprPtr ZeroValueExpr(NQumir::NAst::TTypeFactory& types, const NQumir::NAst::TTypePtr& type);
 
 void SubstFieldsInPlace(
     NQumir::NAst::TExprPtr& expr,
@@ -118,6 +120,7 @@ void SubstFieldsInPlace(
 // arrived with (null = every row); the two must not overlap. A row outside
 // inputSelection gets 0 and its columns are not read.
 NQumir::NAst::TExprPtr GenFilterKernelAst(
+    NQumir::NAst::TTypeFactory& types,
     NQumir::NAst::TExprPtr predicate,
     const NQumir::NAst::TStructType& inputType,
     const std::unordered_map<std::string, int32_t>& fieldIndices,
@@ -140,6 +143,7 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
 // (same path as GenFilterKernelAst). `__arena__` holds the strings the predicate
 // builds (`||`); they are released before the filter returns.
 NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
+    NQumir::NAst::TTypeFactory& types,
     NQumir::NAst::TExprPtr predicate,
     const NQumir::NAst::TStructType& innerType,
     size_t leftFieldCount,
@@ -153,6 +157,7 @@ NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
 // buffer k holds values of computedTypes[k]; the explicit cast pins the buffer
 // type. ident projections are NOT here (handled zero-copy by project_exec).
 NQumir::NAst::TExprPtr GenProjectKernelAst(
+    NQumir::NAst::TTypeFactory& types,
     std::vector<NQumir::NAst::TExprPtr> computedExprs,
     const std::vector<NQumir::NAst::TTypePtr>& computedTypes,
     const NQumir::NAst::TStructType& inputType,
@@ -200,6 +205,7 @@ std::optional<TAggRowLayout> BuildAggRowLayout(
 // table in that layout to agg_rows_update, and moves a swiss table there when
 // it must grow past its RowSwitchGroups.
 NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& inputType,
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
@@ -215,6 +221,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
 // agr_find_or_insert, then each row is applied to its group's states. Returns
 // 0, or -1 when an allocation fails.
 NQumir::NAst::TExprPtr GenGenericAggregateRowsUpdateAst(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& inputType,
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
@@ -230,6 +237,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateRowsUpdateAst(
 // With a row layout, a table in that layout is projected by a scan of its
 // arena.
 NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
+    NQumir::NAst::TTypeFactory& types,
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr hashTableType,
@@ -242,6 +250,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
 // destroys ht before returning. rowLayout: the aggregate has a row layout, so
 // ht may be in either layout.
 NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
+    NQumir::NAst::TTypeFactory& types,
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr hashTableType,
@@ -254,6 +263,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
 // read from the swiss table's dense keys or from the rows of a table in the
 // row layout. Returns ht.Size or -1 on capacity failure.
 NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
+    NQumir::NAst::TTypeFactory& types,
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr hashTableType,
@@ -269,6 +279,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
 // kernel compilation: generated table code calls reduce_0..reduce_{N-1}
 // directly by name (no function pointers, no runtime dispatch on Func).
 std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
+    NQumir::NAst::TTypeFactory& types,
     const TAggReducerLayout& layout);
 
 // Generates a single FunDecl:
@@ -284,7 +295,7 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
 // L2b) calls by static name to update all N aggregate buffers for one dense
 // slot. Everything else in that library is agg-count-agnostic and driven by
 // ht.NumAggs/ht.AggBuffers at runtime.
-NQumir::NAst::TExprPtr GenApplyReducersFunDecl(const TAggReducerLayout& layout);
+NQumir::NAst::TExprPtr GenApplyReducersFunDecl(NQumir::NAst::TTypeFactory& types, const TAggReducerLayout& layout);
 
 } // namespace NKernel
 } // namespace NQdb

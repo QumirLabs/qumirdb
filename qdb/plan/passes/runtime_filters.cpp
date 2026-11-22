@@ -207,7 +207,7 @@ std::optional<double> PlacementVariableBenefit(
         // for rows rejected at its input. Use the key NDV at each input: the
         // join input can have a different key distribution after filtering.
         for (const auto& stage : target.UpstreamStages) {
-            if (!creditedStages.insert(stage.Operator.get()).second
+            if (!creditedStages.insert(stage.Operator.Get()).second
                 || !stage.Input->Stats_) {
                 continue;
             }
@@ -428,8 +428,7 @@ bool SameKeyType(const NQumir::NAst::TStructType& outer,
 {
     const auto outerType = FieldType(&outer, outerKey);
     const auto innerType = FieldType(&inner, innerKey);
-    return outerType && innerType
-        && outerType->ToString() == innerType->ToString();
+    return outerType && innerType && outerType == innerType;
 }
 
 bool PreservesKeys(const TOperatorPtr& outer, const TOperatorPtr& input,
@@ -517,9 +516,7 @@ std::optional<std::vector<std::vector<std::string>>> UnionBranchKeys(
         for (size_t position : keyPositions) {
             const auto& outputField = output->Fields[position];
             const auto& branchField = schema->Fields[position];
-            if (!outputField.second || !branchField.second
-                || outputField.second->ToString()
-                    != branchField.second->ToString()) {
+            if (!outputField.second || outputField.second != branchField.second) {
                 return std::nullopt;
             }
             translated.push_back(branchField.first);
@@ -716,7 +713,7 @@ void FindReusableFilter(const TOperatorPtr& node,
                 return SameKeyType(*node->OutputColumns(), key,
                         *left->OutputColumns(), key)
                     && !FieldType(
-                        ancestor.Cast()->Right()->OutputColumns().get(), key);
+                        ancestor.Cast()->Right()->OutputColumns(), key);
             })) {
         return;
     }

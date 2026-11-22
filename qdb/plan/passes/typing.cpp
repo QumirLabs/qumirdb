@@ -14,6 +14,7 @@
 #include <qdb/plan/types/date.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/plan/types/decimal.h>
+#include <qdb/plan/types/type_text.h>
 #include <qdb/kernel/annotate_type.h>
 
 #include <qumir/error.h>
@@ -31,28 +32,28 @@ using namespace NQumir::NAst;
 
 namespace {
 
-bool IsIntType(const TTypePtr& t) { return static_cast<bool>(TMaybeType<TIntegerType>(t)); }
+bool IsIntType(const TTypePtr& t) { return static_cast<bool>(MaybeIntegerType(t)); }
 bool IsFloatType(const TTypePtr& t) { return static_cast<bool>(TMaybeType<TFloatType>(t)); }
 
 // Narrowest integer type holding both operands, as in DuckDB: the wider of two
 // integers of one signedness, and for mixed signedness the signed type wider than
 // the unsigned operand (UINTEGER with INTEGER gives BIGINT). nullptr when no
 // 128-bit-or-narrower type holds both.
-TTypePtr UnifyIntegers(const TIntegerType& a, const TIntegerType& b) {
+TTypePtr UnifyIntegers(NQumir::NAst::TTypeFactory& types, const TIntegerType& a, const TIntegerType& b) {
     using EKind = TIntegerType::EKind;
     if (a.IsSigned() == b.IsSigned()) {
-        return std::make_shared<TIntegerType>(a.BitWidth() >= b.BitWidth() ? a.Kind : b.Kind);
+        return types.MakeInteger(a.BitWidth() >= b.BitWidth() ? a.Kind : b.Kind);
     }
     const auto& sig = a.IsSigned() ? a : b;
     const auto& uns = a.IsSigned() ? b : a;
     if (sig.BitWidth() > uns.BitWidth()) {
-        return std::make_shared<TIntegerType>(sig.Kind);
+        return types.MakeInteger(sig.Kind);
     }
     switch (uns.BitWidth()) {
-        case 8: return std::make_shared<TIntegerType>(EKind::I16);
-        case 16: return std::make_shared<TIntegerType>(EKind::I32);
-        case 32: return std::make_shared<TIntegerType>(EKind::I64);
-        case 64: return std::make_shared<TIntegerType>(EKind::I128);
+        case 8: return types.MakeInteger(EKind::I16);
+        case 16: return types.MakeInteger(EKind::I32);
+        case 32: return types.MakeInteger(EKind::I64);
+        case 64: return types.MakeInteger(EKind::I128);
         default: return nullptr;
     }
 }
@@ -62,11 +63,11 @@ TTypePtr UnifyIntegers(const TIntegerType& a, const TIntegerType& b) {
 // branch is cast in); else two floats -> the wider (REAL with DOUBLE is DOUBLE), a float with
 // an integer -> the float, as in PostgreSQL; else the wider integer. Returns nullptr if the
 // base types are not a compatible numeric mix (caller reports the mismatch).
-TTypePtr UnifyUnionBase(const TTypePtr& a, const TTypePtr& b) {
+TTypePtr UnifyUnionBase(NQumir::NAst::TTypeFactory& types, const TTypePtr& a, const TTypePtr& b) {
     if (!a || !b) return nullptr;
-    // A DATE prints as its integer type: test it first. PostgreSQL has no DATE with a number.
+    // PostgreSQL has no DATE with a number.
     if (IsDateType(a) || IsDateType(b)) return IsDateType(a) && IsDateType(b) ? a : nullptr;
-    if (a->ToString() == b->ToString()) return a;
+    if (a == b) return a;
     auto da = DecimalSpecOfValueType(a);
     auto db = DecimalSpecOfValueType(b);
     const bool numA = da || IsFloatType(a) || IsIntType(a);
@@ -74,22 +75,22 @@ TTypePtr UnifyUnionBase(const TTypePtr& a, const TTypePtr& b) {
     if (!numA || !numB) return nullptr;
     if (da || db) {
         int32_t scale = std::max(da ? da->Scale : 0, db ? db->Scale : 0);
-        return std::make_shared<TDecimal>(MaxDecimalPrecision, scale);
+        return MakeDecimalType(types, {MaxDecimalPrecision, scale});
     }
     if (IsFloatType(a) && IsFloatType(b)) {
         const int aBits = TMaybeType<TFloatType>(a).Cast()->BitWidth();
         return aBits >= TMaybeType<TFloatType>(b).Cast()->BitWidth() ? a : b;
     }
     if (IsFloatType(a) || IsFloatType(b)) return IsFloatType(a) ? a : b;
-    return UnifyIntegers(*TMaybeType<TIntegerType>(a).Cast(), *TMaybeType<TIntegerType>(b).Cast());
+    return UnifyIntegers(types, *MaybeIntegerType(a).Cast(), *MaybeIntegerType(b).Cast());
 }
 
 // Unify two UNION column types (nullability + numeric base). nullptr -> incompatible.
-TTypePtr UnifyUnionColumn(const TTypePtr& a, const TTypePtr& b) {
-    auto base = UnifyUnionBase(UnwrapNullableType(a), UnwrapNullableType(b));
+TTypePtr UnifyUnionColumn(NQumir::NAst::TTypeFactory& types, const TTypePtr& a, const TTypePtr& b) {
+    auto base = UnifyUnionBase(types, UnwrapNullableType(a), UnwrapNullableType(b));
     if (!base) return nullptr;
     return (IsNullableType(a) || IsNullableType(b))
-        ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(base)) : base;
+        ? MakeNullableType(types, base) : base;
 }
 
 // An operator reads only columns its inputs produce. Kernel type inference types
@@ -130,6 +131,7 @@ void RequireInputColumns(const TOperatorPtr& op) {
 // Which output columns of a UNION branch are untyped NULLs: a projected expression that
 // derives from bare NULLs only (see NKernel::IsUntypedNullValue).
 std::vector<bool> UntypedNullColumns(
+    NQumir::NAst::TTypeFactory& types,
     const TOperatorPtr& branch,
     const NKernel::TAnnotationContext& context)
 {
@@ -143,7 +145,7 @@ std::vector<bool> UntypedNullColumns(
     for (size_t i = 0; input && i < result.size(); ++i) {
         const auto& expr = proj.Cast()->Projections()[i].Expression;
         result[i] = !TMaybeNode<TIdentExpr>(expr)
-            && NKernel::IsUntypedNullValue(expr, *input, &context);
+            && NKernel::IsUntypedNullValue(types, expr, *input, &context);
     }
     return result;
 }
@@ -155,30 +157,33 @@ std::vector<bool> UntypedNullColumns(
 // join are typed against incomplete schemas, so their references are not checked
 // until then.
 bool AnnotateSubtree(
+    NQumir::NAst::TTypeFactory& types,
     const TOperatorPtr& root,
     const NKernel::TAnnotationContext& context)
 {
     bool typed = true;
     for (const auto& input : root->Inputs()) {
-        typed = AnnotateSubtree(input, context) && typed;
+        typed = AnnotateSubtree(types, input, context) && typed;
     }
     if (typed) {
         RequireInputColumns(root);
     }
-    AnnotateOperatorType(root, context);
+    AnnotateOperatorType(types, root, context);
     return typed && root->OutputColumns();
 }
 
 } // namespace
 
 void AnnotateTypes(
+    NQumir::NAst::TTypeFactory& types,
     const TOperatorPtr& root,
     const NKernel::TAnnotationContext& context)
 {
-    AnnotateSubtree(root, context);
+    AnnotateSubtree(types, root, context);
 }
 
 void AnnotateOperatorType(
+    NQumir::NAst::TTypeFactory& types,
     const TOperatorPtr& root,
     const NKernel::TAnnotationContext& context)
 {
@@ -189,11 +194,11 @@ void AnnotateOperatorType(
             // EnableRowId updates the already-qualified source type eagerly.
             return;
         }
-        root->Type = std::make_shared<TFunctionType>(
+        root->Type = types.MakeFunction(
             std::vector<TTypePtr>{},
-            StructTypeFromSchema(src->GetTable()->Schema()));
+            StructTypeFromSchema(types, src->TableSchema()));
         if (src->EmitsRowId()) {
-            src->EnableRowId();
+            src->EnableRowId(types);
         }
         return;
     }
@@ -201,14 +206,14 @@ void AnnotateOperatorType(
     if (auto maybe = TMaybeOp<TCteRef>(root)) {
         // Re-derive from the definition, whose schema may have shifted while it
         // was optimized (e.g. set-op branch coercion).
-        root->Type = std::make_shared<TFunctionType>(
+        root->Type = types.MakeFunction(
             std::vector<TTypePtr>{}, maybe.Cast()->Def()->OutputType);
         return;
     }
 
     if (auto maybe = TMaybeOp<TFilterOperator>(root)) {
         auto schema = maybe.Cast()->Input()->OutputColumns();
-        root->Type = std::make_shared<TFunctionType>(
+        root->Type = types.MakeFunction(
             std::vector<TTypePtr>{schema},
             schema);
         return;
@@ -217,7 +222,7 @@ void AnnotateOperatorType(
     if (auto maybe = TMaybeOp<TSortOperator>(root)) {
         auto sort = maybe.Cast();
         auto schema = sort->Input()->OutputColumns();
-        root->Type = std::make_shared<TFunctionType>(
+        root->Type = types.MakeFunction(
             std::vector<TTypePtr>{schema},
             schema);
         return;
@@ -226,7 +231,7 @@ void AnnotateOperatorType(
     if (auto maybe = TMaybeOp<TTopSortOperator>(root)) {
         auto sort = maybe.Cast();
         auto schema = sort->Input()->OutputColumns();
-        root->Type = std::make_shared<TFunctionType>(
+        root->Type = types.MakeFunction(
             std::vector<TTypePtr>{schema},
             schema);
         return;
@@ -234,7 +239,7 @@ void AnnotateOperatorType(
 
     if (auto maybe = TMaybeOp<TLimitOperator>(root)) {
         auto schema = maybe.Cast()->Input()->OutputColumns();
-        root->Type = std::make_shared<TFunctionType>(
+        root->Type = types.MakeFunction(
             std::vector<TTypePtr>{schema},
             schema);
         return;
@@ -247,9 +252,9 @@ void AnnotateOperatorType(
         for (const auto& column : late->Columns()) {
             fields.emplace_back(column.OutputName, column.Type);
         }
-        root->Type = std::make_shared<TFunctionType>(
+        root->Type = types.MakeFunction(
             std::vector<TTypePtr>{late->Input()->OutputColumns()},
-            std::make_shared<TStructType>(std::move(fields)));
+            types.MakeStruct(std::move(fields)));
         return;
     }
 
@@ -259,7 +264,7 @@ void AnnotateOperatorType(
         std::vector<std::pair<std::string, TTypePtr>> outFields;
         if (inputStruct) {
             for (auto& spec : proj->MutableProjections()) {
-                TTypePtr fieldType;
+                TTypePtr fieldType = nullptr;
                 if (auto ident = TMaybeNode<TIdentExpr>(spec.Expression)) {
                     for (auto& [name, type] : inputStruct->Fields) {
                         if (name == ident.Cast()->Name) { fieldType = type; break; }
@@ -267,10 +272,10 @@ void AnnotateOperatorType(
                 } else {
                     // Computed column: rule-based SQL type inference (no rewrite).
                     fieldType = NKernel::AnnotateExprType(
-                        spec.Expression, *inputStruct, &context);
+                        types, spec.Expression, *inputStruct, &context);
                 }
                 auto structType = TMaybeType<TStructType>(
-                    UnwrapNamedType(UnwrapNullableType(fieldType)));
+                    UnwrapNamedValueType(UnwrapNullableType(fieldType)));
                 if (structType && IsNullableType(fieldType)) {
                     throw NQumir::TError(spec.Expression->Location,
                         "nullable struct-return projections are not supported");
@@ -326,18 +331,18 @@ void AnnotateOperatorType(
                 spec.ImplicitName = false;
             }
         }
-        root->Type = std::make_shared<TFunctionType>(
+        root->Type = types.MakeFunction(
             std::vector<TTypePtr>{proj->Input()->OutputColumns()},
-            std::make_shared<TStructType>(std::move(outFields)));
+            types.MakeStruct(std::move(outFields)));
         return;
     }
 
     if (auto maybe = TMaybeOp<TAggregateOperator>(root)) {
         auto agg = maybe.Cast();
         auto inputSchema = agg->Input()->OutputColumns();
-        root->Type = std::make_shared<TFunctionType>(
+        root->Type = types.MakeFunction(
             std::vector<TTypePtr>{inputSchema},
-            ComputeAggregateOutputType(inputSchema, agg->GroupKeys(), agg->Aggs(),
+            ComputeAggregateOutputType(types, inputSchema, agg->GroupKeys(), agg->Aggs(),
                 !agg->GroupingSets().empty(), !agg->EmptyInputGroups().empty()));
         return;
     }
@@ -345,9 +350,9 @@ void AnnotateOperatorType(
     if (auto maybe = TMaybeOp<TWindowOperator>(root)) {
         auto window = maybe.Cast();
         auto inputSchema = window->Input()->OutputColumns();
-        root->Type = std::make_shared<TFunctionType>(
+        root->Type = types.MakeFunction(
             std::vector<TTypePtr>{inputSchema},
-            ComputeWindowOutputType(inputSchema, window->Functions()));
+            ComputeWindowOutputType(types, inputSchema, window->Functions()));
         return;
     }
 
@@ -355,8 +360,8 @@ void AnnotateOperatorType(
         auto join = maybe.Cast();
         auto leftSchema = join->Left()->OutputColumns();
         auto rightSchema = join->Right()->OutputColumns();
-        auto output = ComputeJoinOutputType(leftSchema, rightSchema, join->JoinType());
-        root->Type = std::make_shared<TFunctionType>(
+        auto output = ComputeJoinOutputType(types, leftSchema, rightSchema, join->JoinType());
+        root->Type = types.MakeFunction(
             std::vector<TTypePtr>{leftSchema, rightSchema},
             output ? *output : nullptr);
         return;
@@ -370,7 +375,7 @@ void AnnotateOperatorType(
         for (const auto& input : inputs) {
             paramTypes.push_back(input->OutputColumns());
         }
-        auto* first = static_cast<TStructType*>(paramTypes[0].get());
+        auto* first = static_cast<const TStructType*>(paramTypes[0]);
         // Unified per-column types (names from the first branch). Numeric branches are
         // promoted to a common type (any decimal -> decimal), and a column is nullable if
         // any branch's is. CoerceSetOpBranches then inserts casts so every branch
@@ -384,7 +389,7 @@ void AnnotateOperatorType(
             std::vector<bool> typed(unified.size(), false);
             std::vector<bool> sawNull(unified.size(), false);
             for (size_t b = 0; b < inputs.size(); ++b) {
-                auto* other = static_cast<TStructType*>(paramTypes[b].get());
+                auto* other = static_cast<const TStructType*>(paramTypes[b]);
                 // A branch with no resolved schema means an upstream typing failure;
                 // let that surface on its own rather than reporting a count mismatch.
                 if (!other || other->Fields.empty()) {
@@ -393,14 +398,14 @@ void AnnotateOperatorType(
                 if (first->Fields.size() != other->Fields.size()) {
                     throw NQumir::TError("UNION ALL branches must have the same number of columns");
                 }
-                const auto nulls = UntypedNullColumns(inputs[b], context);
+                const auto nulls = UntypedNullColumns(types, inputs[b], context);
                 for (size_t i = 0; i < first->Fields.size(); ++i) {
                     if (nulls[i]) {
                         sawNull[i] = true;
                     } else if (!typed[i]) {
                         unified[i].second = other->Fields[i].second;
                         typed[i] = true;
-                    } else if (auto merged = UnifyUnionColumn(unified[i].second, other->Fields[i].second)) {
+                    } else if (auto merged = UnifyUnionColumn(types, unified[i].second, other->Fields[i].second)) {
                         unified[i].second = merged;
                     } else {
                         throw NQumir::TError(
@@ -411,14 +416,14 @@ void AnnotateOperatorType(
             }
             for (size_t i = 0; i < unified.size(); ++i) {
                 if (typed[i] && sawNull[i] && !IsNullableType(unified[i].second)) {
-                    unified[i].second = std::make_shared<TNullable>(unified[i].second);
+                    unified[i].second = MakeNullableType(types, unified[i].second);
                 }
             }
         }
         auto output = (first && !first->Fields.empty())
-            ? std::static_pointer_cast<TType>(std::make_shared<TStructType>(std::move(unified)))
+            ? types.MakeStruct(std::move(unified))
             : inputs[0]->OutputColumns();
-        root->Type = std::make_shared<TFunctionType>(std::move(paramTypes), std::move(output));
+        root->Type = types.MakeFunction(std::move(paramTypes), std::move(output));
         return;
     }
 }
@@ -426,33 +431,33 @@ void AnnotateOperatorType(
 // After types are known, wrap each UNION ALL branch whose column types differ from the
 // unified output in a projection that casts them, so every branch physically emits the
 // same layout (the union operator only routes branch rowsets, it does not coerce).
-void CoerceSetOpBranches(const TOperatorPtr& root, const NKernel::TAnnotationContext& context) {
+void CoerceSetOpBranches(NQumir::NAst::TTypeFactory& types, const TOperatorPtr& root, const NKernel::TAnnotationContext& context) {
     for (const auto& input : root->Inputs()) {
-        CoerceSetOpBranches(input, context);
+        CoerceSetOpBranches(types, input, context);
     }
     auto un = TMaybeOp<TUnionAllOperator>(root);
     if (!un) return;
-    auto* fun = static_cast<TFunctionType*>(root->Type.get());
+    auto* fun = static_cast<const TFunctionType*>(root->Type);
     if (!fun) return;
-    auto* unified = static_cast<TStructType*>(fun->ReturnType.get());
+    auto* unified = static_cast<const TStructType*>(fun->ReturnType);
     if (!unified || unified->Fields.empty()) return;
 
     for (auto& branch : un.Cast()->MutableInputs()) {
         auto branchSchema = branch->OutputColumns();
-        auto* bs = static_cast<TStructType*>(branchSchema.get());
+        auto* bs = static_cast<const TStructType*>(branchSchema);
         if (!bs || bs->Fields.size() != unified->Fields.size()) continue;
 
         // An untyped-NULL column is cast in the branch's own projection, where the cast
         // makes it the NULL of the unified type; the branch schema still says NULL[INTEGER].
-        const auto nulls = UntypedNullColumns(branch, context);
+        const auto nulls = UntypedNullColumns(types, branch, context);
         bool needs = false;
         for (size_t i = 0; i < bs->Fields.size(); ++i) {
             const auto& bt = bs->Fields[i].second;
             const auto& ut = unified->Fields[i].second;
-            if (!bt || !ut || bt->ToString() == ut->ToString()) continue;
+            if (!bt || !ut || bt == ut) continue;
             if (nulls[i]) {
                 auto& expr = TMaybeOp<TProjectOperator>(branch).Cast()->MutableProjections()[i].Expression;
-                expr = std::make_shared<TCastExpr>(NQumir::TLocation{}, expr, ut);
+                expr = NQumir::MakeIntrusive<TCastExpr>(NQumir::TLocation{}, expr, ut);
             } else {
                 needs = true;
             }
@@ -463,15 +468,15 @@ void CoerceSetOpBranches(const TOperatorPtr& root, const NKernel::TAnnotationCon
         projs.reserve(bs->Fields.size());
         for (size_t i = 0; i < bs->Fields.size(); ++i) {
             const std::string& colName = bs->Fields[i].first;
-            TExprPtr expr = std::make_shared<TIdentExpr>(NQumir::TLocation{}, colName);
+            TExprPtr expr = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, colName);
             const auto& bt = bs->Fields[i].second;
             const auto& ut = unified->Fields[i].second;
-            if (!nulls[i] && bt && ut && bt->ToString() != ut->ToString()) {
-                expr = std::make_shared<TCastExpr>(NQumir::TLocation{}, expr, ut);
+            if (!nulls[i] && bt && ut && bt != ut) {
+                expr = NQumir::MakeIntrusive<TCastExpr>(NQumir::TLocation{}, expr, ut);
             }
             projs.push_back({.Name = colName, .Expression = std::move(expr)});
         }
-        branch = std::make_shared<TProjectOperator>(branch, std::move(projs));
+        branch = NQumir::MakeIntrusive<TProjectOperator>(types, branch, std::move(projs));
     }
 }
 
@@ -481,27 +486,28 @@ namespace {
 // `alias` = CAST(`column` AS `target`), keeping the original column's type for
 // the operators above the join.
 TOperatorPtr AddCastedKey(
+    NQumir::NAst::TTypeFactory& types,
     const TOperatorPtr& input, const std::string& column, const TTypePtr& target, const std::string& alias)
 {
-    auto* schema = static_cast<TStructType*>(input->OutputColumns().get());
+    auto* schema = static_cast<const TStructType*>(input->OutputColumns());
     std::vector<TProjectionSpec> projections;
     projections.reserve(schema->Fields.size() + 1);
     for (const auto& [name, type] : schema->Fields) {
         projections.push_back({
             .Name = name,
-            .Expression = std::make_shared<TIdentExpr>(NQumir::TLocation{}, name),
+            .Expression = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, name),
         });
     }
     projections.push_back({
         .Name = alias,
-        .Expression = std::make_shared<TCastExpr>(NQumir::TLocation{},
-            std::make_shared<TIdentExpr>(NQumir::TLocation{}, column), target),
+        .Expression = NQumir::MakeIntrusive<TCastExpr>(NQumir::TLocation{},
+            NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, column), target),
     });
-    return std::make_shared<TProjectOperator>(input, std::move(projections));
+    return NQumir::MakeIntrusive<TProjectOperator>(types, input, std::move(projections));
 }
 
 TTypePtr ColumnType(const TOperatorPtr& input, const std::string& column) {
-    for (const auto& [name, type] : static_cast<TStructType*>(input->OutputColumns().get())->Fields) {
+    for (const auto& [name, type] : static_cast<const TStructType*>(input->OutputColumns())->Fields) {
         if (name == column) {
             return type;
         }
@@ -526,23 +532,23 @@ int32_t IntegerDecimalDigits(const TIntegerType& type) {
 // integer) the decimal with the larger scale and the larger integer part. nullptr when the
 // sides already share a type or no common key type exists; throws when the common
 // decimal would need more than 38 digits, as a wrapping cast would equate unequal keys.
-TTypePtr CommonKeyType(const TTypePtr& left, const TTypePtr& right) {
-    if (left->ToString() == right->ToString()) {
+TTypePtr CommonKeyType(NQumir::NAst::TTypeFactory& types, const TTypePtr& left, const TTypePtr& right) {
+    if (left == right) {
         return nullptr;
     }
     const auto isNumber = [](const TTypePtr& type) {
         return IsIntType(type) || IsFloatType(type) || DecimalSpecOfValueType(type);
     };
     if ((IsFloatType(left) || IsFloatType(right)) && isNumber(left) && isNumber(right)) {
-        return std::make_shared<TFloatType>(TFloatType::F64);
+        return types.MakeFloat(TFloatType::F64);
     }
-    auto leftInt = TMaybeType<TIntegerType>(left);
-    auto rightInt = TMaybeType<TIntegerType>(right);
+    auto leftInt = MaybeIntegerType(left);
+    auto rightInt = MaybeIntegerType(right);
     if (leftInt && rightInt) {
-        return UnifyIntegers(*leftInt.Cast(), *rightInt.Cast());
+        return UnifyIntegers(types, *leftInt.Cast(), *rightInt.Cast());
     }
     const auto asDecimal = [](const TTypePtr& type) -> std::optional<TDecimalSpec> {
-        if (auto integer = TMaybeType<TIntegerType>(type)) {
+        if (auto integer = MaybeIntegerType(type)) {
             return TDecimalSpec{.Precision = IntegerDecimalDigits(*integer.Cast()), .Scale = 0};
         }
         return DecimalSpecOfValueType(type);
@@ -556,17 +562,17 @@ TTypePtr CommonKeyType(const TTypePtr& left, const TTypePtr& right) {
     const int32_t integerDigits = std::max(
         leftSpec->Precision - leftSpec->Scale, rightSpec->Precision - rightSpec->Scale);
     if (integerDigits + scale > MaxDecimalPrecision) {
-        throw NQumir::TError("join key types " + left->ToString() + " and " + right->ToString() +
+        throw NQumir::TError("join key types " + SqlTypeName(left) + " and " + SqlTypeName(right) +
             " have no common DECIMAL type within " + std::to_string(MaxDecimalPrecision) + " digits");
     }
-    return std::make_shared<TDecimal>(integerDigits + scale, scale);
+    return MakeDecimalType(types, {integerDigits + scale, scale});
 }
 
 // `aliasCounter` spans the whole plan: the types of the joins below are stale
 // until re-annotation, so an alias cannot be checked against their schemas.
-void CoerceJoinKeys(TOperatorPtr& root, size_t& aliasCounter) {
+void CoerceJoinKeys(NQumir::NAst::TTypeFactory& types, TOperatorPtr& root, size_t& aliasCounter) {
     for (auto& input : root->MutableInputs()) {
-        CoerceJoinKeys(input, aliasCounter);
+        CoerceJoinKeys(types, input, aliasCounter);
     }
     auto join = TMaybeOp<TJoinOperator>(root);
     if (!join) {
@@ -576,10 +582,10 @@ void CoerceJoinKeys(TOperatorPtr& root, size_t& aliasCounter) {
     // A semi or anti join outputs one input as is, so nothing above it drops a key
     // alias added to that input (INTERSECT, EXCEPT); project the original columns back.
     std::vector<TProjectionSpec> restored;
-    for (const auto& [name, _] : static_cast<TStructType*>(root->OutputColumns().get())->Fields) {
+    for (const auto& [name, _] : static_cast<const TStructType*>(root->OutputColumns())->Fields) {
         restored.push_back({
             .Name = name,
-            .Expression = std::make_shared<TIdentExpr>(NQumir::TLocation{}, name),
+            .Expression = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, name),
         });
     }
     for (auto& key : join.Cast()->MutableKeys()) {
@@ -588,23 +594,23 @@ void CoerceJoinKeys(TOperatorPtr& root, size_t& aliasCounter) {
         if (!leftType || !rightType) {
             continue;
         }
-        const auto common = CommonKeyType(UnwrapNullableType(leftType), UnwrapNullableType(rightType));
+        const auto common = CommonKeyType(types, UnwrapNullableType(leftType), UnwrapNullableType(rightType));
         if (!common) {
             continue;
         }
         // A side that already has the common type is left alone; the other side is cast.
         for (const bool isLeft : {true, false}) {
             const auto& sideType = isLeft ? leftType : rightType;
-            if (UnwrapNullableType(sideType)->ToString() == common->ToString()) {
+            if (UnwrapNullableType(sideType) == common) {
                 continue;
             }
             auto& column = isLeft ? key.Left : key.Right;
             auto& side = isLeft ? join.Cast()->MutableLeft() : join.Cast()->MutableRight();
             const auto target = IsNullableType(sideType)
-                ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(common)) : common;
+                ? MakeNullableType(types, common) : common;
             const auto alias = "__join_key_" + std::to_string(aliasCounter++) + "__";
             coerced = true;
-            side = AddCastedKey(side, column, target, alias);
+            side = AddCastedKey(types, side, column, target, alias);
             column = alias;
         }
     }
@@ -616,7 +622,7 @@ void CoerceJoinKeys(TOperatorPtr& root, size_t& aliasCounter) {
         case EJoinType::RightSemi:
         case EJoinType::LeftAnti:
         case EJoinType::RightAnti:
-            root = std::make_shared<TProjectOperator>(root, std::move(restored));
+            root = NQumir::MakeIntrusive<TProjectOperator>(types, root, std::move(restored));
             break;
         default:
             break;
@@ -625,9 +631,9 @@ void CoerceJoinKeys(TOperatorPtr& root, size_t& aliasCounter) {
 
 } // namespace
 
-void CoerceJoinKeys(TOperatorPtr& root) {
+void CoerceJoinKeys(NQumir::NAst::TTypeFactory& types, TOperatorPtr& root) {
     size_t aliasCounter = 0;
-    CoerceJoinKeys(root, aliasCounter);
+    CoerceJoinKeys(types, root, aliasCounter);
 }
 
 } // namespace NQdb

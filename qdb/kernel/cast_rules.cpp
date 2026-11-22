@@ -1,6 +1,7 @@
 #include <qdb/kernel/cast_rules.h>
 
 #include <qdb/plan/types/date.h>
+#include <qdb/plan/types/type_text.h>
 #include <qdb/plan/types/decimal.h>
 
 #include <qumir/error.h>
@@ -45,7 +46,7 @@ EKind KindOf(const TTypePtr& type) {
         if (name == "DATE" || name == "TIMESTAMP") {
             return EKind::Date;
         }
-        return KindOf(named.Cast()->UnderlyingType);
+        return KindOf(named.Cast()->UnderlyingType());
     }
     if (TMaybeType<TStringType>(type)) {
         return EKind::String;
@@ -53,7 +54,7 @@ EKind KindOf(const TTypePtr& type) {
     if (TMaybeType<TBoolType>(type)) {
         return EKind::Bool;
     }
-    if (TMaybeType<TIntegerType>(type)) {
+    if (MaybeIntegerType(type)) {
         return EKind::Integer;
     }
     if (TMaybeType<TFloatType>(type)) {
@@ -63,21 +64,21 @@ EKind KindOf(const TTypePtr& type) {
 }
 
 TExprPtr Ident(const std::string& name, TLocation loc) {
-    return std::make_shared<TIdentExpr>(loc, name);
+    return NQumir::MakeIntrusive<TIdentExpr>(loc, name);
 }
 
 TExprPtr Call(const std::string& name, std::vector<TExprPtr> args, TLocation loc) {
-    return std::make_shared<TCallExpr>(loc, Ident(name, loc), std::move(args));
+    return NQumir::MakeIntrusive<TCallExpr>(loc, Ident(name, loc), std::move(args));
 }
 
-TExprPtr Int64(int64_t value, TLocation loc) {
-    auto literal = std::make_shared<TNumberExpr>(loc, value);
-    literal->Type = std::make_shared<TIntegerType>();
+TExprPtr Int64(NQumir::NAst::TTypeFactory& types, int64_t value, TLocation loc) {
+    auto literal = NQumir::MakeIntrusive<TNumberExpr>(loc, value, types);
+    literal->Type = types.MakeInteger();
     return literal;
 }
 
-TExprPtr CastToI64(const TExprPtr& operand, TLocation loc) {
-    return std::make_shared<TCastExpr>(loc, operand, std::make_shared<TIntegerType>());
+TExprPtr CastToI64(NQumir::NAst::TTypeFactory& types, const TExprPtr& operand, TLocation loc) {
+    return NQumir::MakeIntrusive<TCastExpr>(loc, operand, types.MakeInteger());
 }
 
 // The scale of a DECIMAL type a rule converts from or to; the kinds guarantee it is one.
@@ -91,7 +92,7 @@ int32_t PrecisionOf(const TTypePtr& type) {
 
 // The digits an integer type can hold; 64-bit takes 20 for u64.
 int32_t IntegerDigits(const TTypePtr& type) {
-    switch (TMaybeType<TIntegerType>(UnwrapNamedType(type)).Cast()->BitWidth()) {
+    switch (MaybeIntegerType(UnwrapNamedValueType(type)).Cast()->BitWidth()) {
         case 8:
             return 3;
         case 16:
@@ -105,12 +106,12 @@ int32_t IntegerDigits(const TTypePtr& type) {
 // The digits go to the kernel's scratch arena, like the bytes of `||`; `__arena__` is
 // the placeholder the codegen binds to it. One runtime function serves every signed
 // width and one every unsigned width: a u64 above 2^63-1 has no i64 to widen to.
-TExprPtr IntegerToString(const TExprPtr& operand, const TTypePtr& from, const TTypePtr&,
+TExprPtr IntegerToString(NQumir::NAst::TTypeFactory& types, const TExprPtr& operand, const TTypePtr& from, const TTypePtr&,
     TLocation loc)
 {
-    const bool isSigned = TMaybeType<TIntegerType>(UnwrapNamedType(from)).Cast()->IsSigned();
-    auto wide = std::make_shared<TCastExpr>(loc, operand,
-        std::make_shared<TIntegerType>(isSigned ? TIntegerType::I64 : TIntegerType::U64));
+    const bool isSigned = MaybeIntegerType(UnwrapNamedValueType(from)).Cast()->IsSigned();
+    auto wide = NQumir::MakeIntrusive<TCastExpr>(loc, operand,
+        types.MakeInteger(isSigned ? TIntegerType::I64 : TIntegerType::U64));
     return Call(isSigned ? "qdb_string_from_i64" : "qdb_string_from_u64",
         {Ident("__arena__", loc), std::move(wide)}, loc);
 }
@@ -118,18 +119,17 @@ TExprPtr IntegerToString(const TExprPtr& operand, const TTypePtr& from, const TT
 // qdb_sql_date is the `cast` operator StringView -> DATE of qumirdb.oz; the rule keeps a
 // string column cast to DATE on it after the planner has erased DATE to i32, and erases
 // the nominal DATE it returns the same way.
-TExprPtr StringToDate(const TExprPtr& operand, const TTypePtr&, const TTypePtr&, TLocation loc) {
-    return std::make_shared<TCastExpr>(loc, Call("qdb_sql_date", {operand}, loc),
-        std::make_shared<TIntegerType>(TIntegerType::I32));
+TExprPtr StringToDate(NQumir::NAst::TTypeFactory& types, const TExprPtr& operand, const TTypePtr&, const TTypePtr&, TLocation loc) {
+    return NQumir::MakeIntrusive<TCastExpr>(loc, Call("qdb_sql_date", {operand}, loc),
+        types.MakeInteger(TIntegerType::I32));
 }
 
 // qdb_string_from_date formats the day count as an ISO date into the kernel's arena. The
 // operand is cast to DATE first: the rule is chosen by the nominal type the query wrote,
 // but the planner has erased the value it carries to i32, and the i32 -> DATE `cast`
 // operator of qumirdb.oz restores the type the function takes.
-TExprPtr DateToString(const TExprPtr& operand, const TTypePtr&, const TTypePtr&, TLocation loc) {
-    auto date = std::make_shared<TCastExpr>(loc, operand,
-        std::make_shared<TNamedType>("DATE", nullptr));
+TExprPtr DateToString(NQumir::NAst::TTypeFactory& types, const TExprPtr& operand, const TTypePtr&, const TTypePtr&, TLocation loc) {
+    auto date = NQumir::MakeIntrusive<TCastExpr>(loc, operand, DateCastTarget(types));
     return Call("qdb_string_from_date", {Ident("__arena__", loc), std::move(date)}, loc);
 }
 
@@ -141,48 +141,48 @@ bool IsDecimal64(const TTypePtr& type) {
 // conversions below come from qumirdb.oz and take the scale as a literal.
 // qdb_decimal*_from_* round the value to the target scale, qdb_decimal*_to_* round half
 // away from zero and saturate.
-TExprPtr IntegerToDecimal(const TExprPtr& operand, const TTypePtr& from, const TTypePtr& to,
+TExprPtr IntegerToDecimal(NQumir::NAst::TTypeFactory& types, const TExprPtr& operand, const TTypePtr& from, const TTypePtr& to,
     TLocation loc)
 {
     if (!IsDecimal64(to)) {
-        return Call("qdb_decimal_from_i64", {CastToI64(operand, loc), Int64(ScaleOf(to), loc)}, loc);
+        return Call("qdb_decimal_from_i64", {CastToI64(types, operand, loc), Int64(types, ScaleOf(to), loc)}, loc);
     }
     // Digits that do not fit the precision raise, like DuckDB, instead of wrapping in i64.
     const bool fits = IntegerDigits(from) <= PrecisionOf(to) - ScaleOf(to);
-    if (!fits && !TMaybeType<TIntegerType>(UnwrapNamedType(from)).Cast()->IsSigned()) {
-        auto wide = std::make_shared<TCastExpr>(loc, operand,
-            std::make_shared<TIntegerType>(TIntegerType::U64));
+    if (!fits && !MaybeIntegerType(UnwrapNamedValueType(from)).Cast()->IsSigned()) {
+        auto wide = NQumir::MakeIntrusive<TCastExpr>(loc, operand,
+            types.MakeInteger(TIntegerType::U64));
         return Call("qdb_decimal64_scale_up_checked_u64",
-            {std::move(wide), Int64(ScaleOf(to), loc), Int64(PrecisionOf(to), loc)}, loc);
+            {std::move(wide), Int64(types, ScaleOf(to), loc), Int64(types, PrecisionOf(to), loc)}, loc);
     }
     return fits
-        ? Call("qdb_decimal64_scale_up", {CastToI64(operand, loc), Int64(ScaleOf(to), loc)}, loc)
-        : Call("qdb_decimal64_scale_up_checked", {CastToI64(operand, loc),
-            Int64(ScaleOf(to), loc), Int64(PrecisionOf(to), loc)}, loc);
+        ? Call("qdb_decimal64_scale_up", {CastToI64(types, operand, loc), Int64(types, ScaleOf(to), loc)}, loc)
+        : Call("qdb_decimal64_scale_up_checked", {CastToI64(types, operand, loc),
+            Int64(types, ScaleOf(to), loc), Int64(types, PrecisionOf(to), loc)}, loc);
 }
 
-TExprPtr FloatToDecimal(const TExprPtr& operand, const TTypePtr& from, const TTypePtr& to,
+TExprPtr FloatToDecimal(NQumir::NAst::TTypeFactory& types, const TExprPtr& operand, const TTypePtr& from, const TTypePtr& to,
     TLocation loc)
 {
-    auto floating = TMaybeType<TFloatType>(UnwrapNamedType(from));
+    auto floating = TMaybeType<TFloatType>(UnwrapNamedValueType(from));
     if (floating && floating.Cast()->Kind == TFloatType::F32) {
         // REAL has its own rounding (six digits first), so it does not go through f64.
-        auto wide = Call("qdb_decimal_from_f32", {operand, Int64(ScaleOf(to), loc)}, loc);
+        auto wide = Call("qdb_decimal_from_f32", {operand, Int64(types, ScaleOf(to), loc)}, loc);
         return IsDecimal64(to)
-            ? Call("qdb_decimal64_narrow_checked", {std::move(wide), Int64(PrecisionOf(to), loc)}, loc)
+            ? Call("qdb_decimal64_narrow_checked", {std::move(wide), Int64(types, PrecisionOf(to), loc)}, loc)
             : wide;
     }
     if (!IsDecimal64(to)) {
-        return Call("qdb_decimal_from_f64", {operand, Int64(ScaleOf(to), loc)}, loc);
+        return Call("qdb_decimal_from_f64", {operand, Int64(types, ScaleOf(to), loc)}, loc);
     }
     return Call("qdb_decimal64_from_f64",
-        {operand, Int64(ScaleOf(to), loc), Int64(PrecisionOf(to), loc)}, loc);
+        {operand, Int64(types, ScaleOf(to), loc), Int64(types, PrecisionOf(to), loc)}, loc);
 }
 
 // Only the scale changes the digits: the same scale is the identity, a larger one
 // multiplies by a power of ten, in the wider of the two storages. A scale down would have
 // to round and is not implemented.
-TExprPtr DecimalToDecimal(const TExprPtr& operand, const TTypePtr& from, const TTypePtr& to,
+TExprPtr DecimalToDecimal(NQumir::NAst::TTypeFactory& types, const TExprPtr& operand, const TTypePtr& from, const TTypePtr& to,
     TLocation loc)
 {
     const int32_t fromScale = ScaleOf(from);
@@ -197,52 +197,52 @@ TExprPtr DecimalToDecimal(const TExprPtr& operand, const TTypePtr& from, const T
         // A target with fewer integer digits can overflow: it raises instead of wrapping.
         if (PrecisionOf(to) - toScale < PrecisionOf(from) - fromScale) {
             return Call("qdb_decimal64_scale_up_checked",
-                {operand, Int64(delta, loc), Int64(PrecisionOf(to), loc)}, loc);
+                {operand, Int64(types, delta, loc), Int64(types, PrecisionOf(to), loc)}, loc);
         }
         return delta == 0
             ? operand
-            : Call("qdb_decimal64_scale_up", {operand, Int64(delta, loc)}, loc);
+            : Call("qdb_decimal64_scale_up", {operand, Int64(types, delta, loc)}, loc);
     }
     TExprPtr wide = IsDecimal64(from)
         ? Call("qdb_decimal_from_unscaled", {operand}, loc)
         : operand;
     if (delta != 0) {
-        wide = Call("qdb_decimal_scale_up", {std::move(wide), Int64(delta, loc)}, loc);
+        wide = Call("qdb_decimal_scale_up", {std::move(wide), Int64(types, delta, loc)}, loc);
     }
     return IsDecimal64(to)
-        ? Call("qdb_decimal64_narrow_checked", {std::move(wide), Int64(PrecisionOf(to), loc)}, loc)
+        ? Call("qdb_decimal64_narrow_checked", {std::move(wide), Int64(types, PrecisionOf(to), loc)}, loc)
         : wide;
 }
 
 // REAL goes through DOUBLE: the runtime converts only to f64.
-TExprPtr DecimalToFloat(const TExprPtr& operand, const TTypePtr& from, const TTypePtr& to,
+TExprPtr DecimalToFloat(NQumir::NAst::TTypeFactory& types, const TExprPtr& operand, const TTypePtr& from, const TTypePtr& to,
     TLocation loc)
 {
     auto value = Call(IsDecimal64(from) ? "qdb_decimal64_to_f64" : "qdb_decimal_to_f64",
-        {operand, Int64(ScaleOf(from), loc)}, loc);
-    auto floating = TMaybeType<TFloatType>(UnwrapNamedType(to));
+        {operand, Int64(types, ScaleOf(from), loc)}, loc);
+    auto floating = TMaybeType<TFloatType>(UnwrapNamedValueType(to));
     if (floating && floating.Cast()->Kind == TFloatType::F32) {
-        return std::make_shared<TCastExpr>(loc, std::move(value),
-            std::make_shared<TFloatType>(TFloatType::F32));
+        return NQumir::MakeIntrusive<TCastExpr>(loc, std::move(value),
+            types.MakeFloat(TFloatType::F32));
     }
     return value;
 }
 
 // Qumir's float -> integer cast truncates; SQL rounds half to even (issue #412). The
 // operand is widened to f64: the runtime has no rounding for f32.
-TExprPtr FloatToInteger(const TExprPtr& operand, const TTypePtr&, const TTypePtr& to,
+TExprPtr FloatToInteger(NQumir::NAst::TTypeFactory& types, const TExprPtr& operand, const TTypePtr&, const TTypePtr& to,
     TLocation loc)
 {
-    auto wide = std::make_shared<TCastExpr>(loc, operand,
-        std::make_shared<TFloatType>(TFloatType::F64));
-    return std::make_shared<TCastExpr>(loc, Call("qdb_rint", {std::move(wide)}, loc), to);
+    auto wide = NQumir::MakeIntrusive<TCastExpr>(loc, operand,
+        types.MakeFloat(TFloatType::F64));
+    return NQumir::MakeIntrusive<TCastExpr>(loc, Call("qdb_rint", {std::move(wide)}, loc), to);
 }
 
-TExprPtr DecimalToInteger(const TExprPtr& operand, const TTypePtr& from, const TTypePtr& to,
+TExprPtr DecimalToInteger(NQumir::NAst::TTypeFactory& types, const TExprPtr& operand, const TTypePtr& from, const TTypePtr& to,
     TLocation loc)
 {
     // Only i32 and i64 are SQL integer types.
-    const int bits = TMaybeType<TIntegerType>(UnwrapNamedType(to)).Cast()->BitWidth();
+    const int bits = MaybeIntegerType(UnwrapNamedValueType(to)).Cast()->BitWidth();
     if (bits != 32 && bits != 64) {
         throw NQumir::TError("decimal cast to a " + std::to_string(bits) +
             "-bit integer is not implemented; only INTEGER and BIGINT exist");
@@ -251,7 +251,7 @@ TExprPtr DecimalToInteger(const TExprPtr& operand, const TTypePtr& from, const T
         ? "qdb_decimal64_to_"
         : "qdb_decimal_to_";
     return Call(prefix + (bits == 32 ? "i32" : "i64"),
-        {operand, Int64(ScaleOf(from), loc)}, loc);
+        {operand, Int64(types, ScaleOf(from), loc)}, loc);
 }
 
 struct TCastRule {
@@ -259,8 +259,8 @@ struct TCastRule {
     EKind To;
     // Builds the conversion of a plain `operand` of type `from` (kind From) to the cast
     // target `to` (kind To).
-    TExprPtr (*Build)(const TExprPtr& operand, const TTypePtr& from, const TTypePtr& to,
-        TLocation loc);
+    TExprPtr (*Build)(NQumir::NAst::TTypeFactory& types, const TExprPtr& operand,
+        const TTypePtr& from, const TTypePtr& to, TLocation loc);
 };
 
 // One row per conversion Qumir does not perform itself and a `cast` operator of
@@ -311,24 +311,10 @@ bool IsUnsupportedDateCast(EKind from, EKind to) {
         (to == EKind::Integer || to == EKind::Float || to == EKind::Decimal);
 }
 
-// The SQL spelling of a type in the rejection: Qumir's diagnostic name of a DECIMAL is
-// its SQL name already, those of DOUBLE and REAL are `f64` and `f32`.
-std::string SqlTypeName(const TTypePtr& type) {
-    if (auto floating = TMaybeType<TFloatType>(UnwrapNamedType(type))) {
-        return floating.Cast()->Kind == TFloatType::F32 ? "REAL" : "DOUBLE";
-    }
-    if (KindOf(type) == EKind::Date) {
-        return "DATE";
-    }
-    if (auto integer = TMaybeType<TIntegerType>(UnwrapNamedType(type))) {
-        return integer.Cast()->BitWidth() == 64 ? "BIGINT" : "INTEGER";
-    }
-    return TypeDiagnosticName(type);
-}
-
 } // namespace
 
 TExprPtr ApplyCastRule(
+    NQumir::NAst::TTypeFactory& types,
     const TTypePtr& from,
     const TTypePtr& to,
     const TExprPtr& operand,
@@ -338,7 +324,7 @@ TExprPtr ApplyCastRule(
     const EKind toKind = KindOf(to);
     if (!HasDecimalSide(fromKind, toKind)) {
         if (const TCastRule* rule = FindCastRule(fromKind, toKind)) {
-            return rule->Build(operand, from, to, loc);
+            return rule->Build(types, operand, from, to, loc);
         }
     }
     if (IsUnsupportedToString(fromKind, toKind)) {
@@ -353,6 +339,7 @@ TExprPtr ApplyCastRule(
 }
 
 TExprPtr ApplyDecimalCastRule(
+    NQumir::NAst::TTypeFactory& types,
     const TTypePtr& from,
     const TTypePtr& to,
     const TExprPtr& operand,
@@ -364,7 +351,7 @@ TExprPtr ApplyDecimalCastRule(
         return nullptr;
     }
     if (const TCastRule* rule = FindCastRule(fromKind, toKind)) {
-        return rule->Build(operand, from, to, loc);
+        return rule->Build(types, operand, from, to, loc);
     }
     return nullptr;
 }

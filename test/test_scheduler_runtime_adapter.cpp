@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "runtime_filter_test_util.h"
+#include "test_types.h"
 
 #include <qdb/scheduler/channel.h>
 #include <qdb/scheduler/connection.h>

@@ -96,13 +96,13 @@ bool IsDecimalExprHint(const NAst::TExprPtr& expr) {
     return IsDecimalType(expr->Type);
 }
 
-NAst::TExprPtr CastF64(TLocation loc, NAst::TExprPtr expr) {
-    return std::make_shared<NAst::TCastExpr>(
-        std::move(loc), std::move(expr), std::make_shared<NAst::TFloatType>());
+NAst::TExprPtr CastF64(NQumir::NAst::TTypeFactory& types, TLocation loc, NAst::TExprPtr expr) {
+    return NQumir::MakeIntrusive<NAst::TCastExpr>(
+        std::move(loc), std::move(expr), types.MakeFloat());
 }
 
-NAst::TExprPtr F64Literal(TLocation loc, double value) {
-    return std::make_shared<NAst::TNumberExpr>(std::move(loc), value);
+NAst::TExprPtr F64Literal(NQumir::NAst::TTypeFactory& types, TLocation loc, double value) {
+    return NQumir::MakeIntrusive<NAst::TNumberExpr>(std::move(loc), value, types);
 }
 
 NAst::TExprPtr Binary(
@@ -111,36 +111,36 @@ NAst::TExprPtr Binary(
     NAst::TExprPtr left,
     NAst::TExprPtr right)
 {
-    return std::make_shared<NAst::TBinaryExpr>(
+    return NQumir::MakeIntrusive<NAst::TBinaryExpr>(
         std::move(loc), NAst::TOperator(std::move(op)), std::move(left), std::move(right));
 }
 
 bool IsStddevSupportedType(const NAst::TTypePtr& type) {
-    auto value = NAst::UnwrapNamedType(UnwrapNullableType(type));
-    return NAst::TMaybeType<NAst::TIntegerType>(value) ||
+    auto value = UnwrapNamedValueType(UnwrapNullableType(type));
+    return MaybeIntegerType(value) ||
         NAst::TMaybeType<NAst::TFloatType>(value);
 }
 
 bool IsFloatWidth(const NAst::TTypePtr& type, NAst::TFloatType::EKind kind) {
     auto floating = NAst::TMaybeType<NAst::TFloatType>(
-        NAst::UnwrapNamedType(UnwrapNullableType(type)));
+        UnwrapNamedValueType(UnwrapNullableType(type)));
     return floating && floating.Cast()->Kind == kind;
 }
 
 // sum, min and max of REAL are REAL, as in PostgreSQL: the reducers keep an f64 state,
 // which the expression above the aggregate or window narrows back.
-NAst::TExprPtr NarrowToReal(TLocation loc, NAst::TExprPtr expr) {
-    return std::make_shared<NAst::TCastExpr>(
-        std::move(loc), std::move(expr), std::make_shared<NAst::TFloatType>(NAst::TFloatType::F32));
+NAst::TExprPtr NarrowToReal(NQumir::NAst::TTypeFactory& types, TLocation loc, NAst::TExprPtr expr) {
+    return NQumir::MakeIntrusive<NAst::TCastExpr>(
+        std::move(loc), std::move(expr), types.MakeFloat(NAst::TFloatType::F32));
 }
 
-bool IsRealArgument(const NAst::TExprPtr& arg, const NAst::TStructType* schema,
+bool IsRealArgument(NQumir::NAst::TTypeFactory& types, const NAst::TExprPtr& arg, const NAst::TStructType* schema,
     const NKernel::TAnnotationContext& context)
 {
-    NAst::TTypePtr type;
+    NAst::TTypePtr type = nullptr;
     if (schema && !schema->Fields.empty()) {
         try {
-            type = NKernel::AnnotateExprType(arg, *schema, &context);
+            type = NKernel::AnnotateExprType(types, arg, *schema, &context);
         } catch (const TError&) {
             return false; // the aggregate reports its argument's typing error itself
         }
@@ -212,13 +212,13 @@ NSql::TSqlPtr<NSql::TSqlWindowSpec> CloneSqlWindowSpec(
         CloneSqlWindowFrame(spec->Frame));
 }
 
-NSql::TSqlPtr<NSql::TWindowExpr> CloneSqlWindowExpr(
-    const NSql::TSqlPtr<NSql::TWindowExpr>& window)
+NQumir::TIntrusivePtr<NSql::TWindowExpr> CloneSqlWindowExpr(
+    const NQumir::TIntrusivePtr<NSql::TWindowExpr>& window)
 {
     if (!window) {
         return nullptr;
     }
-    auto copy = std::make_shared<NSql::TWindowExpr>(
+    auto copy = NQumir::MakeIntrusive<NSql::TWindowExpr>(
         window->Expr ? CloneExpr(window->Expr) : nullptr,
         CloneSqlWindowSpec(window->WindowSpec));
     copy->Type = window->Type;
@@ -424,13 +424,13 @@ bool IsGroupingCall(const NAst::TExprPtr& expr) {
     return callee && ToLower(callee.Cast()->Name) == "grouping";
 }
 
-NAst::TExprPtr I64Literal(TLocation loc, int64_t value) {
-    return std::make_shared<NAst::TNumberExpr>(std::move(loc), value);
+NAst::TExprPtr I64Literal(NQumir::NAst::TTypeFactory& types, TLocation loc, int64_t value) {
+    return NQumir::MakeIntrusive<NAst::TNumberExpr>(std::move(loc), value, types);
 }
 
-NAst::TExprPtr I32Literal(TLocation loc, int32_t value) {
-    auto ret = std::make_shared<NAst::TNumberExpr>(std::move(loc), static_cast<int64_t>(value));
-    ret->Type = std::make_shared<NAst::TIntegerType>(NAst::TIntegerType::I32);
+NAst::TExprPtr I32Literal(NQumir::NAst::TTypeFactory& types, TLocation loc, int32_t value) {
+    auto ret = NQumir::MakeIntrusive<NAst::TNumberExpr>(std::move(loc), static_cast<int64_t>(value), types);
+    ret->Type = types.MakeInteger(NAst::TIntegerType::I32);
     return ret;
 }
 
@@ -447,12 +447,12 @@ bool IsCoreExpr(const NAst::TExprPtr& expr) {
 }
 
 // The first window function call in `expr`, not counting those of its subqueries.
-NSql::TSqlPtr<NSql::TWindowExpr> FindWindow(const NAst::TExprPtr& expr) {
+NQumir::TIntrusivePtr<NSql::TWindowExpr> FindWindow(const NAst::TExprPtr& expr) {
     if (!expr) {
         return nullptr;
     }
     if (auto window = NAst::TMaybeNode<NSql::TWindowExpr>(expr)) {
-        return window.Cast();
+        return NQumir::TIntrusivePtr<NSql::TWindowExpr>(window.Cast());
     }
     for (const auto& child : expr->Children()) {
         if (auto window = FindWindow(child)) {
@@ -467,6 +467,7 @@ bool GroupingSetContainsKey(const std::vector<size_t>& set, size_t keyIndex) {
 }
 
 std::expected<NAst::TExprPtr, TError> BuildGroupingValue(
+    NQumir::NAst::TTypeFactory& types,
     const NAst::TExprPtr& expr,
     const TGroupingRewriteInfo& info)
 {
@@ -484,20 +485,20 @@ std::expected<NAst::TExprPtr, TError> BuildGroupingValue(
             "GROUPING() argument must be a GROUP BY key"));
     }
 
-    NAst::TExprPtr result = I64Literal(expr->Location, 0);
+    NAst::TExprPtr result = I64Literal(types, expr->Location, 0);
     for (size_t setId = info.Sets.size(); setId-- > 0;) {
         if (GroupingSetContainsKey(info.Sets[setId], key->second)) {
             continue;
         }
-        auto condition = std::make_shared<NAst::TBinaryExpr>(
+        auto condition = NQumir::MakeIntrusive<NAst::TBinaryExpr>(
             expr->Location,
             NAst::TOperator("=="),
             Ident(expr->Location, "__grouping_id__"),
-            I32Literal(expr->Location, static_cast<int32_t>(setId)));
-        result = std::make_shared<NAst::TIfExpr>(
+            I32Literal(types, expr->Location, static_cast<int32_t>(setId)));
+        result = NQumir::MakeIntrusive<NAst::TIfExpr>(
             expr->Location,
             std::move(condition),
-            I64Literal(expr->Location, 1),
+            I64Literal(types, expr->Location, 1),
             std::move(result));
     }
     return result;
@@ -506,11 +507,11 @@ std::expected<NAst::TExprPtr, TError> BuildGroupingValue(
 } // namespace
 
 NAst::TExprPtr Ident(TLocation loc, std::string name) {
-    return std::make_shared<NAst::TIdentExpr>(std::move(loc), std::move(name));
+    return NQumir::MakeIntrusive<NAst::TIdentExpr>(std::move(loc), std::move(name));
 }
 
 NAst::TExprPtr Call(TLocation loc, std::string name, std::vector<NAst::TExprPtr> args) {
-    return std::make_shared<NAst::TCallExpr>(
+    return NQumir::MakeIntrusive<NAst::TCallExpr>(
         loc, Ident(loc, std::move(name)), std::move(args));
 }
 
@@ -564,7 +565,7 @@ std::vector<NAst::TExprPtr*> WindowInputs(NSql::TWindowExpr& window) {
     return inputs;
 }
 
-std::expected<NAst::TExprPtr, TError> TAggCollector::Rewrite(NAst::TExprPtr expr) {
+std::expected<NAst::TExprPtr, TError> TAggCollector::Rewrite(NQumir::NAst::TTypeFactory& types, NAst::TExprPtr expr) {
     if (!expr) {
         return expr;
     }
@@ -578,9 +579,9 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Rewrite(NAst::TExprPtr expr
                     "window function calls cannot be nested"));
             }
         }
-        auto w = CloneSqlWindowExpr(window.Cast());
+        auto w = CloneSqlWindowExpr(NQumir::TIntrusivePtr<NSql::TWindowExpr>(window.Cast()));
         for (auto* input : WindowInputs(*w)) {
-            auto rewritten = Rewrite(*input);
+            auto rewritten = Rewrite(types, *input);
             if (!rewritten) {
                 return std::unexpected(rewritten.error());
             }
@@ -594,10 +595,10 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Rewrite(NAst::TExprPtr expr
             return std::unexpected(TError(window->Location,
                 "aggregate function calls cannot contain window function calls"));
         }
-        return Emit(*agg, expr->Location);
+        return Emit(types, *agg, expr->Location);
     }
     for (auto* child : expr->MutableChildren()) {
-        auto rewritten = Rewrite(*child);
+        auto rewritten = Rewrite(types, *child);
         if (!rewritten) {
             return std::unexpected(rewritten.error());
         }
@@ -611,15 +612,15 @@ bool TAggCollector::IsIntegerColumn(const NAst::TExprPtr& expr) const {
     if (!ident || !InputSchema_) {
         return false;
     }
-    NAst::TTypePtr type;
+    NAst::TTypePtr type = nullptr;
     for (const auto& [name, candidate] : InputSchema_->Fields) {
         if (name == ident.Cast()->Name) {
             type = candidate;
             break;
         }
     }
-    type = NAst::UnwrapNamedType(UnwrapNullableType(type));
-    return static_cast<bool>(NAst::TMaybeType<NAst::TIntegerType>(type));
+    type = UnwrapNamedValueType(UnwrapNullableType(type));
+    return static_cast<bool>(MaybeIntegerType(type));
 }
 
 NAst::TExprPtr TAggCollector::EmitPlain(
@@ -641,6 +642,7 @@ NAst::TExprPtr TAggCollector::EmitPlain(
 }
 
 std::optional<NAst::TExprPtr> TAggCollector::TryEmitAffineAggregate(
+    NQumir::NAst::TTypeFactory& types,
     const std::string& func,
     const NAst::TExprPtr& arg,
     TLocation loc)
@@ -668,7 +670,7 @@ std::optional<NAst::TExprPtr> TAggCollector::TryEmitAffineAggregate(
         value = Binary(
             loc,
             "*",
-            std::make_shared<NAst::TNumberExpr>(loc, affine->Scale),
+            NQumir::MakeIntrusive<NAst::TNumberExpr>(loc, affine->Scale, types),
             std::move(value));
     }
 
@@ -681,13 +683,13 @@ std::optional<NAst::TExprPtr> TAggCollector::TryEmitAffineAggregate(
             auto contribution = Binary(
                 loc,
                 "*",
-                std::make_shared<NAst::TNumberExpr>(loc, affine->Offset),
+                NQumir::MakeIntrusive<NAst::TNumberExpr>(loc, affine->Offset, types),
                 CloneExpr(count));
             value = Binary(loc, "+", std::move(value), std::move(contribution));
         }
         if (func == "avg") {
-            auto divisor = std::make_shared<NAst::TCastExpr>(
-                loc, std::move(count), std::make_shared<NAst::TFloatType>());
+            auto divisor = NQumir::MakeIntrusive<NAst::TCastExpr>(
+                loc, std::move(count), types.MakeFloat());
             value = Binary(loc, "/", std::move(value), std::move(divisor));
         }
     } else if (affine->Offset != 0) {
@@ -695,12 +697,13 @@ std::optional<NAst::TExprPtr> TAggCollector::TryEmitAffineAggregate(
             loc,
             "+",
             std::move(value),
-            std::make_shared<NAst::TNumberExpr>(loc, affine->Offset));
+            NQumir::MakeIntrusive<NAst::TNumberExpr>(loc, affine->Offset, types));
     }
     return value;
 }
 
 std::expected<NAst::TTypePtr, TError> TAggCollector::StddevArgType(
+    NQumir::NAst::TTypeFactory& types,
     const TAggCall& agg,
     TLocation loc) const
 {
@@ -723,9 +726,9 @@ std::expected<NAst::TTypePtr, TError> TAggCollector::StddevArgType(
         return NAst::TTypePtr{};
     }
 
-    NAst::TTypePtr type;
+    NAst::TTypePtr type = nullptr;
     try {
-        type = NKernel::AnnotateExprType(agg.Arg, *InputSchema_, &Context_);
+        type = NKernel::AnnotateExprType(types, agg.Arg, *InputSchema_, &Context_);
     } catch (const TError& error) {
         return std::unexpected(error);
     }
@@ -739,8 +742,8 @@ std::expected<NAst::TTypePtr, TError> TAggCollector::StddevArgType(
     return type;
 }
 
-std::expected<NAst::TExprPtr, TError> TAggCollector::EmitStddevSamp(const TAggCall& agg, TLocation loc) {
-    auto type = StddevArgType(agg, loc);
+std::expected<NAst::TExprPtr, TError> TAggCollector::EmitStddevSamp(NQumir::NAst::TTypeFactory& types, const TAggCall& agg, TLocation loc) {
+    auto type = StddevArgType(types, agg, loc);
     if (!type) {
         return std::unexpected(type.error());
     }
@@ -749,7 +752,7 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::EmitStddevSamp(const TAggCa
     const bool needsCast = *type && !IsFloatWidth(*type, NAst::TFloatType::F64);
     auto valueArg = [&](TLocation argLoc) -> NAst::TExprPtr {
         auto arg = CloneExpr(agg.Arg);
-        return needsCast ? CastF64(std::move(argLoc), std::move(arg)) : arg;
+        return needsCast ? CastF64(types, std::move(argLoc), std::move(arg)) : arg;
     };
 
     std::string sumName = Names_.Next("sum");
@@ -775,24 +778,25 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::EmitStddevSamp(const TAggCa
     });
 
     auto count = Ident(loc, countName);
-    auto countF = CastF64(loc, Ident(loc, countName));
+    auto countF = CastF64(types, loc, Ident(loc, countName));
     auto numerator = Binary(loc, "-",
         Ident(loc, sumSqName),
         Binary(loc, "/",
             Binary(loc, "*", Ident(loc, sumName), Ident(loc, sumName)),
-            CastF64(loc, Ident(loc, countName))));
+            CastF64(types, loc, Ident(loc, countName))));
     auto variance = Binary(loc, "/",
         std::move(numerator),
-        Binary(loc, "-", std::move(countF), F64Literal(loc, 1.0)));
+        Binary(loc, "-", std::move(countF), F64Literal(types, loc, 1.0)));
     auto stddev = Call(loc, "qdb_sqrt", {std::move(variance)});
-    return std::make_shared<NAst::TIfExpr>(
+    return NQumir::MakeIntrusive<NAst::TIfExpr>(
         loc,
-        Binary(loc, "<", std::move(count), std::make_shared<NAst::TNumberExpr>(loc, int64_t{2})),
+        Binary(loc, "<", std::move(count), NQumir::MakeIntrusive<NAst::TNumberExpr>(loc, int64_t{2}, types)),
         Call(loc, "qdb_sql_null", {}),
         std::move(stddev));
 }
 
 std::expected<NAst::TExprPtr, TError> TAggCollector::EmitBoolAggregate(
+    NQumir::NAst::TTypeFactory& types,
     const TAggCall& agg,
     TLocation loc)
 {
@@ -800,13 +804,13 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::EmitBoolAggregate(
         return std::unexpected(TError(loc, agg.Func + " requires one argument"));
     }
     if (InputSchema_ && !InputSchema_->Fields.empty()) {
-        NAst::TTypePtr type;
+        NAst::TTypePtr type = nullptr;
         try {
-            type = NKernel::AnnotateExprType(agg.Arg, *InputSchema_, &Context_);
+            type = NKernel::AnnotateExprType(types, agg.Arg, *InputSchema_, &Context_);
         } catch (const TError& error) {
             return std::unexpected(error);
         }
-        if (!NAst::TMaybeType<NAst::TBoolType>(NAst::UnwrapNamedType(UnwrapNullableType(type)))) {
+        if (!NAst::TMaybeType<NAst::TBoolType>(UnwrapNamedValueType(UnwrapNullableType(type)))) {
             return std::unexpected(TError(loc, agg.Func + " argument must be BOOLEAN"));
         }
     }
@@ -815,7 +819,7 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::EmitBoolAggregate(
     return EmitPlain(agg.Func == "bool_or" ? "max" : "min", agg.Arg, std::move(loc));
 }
 
-std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(const TAggCall& agg, TLocation loc) {
+std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(NQumir::NAst::TTypeFactory& types, const TAggCall& agg, TLocation loc) {
     // Every supported aggregate takes one argument; a further one would be
     // dropped silently and compute the one-argument aggregate.
     if (agg.ArgCount > 1 || (agg.ArgCount == 0 && agg.Func != "count")) {
@@ -847,10 +851,10 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(const TAggCall& agg, T
     HasNonDistinct_ = true;
 
     if (agg.Func == "stddev_samp") {
-        return EmitStddevSamp(agg, loc);
+        return EmitStddevSamp(types, agg, loc);
     }
     if (agg.Func == "bool_and" || agg.Func == "bool_or" || agg.Func == "every") {
-        return EmitBoolAggregate(agg, loc);
+        return EmitBoolAggregate(types, agg, loc);
     }
 
     NAst::TExprPtr arg = (agg.Func == "count" && agg.Star)
@@ -859,7 +863,7 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(const TAggCall& agg, T
     // PostgreSQL has no sum or avg of a DATE; avg would report the sum it is lowered to.
     if (arg && (agg.Func == "sum" || agg.Func == "avg") && InputSchema_ && !InputSchema_->Fields.empty()) {
         try {
-            if (IsDateType(NKernel::AnnotateExprType(arg, *InputSchema_, &Context_))) {
+            if (IsDateType(NKernel::AnnotateExprType(types, arg, *InputSchema_, &Context_))) {
                 return std::unexpected(TError(loc, "function " + agg.Func + "(DATE) does not exist"));
             }
         } catch (const TError& error) {
@@ -870,7 +874,7 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(const TAggCall& agg, T
                 agg.Func == "min" || agg.Func == "max" ||
                 agg.Func == "count"))
     {
-        if (auto rewritten = TryEmitAffineAggregate(agg.Func, arg, loc)) {
+        if (auto rewritten = TryEmitAffineAggregate(types, agg.Func, arg, loc)) {
             return std::move(*rewritten);
         }
     }
@@ -885,49 +889,49 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(const TAggCall& agg, T
 
         NAst::TExprPtr count = Ident(loc, countName);
         if (!IsDecimalExprHint(agg.Arg)) {
-            count = std::make_shared<NAst::TCastExpr>(
-                loc, std::move(count), std::make_shared<NAst::TFloatType>());
+            count = NQumir::MakeIntrusive<NAst::TCastExpr>(
+                loc, std::move(count), types.MakeFloat());
         }
-        return std::make_shared<NAst::TBinaryExpr>(
+        return NQumir::MakeIntrusive<NAst::TBinaryExpr>(
             loc, NAst::TOperator('/'), Ident(loc, sumName), std::move(count));
     }
 
     if (arg && (agg.Func == "sum" || agg.Func == "min" || agg.Func == "max")
-        && IsRealArgument(arg, InputSchema_, Context_))
+        && IsRealArgument(types, arg, InputSchema_, Context_))
     {
-        return NarrowToReal(loc, EmitPlain(agg.Func, std::move(arg), loc));
+        return NarrowToReal(types, loc, EmitPlain(agg.Func, std::move(arg), loc));
     }
     return EmitPlain(agg.Func, std::move(arg), std::move(loc));
 }
 
 std::expected<std::vector<std::pair<std::string, NAst::TTypePtr>>, TError>
-TAggCollector::SlotTypes() const
+TAggCollector::SlotTypes(NQumir::NAst::TTypeFactory& types) const
 {
     std::vector<std::pair<std::string, NAst::TTypePtr>> slots;
     slots.reserve(Specs_.size());
     for (const auto& spec : Specs_) {
-        NAst::TTypePtr argType;
+        NAst::TTypePtr argType = nullptr;
         if (spec.Arg && InputSchema_) {
             try {
-                argType = NKernel::AnnotateExprType(spec.Arg, *InputSchema_, &Context_);
+                argType = NKernel::AnnotateExprType(types, spec.Arg, *InputSchema_, &Context_);
             } catch (const TError& error) {
                 return std::unexpected(error);
             }
         }
-        slots.emplace_back(spec.Name, AggregateResultType(spec.Func, argType));
+        slots.emplace_back(spec.Name, AggregateResultType(types, spec.Func, argType));
     }
     return slots;
 }
 
-std::expected<NAst::TExprPtr, TError> TWindowCollector::Rewrite(NAst::TExprPtr expr) {
+std::expected<NAst::TExprPtr, TError> TWindowCollector::Rewrite(NQumir::NAst::TTypeFactory& types, NAst::TExprPtr expr) {
     if (!expr) {
         return expr;
     }
     if (auto window = NAst::TMaybeNode<NSql::TWindowExpr>(expr)) {
-        return Emit(window.Cast());
+        return Emit(types, NQumir::TIntrusivePtr<NSql::TWindowExpr>(window.Cast()));
     }
     for (auto* child : expr->MutableChildren()) {
-        auto rewritten = Rewrite(*child);
+        auto rewritten = Rewrite(types, *child);
         if (!rewritten) {
             return std::unexpected(rewritten.error());
         }
@@ -936,7 +940,7 @@ std::expected<NAst::TExprPtr, TError> TWindowCollector::Rewrite(NAst::TExprPtr e
     return expr;
 }
 
-std::expected<TOperatorPtr, TError> TWindowCollector::Build(TOperatorPtr input) {
+std::expected<TOperatorPtr, TError> TWindowCollector::Build(NQumir::NAst::TTypeFactory& types, TOperatorPtr input) {
     // Plain idents keep their name; a computed key/arg is materialized into a
     // synthetic column in one pass-through project below the whole stack.
     std::map<std::string, std::pair<std::string, NAst::TExprPtr>> computed;
@@ -997,7 +1001,7 @@ std::expected<TOperatorPtr, TError> TWindowCollector::Build(TOperatorPtr input) 
         for (const auto& [_, entry] : computed) {
             projs.push_back({ .Name = entry.first, .Expression = entry.second });
         }
-        node = std::make_shared<TProjectOperator>(std::move(node), std::move(projs));
+        node = NQumir::MakeIntrusive<TProjectOperator>(types, std::move(node), std::move(projs));
     }
 
     // One node per distinct spec, in first-seen order.
@@ -1017,14 +1021,14 @@ std::expected<TOperatorPtr, TError> TWindowCollector::Build(TOperatorPtr input) 
         for (auto idx : group) {
             funcs.push_back(std::move(resolved[idx].Func));
         }
-        node = std::make_shared<TWindowOperator>(
-            std::move(node), head.PartitionKeys, head.OrderKeys, head.Frame,
+        node = NQumir::MakeIntrusive<TWindowOperator>(
+            types, std::move(node), head.PartitionKeys, head.OrderKeys, head.Frame,
             std::move(funcs));
     }
     return node;
 }
 
-std::expected<NAst::TExprPtr, TError> TWindowCollector::Emit(const NSql::TSqlPtr<NSql::TWindowExpr>& w) {
+std::expected<NAst::TExprPtr, TError> TWindowCollector::Emit(NQumir::NAst::TTypeFactory& types, const NQumir::TIntrusivePtr<NSql::TWindowExpr>& w) {
     auto call = NAst::TMaybeNode<NAst::TCallExpr>(w->Expr);
     if (!call) {
         return std::unexpected(TError(w->Location, "unsupported window function expression"));
@@ -1075,10 +1079,10 @@ std::expected<NAst::TExprPtr, TError> TWindowCollector::Emit(const NSql::TSqlPtr
     raw.Name = Names_.Next("w");
     raw.Signature = Signature(raw);
     auto loc = w->Location;
-    const bool realSum = func == "sum" && IsRealArgument(raw.Arg, InputSchema_, Context_);
+    const bool realSum = func == "sum" && IsRealArgument(types, raw.Arg, InputSchema_, Context_);
     Raw_.push_back(std::move(raw));
     if (realSum) {
-        return NarrowToReal(loc, Ident(loc, Raw_.back().Name));
+        return NarrowToReal(types, loc, Ident(loc, Raw_.back().Name));
     }
     return Ident(loc, Raw_.back().Name);
 }
@@ -1201,6 +1205,7 @@ TGroupingRewriteInfo MakeGroupingRewriteInfo(
 }
 
 std::expected<NAst::TExprPtr, TError> RewriteGroupingCalls(
+    NQumir::NAst::TTypeFactory& types,
     NAst::TExprPtr expr,
     const TGroupingRewriteInfo& info)
 {
@@ -1208,10 +1213,10 @@ std::expected<NAst::TExprPtr, TError> RewriteGroupingCalls(
         return expr;
     }
     if (IsGroupingCall(expr)) {
-        return BuildGroupingValue(expr, info);
+        return BuildGroupingValue(types, expr, info);
     }
     for (auto* child : expr->MutableChildren()) {
-        auto rewritten = RewriteGroupingCalls(*child, info);
+        auto rewritten = RewriteGroupingCalls(types, *child, info);
         if (!rewritten) {
             return std::unexpected(rewritten.error());
         }

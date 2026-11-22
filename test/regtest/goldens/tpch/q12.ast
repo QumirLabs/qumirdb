@@ -36,8 +36,8 @@
                 (call qdb_in_list l_shipmode (cast "TRUCK" <named StringView>) (cast "AIR" <named StringView>)))
               (< l_commitdate l_receiptdate))
             (< l_shipdate l_commitdate))
-          (>= l_receiptdate (: 8401 i32)))
-        (< l_receiptdate (: 8766 i32)))
+          (>= l_receiptdate (: 8401 <named DATE [i32]>)))
+        (< l_receiptdate (: 8766 <named DATE [i32]>)))
     )
     (group-by
       l_shipmode

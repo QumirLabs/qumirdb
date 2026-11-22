@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "mock_source.h"
 #include "plan_runner.h"
+#include "test_types.h"
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 
@@ -74,25 +75,25 @@ TOperatorPtr BuildSqlPlan(
 {
     std::istringstream in(sql);
     NSql::TTokenStream ts(in);
-    NSql::TParser parser;
+    NSql::TParser parser(TestTypes());
     auto parsed = parser.Parse(ts);
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
     }
-    auto root = BuildPlan(*parsed, [&](std::string_view table)
+    auto root = BuildPlan(TestTypes(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         auto it = sources.find(std::string(table));
         if (it == sources.end()) {
             return std::unexpected(NQumir::TError("unknown table: " + std::string(table)));
         }
-        return std::make_shared<TSourceOperator>(Borrow(*it->second), std::string(table));
+        return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(*it->second), std::string(table));
     });
     if (!root) {
         throw std::runtime_error(root.error().ToString());
     }
     TOperatorPtr plan = *root;
-    ApplyPlanPasses(plan);
+    ApplyPlanPasses(TestTypes(), plan);
     return plan;
 }
 
@@ -104,13 +105,13 @@ std::unique_ptr<TTestRuntime> RunSql(
     return RunPlan(BuildSqlPlan(sql, sources), settings);
 }
 
-std::shared_ptr<TFilterOperator> FindFilter(const TOperatorPtr& op) {
+NQumir::TIntrusivePtr<TFilterOperator> FindFilter(const TOperatorPtr& op) {
     if (auto filter = TMaybeOp<TFilterOperator>(op)) {
         return filter.Cast();
     }
     for (const auto& child : op->Children()) {
         if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            if (auto found = FindFilter(childOp.Cast())) {
+            if (auto found = FindFilter(TOperatorPtr(childOp.Cast()))) {
                 return found;
             }
         }
@@ -120,7 +121,7 @@ std::shared_ptr<TFilterOperator> FindFilter(const TOperatorPtr& op) {
 
 TJoinOperator* FindJoin(const TOperatorPtr& op) {
     if (auto join = TMaybeOp<TJoinOperator>(op)) {
-        return join.Cast().get();
+        return join.Cast().Get();
     }
     for (const auto& child : op->Inputs()) {
         if (auto* join = FindJoin(child)) {
@@ -171,6 +172,7 @@ public:
     }
 
     std::vector<NScheduler::TScanRowGroup> PruneRowGroups(
+        NQumir::NAst::TTypeFactory&,
         const NQumir::NAst::TExprPtr&,
         std::string_view,
         std::ostream*,
@@ -296,7 +298,7 @@ TEST(CteMaterialize, ParallelSpoolKeepsDefinitionLanes) {
             settings.Scheduler.WorkerCount = 4;
         }
         auto lowered = NScheduler::LowerPlanToGraph(
-            BuildSqlPlan(sql, sources), settings, nullptr);
+            BuildSqlPlan(sql, sources), SharedTestTypes(), settings, nullptr);
         EXPECT_EQ(CountTasks(*lowered.Graph, "source"), 4u);
         EXPECT_EQ(CountTasks(*lowered.Graph, "cte-producer"), 4u);
         EXPECT_EQ(CountTasks(*lowered.Graph, "cte-consumer"), 8u);
@@ -468,7 +470,7 @@ TEST(CteMaterialize, FilterDropsPredicateOnlyColumnFromOutput) {
     ASSERT_TRUE(filter);
 
     auto has = [](const NQumir::NAst::TTypePtr& type, const std::string& needle) {
-        auto* st = static_cast<NQumir::NAst::TStructType*>(type.get());
+        auto* st = static_cast<const NQumir::NAst::TStructType*>(type);
         for (const auto& [name, _] : st->Fields) {
             if (name.find(needle) != std::string::npos) {
                 return true;

@@ -1,6 +1,7 @@
 #include "parser.h"
 
 #include <qdb/modules/qumirdb_runtime.h>
+#include <qdb/modules/qumirdb.h>
 #include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/utils/nesting.h>
@@ -327,13 +328,15 @@ using TVoidTask = NQumir::TExpectedTask<std::monostate, TError, TLocation>;
 
 struct TParserContext {
     TWrappedTokenStream& Stream;
+    NQumir::NAst::TTypeFactory& Types;
     size_t Nesting = 0;
     // How deep the parse under the innermost open chain went: the deepest Nesting plus
     // the links of the chains below it.
     size_t Peak = 0;
 
-    TParserContext(TWrappedTokenStream& stream)
+    TParserContext(TWrappedTokenStream& stream, NQumir::NAst::TTypeFactory& types)
         : Stream(stream)
+        , Types(types)
     { }
 };
 
@@ -589,7 +592,7 @@ private:
     void Expr(const NQumir::NAst::TExprPtr& node)
     {
         if (node) {
-            Stack.push_back({.Expr = node.get(), .Depth = Depth});
+            Stack.push_back({.Expr = node.Get(), .Depth = Depth});
         }
     }
 
@@ -617,7 +620,7 @@ std::optional<TLocation> FindTooDeep(const TSqlNodePtr& statement, const TLocati
         }
         for (const auto& child : item.Expr->Children()) {
             if (child) {
-                stack.push_back({.Expr = child.get(), .Depth = depth});
+                stack.push_back({.Expr = child.Get(), .Depth = depth});
             }
         }
         // The only bridge from an expression back into SQL clauses.
@@ -672,35 +675,35 @@ bool IsIntervalUnit(const std::string& name) {
 
 NQumir::NAst::TExprPtr binary(TLocation loc, TOperator op, NQumir::NAst::TExprPtr left, NQumir::NAst::TExprPtr right)
 {
-    return std::make_shared<NQumir::NAst::TBinaryExpr>(loc, op, left, right);
+    return NQumir::MakeIntrusive<NQumir::NAst::TBinaryExpr>(loc, op, left, right);
 }
 
 NQumir::NAst::TExprPtr unary(TLocation loc, TOperator op, NQumir::NAst::TExprPtr expr)
 {
-    return std::make_shared<NQumir::NAst::TUnaryExpr>(loc, op, expr);
+    return NQumir::MakeIntrusive<NQumir::NAst::TUnaryExpr>(loc, op, expr);
 }
 
 NQumir::NAst::TExprPtr call(TLocation loc, const std::string& name, std::vector<NQumir::NAst::TExprPtr> args) {
-    return std::make_shared<NQumir::NAst::TCallExpr>(loc,
-        std::make_shared<NQumir::NAst::TIdentExpr>(loc, name),
+    return NQumir::MakeIntrusive<NQumir::NAst::TCallExpr>(loc,
+        NQumir::MakeIntrusive<NQumir::NAst::TIdentExpr>(loc, name),
         std::move(args)
     );
 }
 
-NQumir::NAst::TExprPtr i32_literal(TLocation loc, int32_t value) {
-    auto ret = std::make_shared<NQumir::NAst::TNumberExpr>(loc, static_cast<int64_t>(value));
-    ret->Type = std::make_shared<NQumir::NAst::TIntegerType>(NQumir::NAst::TIntegerType::I32);
+NQumir::NAst::TExprPtr i32_literal(NQumir::NAst::TTypeFactory& types, TLocation loc, int32_t value) {
+    auto ret = NQumir::MakeIntrusive<NQumir::NAst::TNumberExpr>(loc, static_cast<int64_t>(value), types);
+    ret->Type = types.MakeInteger(NQumir::NAst::TIntegerType::I32);
     return ret;
 }
 
-NQumir::NAst::TExprPtr date_literal(TLocation loc, int32_t days) {
-    auto ret = std::make_shared<NQumir::NAst::TNumberExpr>(loc, static_cast<int64_t>(days));
-    ret->Type = std::make_shared<TDateType>();
+NQumir::NAst::TExprPtr date_literal(NQumir::NAst::TTypeFactory& types, TLocation loc, int32_t days) {
+    auto ret = NQumir::MakeIntrusive<NQumir::NAst::TNumberExpr>(loc, static_cast<int64_t>(days), types);
+    ret->Type = MakeDateType(types);
     return ret;
 }
 
 NQumir::NAst::TExprPtr cast(TLocation loc, NQumir::NAst::TExprPtr expr, NQumir::NAst::TTypePtr type) {
-    return std::make_shared<NQumir::NAst::TCastExpr>(loc, std::move(expr), std::move(type));
+    return NQumir::MakeIntrusive<NQumir::NAst::TCastExpr>(loc, std::move(expr), std::move(type));
 }
 
 // Wraps a string's bytes as a qdb_string_view for the parse-time date/interval
@@ -713,17 +716,17 @@ qdb_string_view AsStringView(const std::string& s) {
 // date kernel; a day interval is a plain day count.
 const char* const IntervalMonthsMarker = "qdb_interval_months";
 
-NQumir::NAst::TExprPtr interval_literal(TLocation loc, const std::string& amount, const std::string& unit) {
+NQumir::NAst::TExprPtr interval_literal(NQumir::NAst::TTypeFactory& types, TLocation loc, const std::string& amount, const std::string& unit) {
     const auto u = ToLowerStr(unit);
     if (u == "month" || u == "months" || u == "year" || u == "years") {
         return call(loc, IntervalMonthsMarker,
-            {i32_literal(loc, qdb_sql_interval_months(AsStringView(amount), AsStringView(u)))});
+            {i32_literal(types, loc, qdb_sql_interval_months(AsStringView(amount), AsStringView(u)))});
     }
-    return i32_literal(loc, qdb_sql_interval(AsStringView(amount)));
+    return i32_literal(types, loc, qdb_sql_interval(AsStringView(amount)));
 }
 
 NQumir::NAst::TExprPtr list(TLocation loc, std::vector<NQumir::NAst::TExprPtr> items) {
-    return std::make_shared<NQumir::NAst::TBlockExpr>(loc, std::move(items));
+    return NQumir::MakeIntrusive<NQumir::NAst::TBlockExpr>(loc, std::move(items));
 }
 
 NQumir::NAst::TExprPtr BuildInListPredicate(
@@ -750,7 +753,7 @@ NQumir::NAst::TExprPtr qualified_ref(TLocation loc, const std::vector<std::strin
         name += '.';
         name += parts[i];
     }
-    return std::make_shared<NQumir::NAst::TIdentExpr>(loc, std::move(name));
+    return NQumir::MakeIntrusive<NQumir::NAst::TIdentExpr>(loc, std::move(name));
 }
 
 // <ident> ::= <regular_ident> | <quoted_ident>
@@ -1019,7 +1022,7 @@ TAstTask<TSqlExternalFunction> create_function_stmt(TParserContext& ctx) {
                 paramName = "__external_arg_" + std::to_string(params.size());
             }
             auto paramType = co_await type_name(ctx);
-            params.push_back(std::make_shared<TVarStmt>(
+            params.push_back(NQumir::MakeIntrusive<TVarStmt>(
                 first.Location, std::move(paramName), std::move(paramType)));
 
             token = ctx.Stream.Next();
@@ -1037,7 +1040,7 @@ TAstTask<TSqlExternalFunction> create_function_stmt(TParserContext& ctx) {
         co_return Error(token, "`RETURNS' required");
     }
 
-    TTypePtr returnType;
+    TTypePtr returnType = nullptr;
     token = ctx.Stream.Next();
     if (IsOp(token, '(')) {
         std::vector<std::pair<std::string, TTypePtr>> fields;
@@ -1053,7 +1056,7 @@ TAstTask<TSqlExternalFunction> create_function_stmt(TParserContext& ctx) {
                 co_return Error(token, "`,' or `)' expected");
             }
         }
-        returnType = std::make_shared<TStructType>(std::move(fields));
+        returnType = ctx.Types.MakeStruct(std::move(fields));
     } else {
         ctx.Stream.Unget(token);
         returnType = co_await type_name(ctx);
@@ -1088,8 +1091,8 @@ TAstTask<TSqlExternalFunction> create_function_stmt(TParserContext& ctx) {
         symbol = name;
     }
 
-    auto body = std::make_shared<TBlockExpr>(location, std::vector<TExprPtr>{});
-    auto function = std::make_shared<TFunDecl>(
+    auto body = NQumir::MakeIntrusive<TBlockExpr>(location, std::vector<TExprPtr>{});
+    auto function = NQumir::MakeIntrusive<TFunDecl>(
         location, std::move(name), std::vector<TGenericParam>{},
         std::move(params), std::move(body), std::move(returnType));
     function->MangledName = std::move(*symbol);
@@ -1097,7 +1100,7 @@ TAstTask<TSqlExternalFunction> create_function_stmt(TParserContext& ctx) {
     for (const auto& param : function->Params) {
         paramTypes.push_back(param->Type);
     }
-    function->Type = std::make_shared<TFunctionType>(
+    function->Type = ctx.Types.MakeFunction(
         std::move(paramTypes), function->RetType);
 
     auto result = std::make_shared<TSqlExternalFunction>(replace);
@@ -1890,10 +1893,10 @@ TAstExprTask comparison_expr(TParserContext& ctx) {
             // ret IN ( <select> )
             auto node = sub.Cast();
             node->Operand = ret;
-            ret = node;
+            ret = NQumir::TIntrusivePtr<TSubqueryExpr>(node);
         } else {
             // Keep scalar IN as a pseudo-call until typed kernel expansion.
-            auto block = std::static_pointer_cast<NQumir::NAst::TBlockExpr>(items);
+            auto block = NQumir::StaticPointerCast<NQumir::NAst::TBlockExpr>(items);
             ret = BuildInListPredicate(loc, std::move(ret), block->Stmts);
         }
     } else if (IsKeyword(opToken, "BETWEEN")) {
@@ -1963,18 +1966,18 @@ NQumir::NAst::TExprPtr IntervalMonths(const NQumir::NAst::TExprPtr& e) {
 
 // DATE +- INTERVAL n MONTH|YEAR adds calendar months, keeping the day (clamped); a DATE
 // literal is folded here, so that predicates keep literal bounds.
-NQumir::NAst::TExprPtr AddMonths(TLocation loc, NQumir::NAst::TExprPtr date,
+NQumir::NAst::TExprPtr AddMonths(NQumir::NAst::TTypeFactory& types, TLocation loc, NQumir::NAst::TExprPtr date,
     NQumir::NAst::TExprPtr months, bool negate)
 {
     auto monthsNumber = NQumir::NAst::TMaybeNode<NQumir::NAst::TNumberExpr>(months);
     auto dateNumber = NQumir::NAst::TMaybeNode<NQumir::NAst::TNumberExpr>(date);
     if (monthsNumber && dateNumber) {
         const int64_t n = monthsNumber.Cast()->IntValue;
-        return date_literal(loc, qdb_sql_date_add_months(
+        return date_literal(types, loc, qdb_sql_date_add_months(
             static_cast<int32_t>(dateNumber.Cast()->IntValue), negate ? -n : n));
     }
     return cast(loc, call(loc, negate ? "qdb_date_sub_months" : "qdb_date_add_months", {date, months}),
-        std::make_shared<NQumir::NAst::TNamedType>("DATE", nullptr));
+        DateCastTarget(types));
 }
 
 TAstExprTask add_expr(TParserContext& ctx) {
@@ -1993,9 +1996,9 @@ TAstExprTask add_expr(TParserContext& ctx) {
         }
         auto loc = ret->Location;
         if (auto months = IntervalMonths(rhs)) {
-            ret = AddMonths(loc, ret, months, !plus);
+            ret = AddMonths(ctx.Types, loc, ret, months, !plus);
         } else if (auto lhsMonths = IntervalMonths(ret); lhsMonths && plus) {
-            ret = AddMonths(loc, rhs, lhsMonths, false);
+            ret = AddMonths(ctx.Types, loc, rhs, lhsMonths, false);
         } else {
             ret = binary(loc, plus ? "+"_op : "-"_op, ret, rhs);
         }
@@ -2072,7 +2075,7 @@ TAstExprTask postfix_expr(TParserContext& ctx) {
     }
 
     if (windowSpec) {
-        ret = std::make_shared<TWindowExpr>(std::move(ret), std::move(windowSpec));
+        ret = NQumir::MakeIntrusive<TWindowExpr>(std::move(ret), std::move(windowSpec));
     }
 
     while (isCast()) {
@@ -2193,33 +2196,33 @@ TAstExprTask primary_expr(TParserContext& ctx) {
         if ((unit.Type == TToken::Identifier || unit.Type == TToken::Keyword)
             && IsIntervalUnit(unit.Name)) {
             try {
-                co_return interval_literal(loc, std::to_string(token.Value.i64), unit.Name);
+                co_return interval_literal(ctx.Types, loc, std::to_string(token.Value.i64), unit.Name);
             } catch (const std::exception& e) {
                 co_return Error(token, e.what());
             }
         }
         ctx.Stream.Unget(unit);
-        co_return std::make_shared<NQumir::NAst::TNumberExpr>(loc, token.Value.i64);
+        co_return NQumir::MakeIntrusive<NQumir::NAst::TNumberExpr>(loc, token.Value.i64, ctx.Types);
     } else if (token.Type == TToken::Float) {
-        co_return std::make_shared<NQumir::NAst::TNumberExpr>(loc, token.Value.f64);
+        co_return NQumir::MakeIntrusive<NQumir::NAst::TNumberExpr>(loc, token.Value.f64, ctx.Types);
     } else if (token.Type == TToken::String) {
         // TODO: call struct constructor inplace!
-        auto literal = std::make_shared<NQumir::NAst::TStringLiteralExpr>(loc, token.Name);
-        auto target = std::make_shared<NQumir::NAst::TNamedType>("StringView", nullptr);
-        co_return std::make_shared<NQumir::NAst::TCastExpr>(loc, std::move(literal), std::move(target));
+        auto literal = NQumir::MakeIntrusive<NQumir::NAst::TStringLiteralExpr>(loc, token.Name, ctx.Types);
+        auto target = NQumir::NRegistry::QumirDbNamedType(ctx.Types, "StringView");
+        co_return NQumir::MakeIntrusive<NQumir::NAst::TCastExpr>(loc, std::move(literal), std::move(target));
     } else if (token.Type == TToken::Char) {
-        auto ret = std::make_shared<NQumir::NAst::TNumberExpr>(loc, token.Value.i64);
-        ret->Type = std::make_shared<NQumir::NAst::TIntegerType>(NQumir::NAst::TIntegerType::U8);
+        auto ret = NQumir::MakeIntrusive<NQumir::NAst::TNumberExpr>(loc, token.Value.i64, ctx.Types);
+        ret->Type = ctx.Types.MakeInteger(NQumir::NAst::TIntegerType::U8);
         co_return ret;
     } else if (token.Type == TToken::Boolean) {
-        co_return std::make_shared<NQumir::NAst::TNumberExpr>(loc, (bool)token.Value.i64);
+        co_return NQumir::MakeIntrusive<NQumir::NAst::TNumberExpr>(loc, (bool)token.Value.i64, ctx.Types);
     }
 
     // keyword literals
     if (IsKeyword(token, "TRUE")) {
-        co_return std::make_shared<NQumir::NAst::TNumberExpr>(loc, true);
+        co_return NQumir::MakeIntrusive<NQumir::NAst::TNumberExpr>(loc, true, ctx.Types);
     } else if (IsKeyword(token, "FALSE")) {
-        co_return std::make_shared<NQumir::NAst::TNumberExpr>(loc, false);
+        co_return NQumir::MakeIntrusive<NQumir::NAst::TNumberExpr>(loc, false, ctx.Types);
     } else if (IsKeyword(token, "NULL")) {
         co_return call(loc, "qdb_sql_null", {});
     }
@@ -2236,7 +2239,7 @@ TAstExprTask primary_expr(TParserContext& ctx) {
         if (!qdb_try_parse_date(AsStringView(value.Name), &days)) {
             co_return Error(value, "invalid input syntax for type date: \"" + value.Name + "\"");
         }
-        co_return date_literal(loc, days);
+        co_return date_literal(ctx.Types, loc, days);
     }
 
     // <interval_literal> ::= "INTERVAL" <string_literal> <unit>
@@ -2252,7 +2255,7 @@ TAstExprTask primary_expr(TParserContext& ctx) {
         // TODO: constant functions should be expanded by Qumir constant folding,
         // not special-cased in the SQL parser.
         try {
-            co_return interval_literal(loc, value.Name, unit.Name);
+            co_return interval_literal(ctx.Types, loc, value.Name, unit.Name);
         } catch (const std::exception& e) {
             co_return Error(value, e.what());
         }
@@ -2342,7 +2345,7 @@ TAstExprTask primary_expr(TParserContext& ctx) {
 
     // <substring> ::= "SUBSTRING" "(" <expr> "FROM" <expr> "FOR" <expr> ")"
     if (IsKeyword(token, "SUBSTRING")) {
-        auto i32type = std::make_shared<NQumir::NAst::TIntegerType>(NQumir::NAst::TIntegerType::I32);
+        auto i32type = ctx.Types.MakeInteger(NQumir::NAst::TIntegerType::I32);
 
         auto next = ctx.Stream.Next();
         if (!IsOp(next, '(')) {
@@ -2387,7 +2390,7 @@ TAstExprTask primary_expr(TParserContext& ctx) {
             co_return Error(next, "')' expected");
         }
 
-        co_return std::make_shared<TSubqueryExpr>(
+        co_return NQumir::MakeIntrusive<TSubqueryExpr>(
             loc, TSubqueryExpr::EKind::Exists, query);
     }
 
@@ -2396,7 +2399,7 @@ TAstExprTask primary_expr(TParserContext& ctx) {
         NQumir::NAst::TExprPtr ret = nullptr;
         if (IsKeyword(next, "WITH") || IsKeyword(next, "SELECT")) {
             auto query = co_await select_stmt(ctx);
-            ret = std::make_shared<TSubqueryExpr>(
+            ret = NQumir::MakeIntrusive<TSubqueryExpr>(
                 loc, TSubqueryExpr::EKind::Scalar, query);
         } else {
             ret = co_await expr(ctx);
@@ -2431,7 +2434,7 @@ TAstExprTask function_call(TParserContext& ctx) {
     if (!IsOp(next, ')')) {
         ctx.Stream.Unget(next);
         auto block = co_await function_args(ctx);
-        args = std::static_pointer_cast<NQumir::NAst::TBlockExpr>(block)->Stmts;
+        args = NQumir::StaticPointerCast<NQumir::NAst::TBlockExpr>(block)->Stmts;
         next = ctx.Stream.Next();
         if (!IsOp(next, ')')) {
             co_return Error(next, "')' expected");
@@ -2454,14 +2457,14 @@ TAstExprTask function_args(TParserContext& ctx) {
     if (IsOp(token, '*')) {
         // represent star argument as a synthetic identifier "*"
         co_return list(token.Location,
-            { std::make_shared<NQumir::NAst::TIdentExpr>(token.Location, "*") });
+            { NQumir::MakeIntrusive<NQumir::NAst::TIdentExpr>(token.Location, "*") });
     }
 
     if (IsKeyword(token, "DISTINCT")) {
         // there is no DISTINCT aggregate; mark the arguments with a synthetic
         // `distinct(...)` call for the planner to expand via double aggregation
         auto block = co_await expr_list(ctx);
-        auto args = std::static_pointer_cast<NQumir::NAst::TBlockExpr>(block)->Stmts;
+        auto args = NQumir::StaticPointerCast<NQumir::NAst::TBlockExpr>(block)->Stmts;
         co_return list(token.Location,
             { call(token.Location, "distinct", std::move(args)) });
     }
@@ -2531,7 +2534,7 @@ TAstExprTask case_expr(TParserContext& ctx) {
         // A WHEN condition may be Nullable[bool] (SQL: NULL is not TRUE); qdb_is_true
         // coerces it to a plain bool for the `if` (identity for a non-nullable bool).
         auto cond = call(loc, "qdb_is_true", {it->first});
-        ret = std::make_shared<NQumir::NAst::TIfExpr>(loc, std::move(cond), it->second, ret);
+        ret = NQumir::MakeIntrusive<NQumir::NAst::TIfExpr>(loc, std::move(cond), it->second, ret);
     }
     co_return ret;
 }
@@ -2561,7 +2564,7 @@ TAstExprTask expr_list_or_subquery(TParserContext& ctx) {
 
     if (subquery) {
         auto query = co_await select_stmt(ctx);
-        co_return std::make_shared<TSubqueryExpr>(
+        co_return NQumir::MakeIntrusive<TSubqueryExpr>(
             token.Location, TSubqueryExpr::EKind::In, query);
     }
     co_return co_await expr_list(ctx);
@@ -2590,13 +2593,13 @@ TAstTypeTask type_name(TParserContext& ctx) {
     const std::string name = upper(token.Name);
 
     if (name == "BOOL" || name == "BOOLEAN") {
-        co_return std::make_shared<TBoolType>();
+        co_return ctx.Types.Make<TBoolType>();
     } else if (name == "INT" || name == "INTEGER") {
-        co_return std::make_shared<TIntegerType>(TIntegerType::I32);
+        co_return ctx.Types.MakeInteger(TIntegerType::I32);
     } else if (name == "BIGINT") {
-        co_return std::make_shared<TIntegerType>(TIntegerType::I64);
+        co_return ctx.Types.MakeInteger(TIntegerType::I64);
     } else if (name == "REAL" || name == "FLOAT4") {
-        co_return std::make_shared<TFloatType>(TFloatType::F32);
+        co_return ctx.Types.MakeFloat(TFloatType::F32);
     } else if (name == "DOUBLE" || name == "FLOAT8") {
         auto next = ctx.Stream.Next();
         if (name != "DOUBLE" || (next.Type != TToken::Identifier && next.Type != TToken::Keyword)
@@ -2604,14 +2607,14 @@ TAstTypeTask type_name(TParserContext& ctx) {
         {
             ctx.Stream.Unget(next);
         }
-        co_return std::make_shared<TFloatType>(TFloatType::F64);
+        co_return ctx.Types.MakeFloat(TFloatType::F64);
     } else if (name == "FLOAT") {
         // As in PostgreSQL, FLOAT is DOUBLE PRECISION and FLOAT(p) takes the binary
         // precision p: up to 24 bits is REAL.
         auto next = ctx.Stream.Next();
         if (!IsOp(next, '(')) {
             ctx.Stream.Unget(next);
-            co_return std::make_shared<TFloatType>(TFloatType::F64);
+            co_return ctx.Types.MakeFloat(TFloatType::F64);
         }
         auto precision = ctx.Stream.Next();
         if (precision.Type != TToken::Integer) {
@@ -2623,12 +2626,14 @@ TAstTypeTask type_name(TParserContext& ctx) {
         if (auto close = ctx.Stream.Next(); !IsOp(close, ')')) {
             co_return Error(close, "')' expected");
         }
-        co_return std::make_shared<TFloatType>(
+        co_return ctx.Types.MakeFloat(
             precision.Value.i64 <= 24 ? TFloatType::F32 : TFloatType::F64);
     } else if (name == "TEXT" || name == "VARCHAR") {
-        co_return std::make_shared<TStringType>();
-    } else if (name == "DATE" || name == "TIMESTAMP") {
-        co_return std::make_shared<TNamedType>(name, nullptr);
+        co_return ctx.Types.Make<TStringType>();
+    } else if (name == "DATE") {
+        co_return DateCastTarget(ctx.Types);
+    } else if (name == "TIMESTAMP") {
+        co_return ctx.Types.MakeNamed(name, nullptr);
     } else if (name == "DECIMAL") {
         int32_t precisionValue = DefaultDecimalPrecision;
         int32_t scaleValue = DefaultDecimalScale;
@@ -2655,7 +2660,7 @@ TAstTypeTask type_name(TParserContext& ctx) {
             ctx.Stream.Unget(next);
         }
         try {
-            co_return std::make_shared<NQdb::TDecimal>(precisionValue, scaleValue);
+            co_return MakeDecimalType(ctx.Types, {precisionValue, scaleValue});
         } catch (const std::invalid_argument& e) {
             co_return Error(token, e.what());
         }
@@ -2670,7 +2675,7 @@ TAstTypeTask type_name(TParserContext& ctx) {
 std::expected<TSqlNodePtr, NQumir::TError> TParser::Parse(TTokenStream& stream)
 {
     TWrappedTokenStream wrappedStream(stream, /*windowSize = */ 10);
-    TParserContext context(wrappedStream);
+    TParserContext context(wrappedStream, Types_);
     auto task = statement(context);
     auto result = task.result();
     if (!result) {
@@ -2683,7 +2688,7 @@ std::expected<std::vector<TSqlNodePtr>, NQumir::TError> TParser::ParseAll(
     TTokenStream& stream)
 {
     TWrappedTokenStream wrappedStream(stream, /*windowSize = */ 10);
-    TParserContext context(wrappedStream);
+    TParserContext context(wrappedStream, Types_);
     std::vector<TSqlNodePtr> statements;
     while (true) {
         auto token = context.Stream.Next();

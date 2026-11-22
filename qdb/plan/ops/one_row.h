@@ -9,7 +9,7 @@ class TOneRowOperator : public IOperator {
 public:
     static constexpr const char* OpId = "one-row";
 
-    TOneRowOperator();
+    TOneRowOperator(NQumir::NAst::TTypeFactory& types);
 
     std::string_view RelName() const override { return OpId; }
     std::vector<TColumnReference> ColumnReferences() const override { return {}; }

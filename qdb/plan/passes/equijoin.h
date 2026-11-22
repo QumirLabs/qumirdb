@@ -20,6 +20,6 @@ TOperatorPtr PushDownPredicates(TOperatorPtr root, TConstFolder& folder);
 // side's columns are not needed above the filter. RIGHT is swapped to LeftAnti.
 // Requires annotated types and extracted keys.
 // Returns whether the plan changed; re-annotate and prune after a rewrite.
-bool RewriteOuterJoinAsAnti(TOperatorPtr& root);
+bool RewriteOuterJoinAsAnti(NQumir::NAst::TTypeFactory& types, TOperatorPtr& root);
 
 } // namespace NQdb
