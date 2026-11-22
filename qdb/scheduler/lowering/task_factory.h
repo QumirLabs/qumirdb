@@ -114,12 +114,10 @@ struct TLimitBlockingState : TProcessorTaskState<TLimitBlockingState> {
 
 struct TSortBlockingState : TProcessorTaskState<TSortBlockingState> {
     TSortBlockingState(
-        NQumir::NAst::TTypePtr outputType,
         std::vector<TSortKey> keys,
         std::vector<TSortColumnRef> keyColumns,
         TSortRadixKernel radixKernel)
         : Processor(
-            std::move(outputType),
             std::move(keys),
             std::move(keyColumns),
             std::move(radixKernel))
@@ -131,12 +129,10 @@ struct TSortBlockingState : TProcessorTaskState<TSortBlockingState> {
 
 struct TWindowBlockingState : TProcessorTaskState<TWindowBlockingState> {
     TWindowBlockingState(
-        NQumir::NAst::TTypePtr outputType,
         std::vector<TSortKey> keys,
         std::vector<TSortColumnRef> keyColumns,
         TSortRadixKernel radixKernel)
         : Processor(
-            std::move(outputType),
             std::move(keys),
             std::move(keyColumns),
             std::move(radixKernel))
@@ -148,12 +144,12 @@ struct TWindowBlockingState : TProcessorTaskState<TWindowBlockingState> {
 
 struct TMergeState : TProcessorTaskState<TMergeState> {
     TMergeState(
-        NQumir::NAst::TTypePtr outputType,
+        std::vector<TValueLayout> outputLayouts,
         std::vector<TSortKey> keys,
         std::vector<TSortColumnRef> keyColumns,
         size_t runCount)
         : Processor(
-            std::move(outputType),
+            std::move(outputLayouts),
             std::move(keys),
             std::move(keyColumns),
             runCount)
@@ -167,13 +163,11 @@ struct TMergeState : TProcessorTaskState<TMergeState> {
 
 struct TTopSortBlockingState : TProcessorTaskState<TTopSortBlockingState> {
     TTopSortBlockingState(
-        NQumir::NAst::TTypePtr outputType,
         std::vector<TSortKey> keys,
         std::vector<TSortColumnRef> keyColumns,
         TSortRadixKernel radixKernel,
         int64_t limit)
         : Processor(
-            std::move(outputType),
             std::move(keys),
             std::move(keyColumns),
             std::move(radixKernel),

@@ -1,9 +1,6 @@
 #include <gtest/gtest.h>
 
 #include <qdb/io/parquet/table_cache.h>
-#include <qdb/plan/types/decimal.h>
-#include <qdb/plan/types/nullable.h>
-#include <qdb/plan/types/type_text.h>
 #include <qdb/scheduler/connections/local.h>
 #include <qdb/scheduler/impl/single_threaded_scheduler.h>
 #include <qdb/scheduler/lowering/plan_lowerer.h>
@@ -230,27 +227,26 @@ TEST(GraphSpec, ScanFilterProjectRecordsRoundTrip)
 
 TEST(GraphSpec, SortMergeWindowRecordsRoundTrip)
 {
-    using namespace NQumir::NAst;
-    const auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    const auto nullableI64 = std::make_shared<TNullable>(i64);
-    const auto type = std::make_shared<TStructType>(TStructType({{"k", nullableI64}, {"v", i64}}));
     const std::vector<TSortKey> keys = {
         {.Column = "k", .Direction = ESortDirection::Desc, .Nulls = ESortNulls::Last},
         {.Column = "v"},
     };
-    const std::vector<TSortColumnRef> keyColumns = {{.Index = 0, .Type = nullableI64}, {.Index = 1, .Type = i64}};
+    const std::vector<TSortColumnRef> keyColumns = {
+        {.Index = 0, .Value = {.Kind = EValueKind::Decimal, .Width = 16, .Scale = 2, .Nullable = true}},
+        {.Index = 1, .Value = {.Kind = EValueKind::Unsigned, .Width = 4}},
+    };
 
     TGraphSpec spec;
     spec.Nodes.push_back(Node("sort", "sort", TSortNode{.In = {0, 1}, .Out = {2, 3}, .Plan = {
-        .OutputType = type, .Keys = keys, .KeyColumns = keyColumns, .RadixKernel = 4, .RadixNullable = true}}));
+        .Keys = keys, .KeyColumns = keyColumns, .RadixKernel = 4, .RadixNullable = true}}));
     spec.Nodes.push_back(Node("top-sort", "top-sort", TSortNode{.Plan = {
-        .OutputType = type, .Keys = keys, .KeyColumns = keyColumns, .RadixKernel = 5, .RadixNullable = true,
+        .Keys = keys, .KeyColumns = keyColumns, .RadixKernel = 5, .RadixNullable = true,
         .Top = TSortPlanData::TTop{.TopSortKernel = 6, .HeapKernel = 7, .Limit = 100}}}));
     spec.Nodes.push_back(Node("merge", "merge", TSortMergeNode{
         .In = {{0, 0}, {1, 0}, {2, 0}}, .Out = {3, 1},
-        .Plan = {.OutputType = type, .Keys = keys, .KeyColumns = keyColumns}}));
+        .Plan = {.OutputLayouts = {{.Width = 16}, {.Width = 4}, {}}, .Keys = keys, .KeyColumns = keyColumns}}));
     spec.Nodes.push_back(Node("window", "window", TWindowNode{.In = {4, 0}, .Out = {5, 0}, .Plan = {
-        .OutputType = type, .Keys = keys, .KeyColumns = keyColumns, .Kernel = 9}}));
+        .Keys = keys, .KeyColumns = keyColumns, .Kernel = 9}}));
 
     const auto bytes = SerializeGraphSpec(spec);
     const auto back = DeserializeGraphSpec(bytes);
@@ -267,15 +263,18 @@ TEST(GraphSpec, SortMergeWindowRecordsRoundTrip)
     EXPECT_EQ(sort.Plan.RadixKernel, 4u);
     EXPECT_TRUE(sort.Plan.RadixNullable);
     EXPECT_FALSE(sort.Plan.Top);
-    EXPECT_EQ(sort.Plan.OutputType->ToString(), type->ToString());
     ASSERT_EQ(sort.Plan.Keys.size(), 2u);
     EXPECT_EQ(sort.Plan.Keys[0].Column, "k");
     EXPECT_EQ(sort.Plan.Keys[0].Direction, ESortDirection::Desc);
     EXPECT_EQ(sort.Plan.Keys[0].Nulls, ESortNulls::Last);
     ASSERT_EQ(sort.Plan.KeyColumns.size(), 2u);
-    EXPECT_TRUE(TMaybeType<TNullable>(sort.Plan.KeyColumns[0].Type));
-    EXPECT_FALSE(TMaybeType<TNullable>(sort.Plan.KeyColumns[1].Type));
-    EXPECT_EQ(sort.Plan.KeyColumns[0].Type->ToString(), nullableI64->ToString());
+    const auto& decimal = sort.Plan.KeyColumns[0].Value;
+    EXPECT_EQ(decimal.Kind, EValueKind::Decimal);
+    EXPECT_EQ(decimal.Width, 16);
+    EXPECT_EQ(decimal.Scale, 2);
+    EXPECT_TRUE(decimal.Nullable);
+    EXPECT_EQ(sort.Plan.KeyColumns[1].Value.Kind, EValueKind::Unsigned);
+    EXPECT_FALSE(sort.Plan.KeyColumns[1].Value.Nullable);
 
     const auto& top = std::get<TSortNode>(back.Nodes[1].Body).Plan.Top;
     ASSERT_TRUE(top);
@@ -287,13 +286,15 @@ TEST(GraphSpec, SortMergeWindowRecordsRoundTrip)
     ASSERT_EQ(merge.In.size(), 3u);
     EXPECT_EQ(merge.In[2].Connection, 2u);
     EXPECT_EQ(merge.Out.Lane, 1u);
+    ASSERT_EQ(merge.Plan.OutputLayouts.size(), 3u);
+    EXPECT_EQ(merge.Plan.OutputLayouts[1].Width, 4);
     EXPECT_EQ(merge.Plan.KeyColumns[0].Index, 0);
-    EXPECT_TRUE(TMaybeType<TNullable>(merge.Plan.KeyColumns[0].Type));
+    EXPECT_TRUE(merge.Plan.KeyColumns[0].Value.Nullable);
 
     const auto& window = std::get<TWindowNode>(back.Nodes[3].Body);
     EXPECT_EQ(window.Plan.Kernel, 9u);
-    EXPECT_EQ(window.Plan.OutputType->ToString(), type->ToString());
     EXPECT_EQ(window.Plan.Keys[1].Column, "v");
+    EXPECT_EQ(window.Plan.KeyColumns[1].Value.Width, 4);
 }
 
 TEST(GraphSpec, AggregateAndHashShuffleRecordsRoundTrip)

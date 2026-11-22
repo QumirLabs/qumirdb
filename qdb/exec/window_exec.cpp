@@ -2,9 +2,6 @@
 
 #include <qdb/exec/kernel_rowset.h>
 #include <qdb/exec/sort_key_ops.h>
-#include <qdb/plan/types/nullable.h>
-
-#include <qumir/parser/type.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -13,20 +10,16 @@
 
 namespace NQdb {
 
-using namespace NQumir::NAst;
-
 TSortRadixKernel MakeWindowKernel(TKernelCompiler::TSortRadixCompositeDispatch dispatch)
 {
     return {.Enabled = true, .Dispatch = std::move(dispatch)};
 }
 
 TWindowProcessor::TWindowProcessor(
-    TTypePtr outputType,
     std::vector<TSortKey> keys,
     std::vector<TSortColumnRef> keyColumns,
     TSortRadixKernel kernel)
-    : OutputType_(std::move(outputType))
-    , Keys_(std::move(keys))
+    : Keys_(std::move(keys))
     , KeyColumns_(std::move(keyColumns))
     , Kernel_(std::move(kernel))
 {}
@@ -67,7 +60,7 @@ bool TWindowProcessor::Next(TRowSet& rowSet)
     // for the segregated NULL rows.
     const bool nullable = std::any_of(
         KeyColumns_.begin(), KeyColumns_.end(),
-        [](const TSortColumnRef& keyColumn) { return IsNullableType(keyColumn.Type); });
+        [](const TSortColumnRef& keyColumn) { return keyColumn.Value.Nullable; });
     std::vector<TRowId> work(Rows_.size() * RadixWorkStride(KeyColumns_));
     std::vector<uint32_t> counts(nullable ? 257 : 256);
     auto descs = std::make_unique<bool[]>(Keys_.size());
