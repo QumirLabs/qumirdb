@@ -741,6 +741,83 @@ TEST(IOTest, SinkPrintsF32AtFloatPrecision) {
     EXPECT_EQ(console.str().find("0.10000000149"), std::string::npos);
 }
 
+// One column per value kind and width, then a column without a descriptor. The last
+// row is NULL; a NULL string is an empty CSV field for now (#711).
+TEST(IOTest, SinksPrintEveryValueKind) {
+    using namespace NQumir::NAst;
+    const __int128 big = static_cast<__int128>(1) << 100;
+    std::vector<int8_t> i8{127, -128, 0};
+    std::vector<uint64_t> u64{std::numeric_limits<uint64_t>::max(), 0, 0};
+    std::vector<__int128> i128{big, -1, 0};
+    std::vector<double> f64{0.1, -1e300, 0};
+    std::vector<int32_t> date32{0, 19000, 0};
+    std::vector<int64_t> date64{-1, 2932896, 0};
+    std::vector<int64_t> dec15{12345, -5, 0};
+    std::vector<__int128> dec38{big, -1, 0};
+    uint8_t bools = 0b001;
+    std::vector<int32_t> offsets{0, 5, 6, 6};
+    char text[] = "a,\"b\"x";
+    const uint8_t valid = 0b011;
+    auto fixed = [&](auto& values) {
+        return TColumn{.Data = reinterpret_cast<char*>(values.data()), .Mask = &valid};
+    };
+    std::vector<TColumn> columns{
+        fixed(i8), fixed(u64), fixed(i128), fixed(f64), fixed(date32), fixed(date64), fixed(dec15), fixed(dec38),
+        {.Data = reinterpret_cast<char*>(&bools), .Mask = &valid},
+        {.Data = text, .Mask = &valid, .Offsets = offsets.data(), .OffsetWidth = 4},
+        {},
+    };
+    TRowSet rowSet{
+        .Columns = columns.data(),
+        .ColumnCount = static_cast<int64_t>(columns.size()),
+        .RowCount = 3,
+        .RefCount = 1,
+    };
+    const std::vector<TColumnSchema> schemaColumns{
+        {"i8", std::make_shared<TNullable>(std::make_shared<TIntegerType>(TIntegerType::I8))},
+        {"u64", std::make_shared<TNullable>(std::make_shared<TIntegerType>(TIntegerType::U64))},
+        {"i128", std::make_shared<TNullable>(std::make_shared<TIntegerType>(TIntegerType::I128))},
+        {"f64", std::make_shared<TNullable>(std::make_shared<TFloatType>(TFloatType::F64))},
+        {"d32", std::make_shared<TNullable>(std::make_shared<TDateType>())},
+        {"d64", std::make_shared<TNullable>(std::make_shared<TDateType>(TIntegerType::I64))},
+        {"dec15", std::make_shared<TNullable>(MakeDecimalType({.Precision = 15, .Scale = 2}))},
+        {"dec38", std::make_shared<TNullable>(MakeDecimalType({.Precision = 38, .Scale = 4}))},
+        {"b", std::make_shared<TNullable>(std::make_shared<TBoolType>())},
+        {"s", std::make_shared<TNullable>(std::make_shared<TStringType>())},
+        {"q", nullptr},
+    };
+    const TSchema schema{schemaColumns};
+
+    std::ostringstream csv;
+    TCsvSink csvSink(schema, csv);
+    csvSink.Write(rowSet);
+    EXPECT_EQ(csv.str(),
+        "i8,u64,i128,f64,d32,d64,dec15,dec38,b,s,q\n"
+        "127,18446744073709551615,1267650600228229401496703205376,0.1,1970-01-01,1969-12-31,123.45,126765060022822940149670320.5376,true,\"a,\"\"b\"\"\",?\n"
+        "-128,0,-1,-1e+300,2022-01-08,9999-12-31,-0.05,-0.0001,false,x,?\n"
+        "NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,,?\n");
+
+    std::ostringstream raw;
+    TCsvSink rawSink(schema, raw, '|', true);
+    rawSink.Write(rowSet);
+    EXPECT_EQ(raw.str(),
+        "i8|u64|i128|f64|d32|d64|dec15|dec38|b|s|q\n"
+        "127|18446744073709551615|1267650600228229401496703205376|0.1|1970-01-01|1969-12-31|123.45|126765060022822940149670320.5376|true|a,\"b\"|?\n"
+        "-128|0|-1|-1e+300|2022-01-08|9999-12-31|-0.05|-0.0001|false|x|?\n"
+        "NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL||?\n");
+
+    std::ostringstream console;
+    TConsoleSink consoleSink(schema, console);
+    consoleSink.Write(rowSet);
+    consoleSink.Flush();
+    EXPECT_EQ(console.str(),
+        "i8   | u64                  | i128                            | f64     | d32        | d64        | dec15  | dec38                            | b     | s     | q\n"
+        "-----+----------------------+---------------------------------+---------+------------+------------+--------+----------------------------------+-------+-------+--\n"
+        " 127 | 18446744073709551615 | 1267650600228229401496703205376 |     0.1 | 1970-01-01 | 1969-12-31 | 123.45 | 126765060022822940149670320.5376 | true  | a,\"b\" | ?\n"
+        "-128 |                    0 |                              -1 | -1e+300 | 2022-01-08 | 9999-12-31 |  -0.05 |                          -0.0001 | false | x     | ?\n"
+        "NULL |                 NULL |                            NULL |    NULL | NULL       | NULL       |   NULL |                             NULL | NULL  | NULL  | ?\n");
+}
+
 // A scan reads decimal columns itself (TDecimalColumnScan): INT32, INT64 and
 // FIXED_LEN_BYTE_ARRAY decimals with NULLs come out at their storage width, also
 // when a batch spans several row groups.
