@@ -12,6 +12,12 @@ namespace NQdb {
 struct TValueLayout {
     int32_t Width = 0;
     bool Bitmap = false;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Width);
+        v(self.Bitmap);
+    }
 };
 
 // Moves the rows with Selection[i] != 0 down in place (values, validity, strings,

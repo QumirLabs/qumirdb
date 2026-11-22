@@ -1449,7 +1449,7 @@ TRowSet CountedRows(int64_t rows, std::atomic<int>* destroyed) {
 }
 
 // remote source -> remote sink, both external: ids 2 and 1, like the pipeline tests above.
-NQdb::NScheduler::TGraphSpec RelaySpec(std::vector<NQdb::NScheduler::TRowLayoutSpec> layouts = {{.Width = 8}})
+NQdb::NScheduler::TGraphSpec RelaySpec(std::vector<NQdb::TValueLayout> layouts = {{.Width = 8}})
 {
     using namespace NQdb::NScheduler;
     TGraphSpec spec;
@@ -2749,7 +2749,7 @@ TEST(DistributedScheduler, ComputeActorReportsAFailedSendAndReleasesTheRowSet) {
         const auto peer = cluster.Leader.Register(std::make_unique<TBlackHole>());
         const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
         cluster.Follower.Send<TTaskGraphMessage>(query, actor, GraphMessage(
-            RelaySpec(std::vector(c.Layouts, TRowLayoutSpec{.Width = 8})), RelayEndpoints(peer, peer)));
+            RelaySpec(std::vector(c.Layouts, TValueLayout{.Width = 8})), RelayEndpoints(peer, peer)));
         cluster.Follower.Send<TDataChunk>(query, actor,
             TDataChunk(2, 1, {UnsendableRows(c.Columns, c.Selection, &destroyed)}));
         const auto deadline = NNet::TClock::now() + std::chrono::seconds(10);

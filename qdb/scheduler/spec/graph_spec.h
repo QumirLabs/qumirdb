@@ -36,24 +36,13 @@ class TCteSpool;
 // referenced by their position, which is also the order they are built in.
 // TODO: no versioning or compatibility checks yet.
 
-struct TRowLayoutSpec {
-    int32_t Width = 0;
-    bool Bitmap = false;
-
-    void Fields(this auto& self, auto& v)
-    {
-        v(self.Width);
-        v(self.Bitmap);
-    }
-};
-
 struct TConnectionSpec {
     EConnectionKind Kind = EConnectionKind::OneToOne;
     uint64_t Capacity = 1;
     uint32_t SrcCount = 1;
     uint32_t DstCount = 1;
     std::string DebugName;
-    std::vector<TRowLayoutSpec> RowLayouts;
+    std::vector<TValueLayout> RowLayouts;
 
     void Fields(this auto& self, auto& v)
     {
@@ -290,7 +279,8 @@ struct THashShuffleNode {
     std::vector<TPortSpec> Out;
     std::vector<uint32_t> Routes;
     THash Hash;
-    NQumir::NAst::TTypePtr InputType;
+    // One per input column; without them the task forwards views of its input.
+    std::vector<TValueLayout> InputLayouts;
     uint64_t TargetOutputBatchRows = 0;
     uint64_t MaxOutputBatchRows = 0;
     uint64_t TargetOutputBatchBytes = 0;
@@ -305,7 +295,7 @@ struct THashShuffleNode {
         v(self.Out);
         v(self.Routes);
         v(self.Hash);
-        TypeField(v, self.InputType);
+        v(self.InputLayouts);
         v(self.TargetOutputBatchRows);
         v(self.MaxOutputBatchRows);
         v(self.TargetOutputBatchBytes);
@@ -426,7 +416,7 @@ struct TLateMergeNode {
 struct TCteSpoolSpec {
     uint32_t Segments = 0;
     // Of the spooled rows, which a CTE sink sends.
-    std::vector<TRowLayoutSpec> RowLayouts;
+    std::vector<TValueLayout> RowLayouts;
 
     void Fields(this auto& self, auto& v)
     {

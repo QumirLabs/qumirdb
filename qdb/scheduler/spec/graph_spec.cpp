@@ -30,16 +30,6 @@ namespace {
     throw std::runtime_error("invalid task graph spec: " + what);
 }
 
-std::vector<TValueLayout> ValueLayouts(const std::vector<TRowLayoutSpec>& specs)
-{
-    std::vector<TValueLayout> layouts;
-    layouts.reserve(specs.size());
-    for (const auto& layout : specs) {
-        layouts.push_back(TValueLayout{.Width = layout.Width, .Bitmap = layout.Bitmap});
-    }
-    return layouts;
-}
-
 std::unique_ptr<IConnection> MakeConnection(const TConnectionSpec& spec)
 {
     std::unique_ptr<IConnection> connection;
@@ -58,7 +48,7 @@ std::unique_ptr<IConnection> MakeConnection(const TConnectionSpec& spec)
     }
     connection->Resize(spec.SrcCount, spec.DstCount);
     connection->SetDebugName(spec.DebugName);
-    connection->SetRowLayouts(ValueLayouts(spec.RowLayouts));
+    connection->SetRowLayouts(spec.RowLayouts);
     return connection;
 }
 
@@ -312,7 +302,7 @@ std::unique_ptr<ITask> MakeHashShuffleTask(
         outputs.push_back(OutputPort(connections, port));
     }
     auto code = std::make_shared<THashShuffleCode>(
-        BindShuffleHash(node.Hash, context), node.InputType,
+        BindShuffleHash(node.Hash, context), node.InputLayouts,
         node.TargetOutputBatchRows, node.MaxOutputBatchRows, node.TargetOutputBatchBytes);
     if (node.ProducedFilter) {
         code->ProducedFilter = RuntimeFilterProducerAt(context, *node.ProducedFilter);
@@ -384,9 +374,7 @@ TConnectionSpec ExtractConnection(const IConnection& connection)
         .DstCount = static_cast<uint32_t>(connection.DstCount()),
         .DebugName = connection.DebugName(),
     };
-    for (const auto& layout : connection.RowLayouts()) {
-        spec.RowLayouts.push_back(TRowLayoutSpec{.Width = layout.Width, .Bitmap = layout.Bitmap});
-    }
+    spec.RowLayouts.assign(connection.RowLayouts().begin(), connection.RowLayouts().end());
     switch (spec.Kind) {
         case EConnectionKind::OneToOne:
             spec.Capacity = static_cast<const TOneToOneConnection&>(connection).Capacity();
@@ -582,7 +570,7 @@ void AppendCteObjects(
 {
     for (size_t i = context.CteSpools.size(); i < spools.size(); ++i) {
         context.CteSpools.push_back(
-            std::make_shared<TCteSpool>(spools[i].Segments, ValueLayouts(spools[i].RowLayouts)));
+            std::make_shared<TCteSpool>(spools[i].Segments, spools[i].RowLayouts));
     }
     for (size_t i = context.CteConsumerStates.size(); i < states.size(); ++i) {
         context.CteConsumerStates.push_back(

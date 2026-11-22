@@ -482,7 +482,7 @@ TEST(OperatorInstrumentation, ShuffleAccountsSparseRetainedOwnersOnceAcrossParti
         std::vector<uint64_t> hashes(10000);
         ASSERT_TRUE(hash(&batch, hashes.data()));
         ASSERT_NE(hashes[9998] % 4, hashes[9999] % 4);
-        auto code = std::make_shared<THashShuffleCode>(hash, schema, 16384, 65536, retentionBudget);
+        auto code = std::make_shared<THashShuffleCode>(hash, RowLayouts(schema), 16384, 65536, retentionBudget);
         TOneToOneConnection input(1);
         input.Resize(1, 1);
         std::vector<std::unique_ptr<TGatherConnection>> output;
