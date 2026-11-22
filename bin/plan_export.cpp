@@ -144,16 +144,31 @@ std::optional<uint64_t> EncodeStatsScalar(
     return std::nullopt;
 }
 
-// A scan of the export never runs, so the reader has only its schema. The types are
-// of the request's factory, which its query compiles in.
+// The column types belong to the factory they were parsed in; a schema is asked for in
+// that factory only, as the request's query compiles in it.
+void CheckSchemaFactory(
+    const NQumir::NAst::TTypeFactory& owner,
+    const NQumir::NAst::TTypeFactory& asked)
+{
+    if (&owner != &asked) {
+        throw std::logic_error("schema-only table is asked for in another type factory");
+    }
+}
+
+// A scan of the export never runs, so the reader has only its schema.
 class TSchemaOnlyReader final : public NQdb::ISource {
 public:
-    TSchemaOnlyReader(std::vector<NQdb::TColumnSchema> columns, NQdb::TStatsPtr stats)
-        : Schema_{std::move(columns)}
+    TSchemaOnlyReader(
+        NQumir::NAst::TTypeFactory& types,
+        std::vector<NQdb::TColumnSchema> columns,
+        NQdb::TStatsPtr stats)
+        : Types_(types)
+        , Schema_{std::move(columns)}
         , Stats_(std::move(stats))
     {}
 
-    NQdb::TSchema Schema(NQumir::NAst::TTypeFactory&) const override {
+    NQdb::TSchema Schema(NQumir::NAst::TTypeFactory& types) const override {
+        CheckSchemaFactory(Types_, types);
         return Schema_;
     }
 
@@ -166,6 +181,7 @@ public:
     }
 
 private:
+    NQumir::NAst::TTypeFactory& Types_;
     NQdb::TSchema Schema_;
     NQdb::TStatsPtr Stats_;
 };
@@ -173,10 +189,12 @@ private:
 class TSchemaOnlySource final : public NQdb::ITable {
 public:
     TSchemaOnlySource(
+        NQumir::NAst::TTypeFactory& types,
         std::string path,
         std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> fields,
         TTableStats stats)
-        : Path_(std::move(path))
+        : Types_(types)
+        , Path_(std::move(path))
         , Stats_(stats)
     {
         Names_.reserve(fields.size());
@@ -190,8 +208,8 @@ public:
         }
     }
 
-    // The types are of the request's factory, which its query compiles in.
-    NQdb::TSchema Schema(NQumir::NAst::TTypeFactory&) const override {
+    NQdb::TSchema Schema(NQumir::NAst::TTypeFactory& types) const override {
+        CheckSchemaFactory(Types_, types);
         return {AllColumns_};
     }
 
@@ -266,7 +284,7 @@ public:
                 columns.push_back(column);
             }
         }
-        return std::make_unique<TSchemaOnlyReader>(std::move(columns), Stats());
+        return std::make_unique<TSchemaOnlyReader>(Types_, std::move(columns), Stats());
     }
 
     std::vector<NQdb::NScheduler::TScanRowGroup> PruneRowGroups(
@@ -274,7 +292,8 @@ public:
         const NQumir::NAst::TExprPtr&,
         std::string_view,
         std::ostream*,
-        const std::unordered_set<std::string>*) const override
+        const std::unordered_set<std::string>*,
+        const NQdb::NKernel::TAnnotationContext*) const override
     {
         if (Stats_.Rows <= 0 || Stats_.RowGroups == 0) {
             return {};
@@ -302,6 +321,7 @@ public:
     }
 
 private:
+    NQumir::NAst::TTypeFactory& Types_;
     std::string Path_;
     TTableStats Stats_;
     std::vector<std::string> Names_;
@@ -904,6 +924,7 @@ TCatalog ParseCatalog(NQumir::NAst::TTypeFactory& types, const llvm::json::Objec
         catalog.Sources.emplace(
             std::string(*name),
             std::make_shared<TSchemaOnlySource>(
+                types,
                 std::string(*name),
                 ParseTableColumns(types, *table),
                 ParseTableStats(*table)));

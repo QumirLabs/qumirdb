@@ -617,7 +617,8 @@ TFilterColumnPlan BuildFilterColumnPlan(
 TProjectColumnPlan BuildProjectColumnPlan(
     NQumir::NAst::TTypeFactory& types,
     TProjectOperator& project,
-    const NQumir::NAst::TStructType& inputStruct)
+    const NQumir::NAst::TStructType& inputStruct,
+    const NKernel::TAnnotationContext* annotation)
 {
     TProjectColumnPlan plan;
     std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> outFields;
@@ -663,7 +664,7 @@ TProjectColumnPlan BuildProjectColumnPlan(
             }
             if (!outType) {
                 outType = NKernel::AnnotateExprType(
-                    types, projection.Expression, inputStruct);
+                    types, projection.Expression, inputStruct, annotation);
             }
             using namespace NQumir::NAst;
             auto structType = TMaybeType<TStructType>(
@@ -729,7 +730,7 @@ TProjectPlan BuildProjectPlan(
         throw std::runtime_error("project input must have TStructType");
     }
 
-    auto plan = BuildProjectColumnPlan(types, project, *inputStruct);
+    auto plan = BuildProjectColumnPlan(types, project, *inputStruct, options.Annotation);
 
     std::optional<uint32_t> kernel;
     if (!plan.ComputedExprs.empty()) {

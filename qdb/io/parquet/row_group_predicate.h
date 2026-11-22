@@ -13,6 +13,10 @@
 
 namespace NQdb {
 
+namespace NKernel {
+struct TAnnotationContext;
+}
+
 // Raw scalar bounds for one source column in one Parquet row group. The low 64
 // bits of MinValue and MaxValue contain the native i64/u64/f64 bit pattern
 // selected by the source schema; a DECIMAL column holds its unscaled i128. The
@@ -37,7 +41,8 @@ public:
         const NQumir::NAst::TExprPtr& predicate,
         const TSchema& schema,
         std::string_view sourceAlias,
-        std::ostream* diagnostics = nullptr);
+        std::ostream* diagnostics = nullptr,
+        const NKernel::TAnnotationContext* annotation = nullptr);
 
     ~TRowGroupPredicateEvaluator();
 

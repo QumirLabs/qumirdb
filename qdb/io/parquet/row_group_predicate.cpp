@@ -699,7 +699,8 @@ std::unique_ptr<TRowGroupPredicateEvaluator> TRowGroupPredicateEvaluator::Compil
     const TExprPtr& predicate,
     const TSchema& schema,
     std::string_view sourceAlias,
-    std::ostream* diagnostics)
+    std::ostream* diagnostics,
+    const NKernel::TAnnotationContext* annotation)
 {
     try {
         auto diagnostic = [&](const std::string& message) {
@@ -720,7 +721,7 @@ std::unique_ptr<TRowGroupPredicateEvaluator> TRowGroupPredicateEvaluator::Compil
             }
         }
         NKernel::AnnotateExprTreeTypes(
-            types, typedPredicate, *types.MakeStruct(std::move(fields)));
+            types, typedPredicate, *types.MakeStruct(std::move(fields)), annotation);
         auto truth = lowerer.LowerTruth(typedPredicate);
         auto params = lowerer.Params();
 

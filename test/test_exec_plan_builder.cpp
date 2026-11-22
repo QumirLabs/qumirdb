@@ -49,7 +49,8 @@ public:
         const NQumir::NAst::TExprPtr&,
         std::string_view,
         std::ostream*,
-        const std::unordered_set<std::string>*) const override {
+        const std::unordered_set<std::string>*,
+        const NQdb::NKernel::TAnnotationContext*) const override {
         return {
             {.RowGroup = 0, .RowCount = 100, .ByteSize = 800},
             {.RowGroup = 1, .RowCount = 100, .ByteSize = 800},
@@ -80,7 +81,8 @@ public:
         const NQumir::NAst::TExprPtr&,
         std::string_view,
         std::ostream*,
-        const std::unordered_set<std::string>*) const override {
+        const std::unordered_set<std::string>*,
+        const NQdb::NKernel::TAnnotationContext*) const override {
         return {
             {.RowGroup = 0, .RowCount = 25'000'000, .ByteSize = 200'000'000},
             {.RowGroup = 1, .RowCount = 25'000'000, .ByteSize = 200'000'000},

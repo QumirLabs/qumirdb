@@ -14,6 +14,10 @@
 
 namespace NQdb {
 
+namespace NKernel {
+struct TAnnotationContext;
+}
+
 struct ITable {
     virtual ~ITable() = default;
 
@@ -33,7 +37,8 @@ struct ITable {
         const NQumir::NAst::TExprPtr& predicate,
         std::string_view sourceAlias,
         std::ostream* diagnostics = nullptr,
-        const std::unordered_set<std::string>* columnNames = nullptr) const = 0;
+        const std::unordered_set<std::string>* columnNames = nullptr,
+        const NKernel::TAnnotationContext* annotation = nullptr) const = 0;
 };
 
 } // namespace NQdb

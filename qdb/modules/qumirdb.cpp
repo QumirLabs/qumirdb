@@ -51,136 +51,163 @@ const void* const QumirDbRuntimeSymbolAnchors[] __attribute__((used)) = {
     reinterpret_cast<const void*>(&qdb_decimal_ge),
 };
 
-std::vector<TExternalType> QumirDbExternalTypes(TTypeFactory& types) {
-    auto i8Type = types.MakeInteger(TIntegerType::I8);
+namespace {
+
+using TFields = std::vector<std::pair<std::string, TTypePtr>>;
+
+TTypePtr ColumnType(TTypeFactory& types) {
     auto i32Type = types.MakeInteger(TIntegerType::I32);
     auto i64Type = types.MakeInteger();
     auto u8Type = types.MakeInteger(TIntegerType::U8);
+    return types.MakeStruct(TFields{
+        {"Data", types.MakePointer(types.MakeInteger(TIntegerType::I8))},
+        {"DataBitOffset", i32Type},
+        {"Mask", types.MakePointer(u8Type)},
+        {"MaskBitOffset", i32Type},
+        {"Offsets", types.MakePointer(i64Type)},
+        {"OffsetWidth", u8Type},
+    });
+}
+
+TTypePtr RowSetType(TTypeFactory& types) {
+    auto i64Type = types.MakeInteger();
+    auto ptrU8Type = types.MakePointer(types.MakeInteger(TIntegerType::U8));
     auto voidPtrType = types.MakePointer(i64Type);
-    auto ptrU8Type = types.MakePointer(u8Type);
-    auto ptrI8Type = types.MakePointer(i8Type);
+    auto ptrColumnType = types.MakePointer(types.MakeNamed("TColumn", ColumnType(types)));
+    return types.MakeStruct(TFields{
+        {"Columns", ptrColumnType},
+        {"ColumnCount", i64Type},
+        {"RowCount", i64Type},
+        {"Selection", ptrU8Type},
+        {"Hash", types.MakePointer(types.MakeInteger(TIntegerType::U64))},
+        {"Destroy", voidPtrType},
+        {"Private", voidPtrType},
+        {"RefCount", i64Type},
+    });
+}
 
-    auto makeStringHandleType = [&]() {
-        return types.MakeStruct(
-            std::vector<std::pair<std::string, TTypePtr>>{
-                {"Data", ptrU8Type},
-                {"Size", i64Type},
-            });
-    };
-    auto stringViewType = makeStringHandleType();
-    auto ownedStringType = makeStringHandleType();
+TTypePtr StringHandleType(TTypeFactory& types) {
+    return types.MakeStruct(TFields{
+        {"Data", types.MakePointer(types.MakeInteger(TIntegerType::U8))},
+        {"Size", types.MakeInteger()},
+    });
+}
 
-    auto columnType = types.MakeStruct(
-        std::vector<std::pair<std::string, TTypePtr>>{
-            {"Data", ptrI8Type},
-            {"DataBitOffset", i32Type},
-            {"Mask", ptrU8Type},
-            {"MaskBitOffset", i32Type},
-            {"Offsets", voidPtrType},
-            {"OffsetWidth", u8Type},
-        });
-    auto columnNamedType = types.MakeNamed("TColumn", columnType);
-    auto ptrColumnType = types.MakePointer(columnNamedType);
+TTypePtr PairBufferType(TTypeFactory& types) {
+    auto i64Type = types.MakeInteger();
+    return types.MakeStruct(TFields{
+        {"Count", i64Type},
+        {"Capacity", i64Type},
+        {"Data", types.MakePointer(i64Type)},
+    });
+}
 
+// Row table (kernel/row_table.oz); mirrored by TRowJoinProcessor's
+// state structs in exec/row_join_exec.h.
+TTypePtr RowArenaType(TTypeFactory& types) {
+    auto i64Type = types.MakeInteger();
+    auto ptrPtrU8Type = types.MakePointer(types.MakePointer(types.MakeInteger(TIntegerType::U8)));
+    return types.MakeStruct(TFields{
+        {"Blocks", ptrPtrU8Type},
+        {"BlockCount", i64Type},
+        {"BlockCapacity", i64Type},
+        {"BlockRows", i64Type},
+        {"RowBytes", i64Type},
+        {"Rows", i64Type},
+        {"CurRows", i64Type},
+    });
+}
+
+TTypePtr RowTableType(TTypeFactory& types) {
+    auto i64Type = types.MakeInteger();
     auto u64Type = types.MakeInteger(TIntegerType::U64);
-    auto ptrU64Type = types.MakePointer(u64Type);
-    auto rowSetType = types.MakeStruct(
-        std::vector<std::pair<std::string, TTypePtr>>{
-            {"Columns", ptrColumnType},
-            {"ColumnCount", i64Type},
-            {"RowCount", i64Type},
-            {"Selection", ptrU8Type},
-            {"Hash", ptrU64Type},
-            {"Destroy", voidPtrType},
-            {"Private", voidPtrType},
-            {"RefCount", i64Type},
-        });
+    return types.MakeStruct(TFields{
+        {"Entries", types.MakePointer(u64Type)},
+        {"Capacity", i64Type},
+        {"Mask", u64Type},
+        {"Shift", i64Type},
+        {"Rows", i64Type},
+        {"Keys", i64Type},
+    });
+}
 
+TTypePtr RowScratchType(TTypeFactory& types) {
+    auto i64Type = types.MakeInteger();
+    auto ptrU64Type = types.MakePointer(types.MakeInteger(TIntegerType::U64));
     auto ptrI64Type = types.MakePointer(i64Type);
-    auto ptrPtrI64Type = types.MakePointer(ptrI64Type);
+    return types.MakeStruct(TFields{
+        {"Hashes", ptrU64Type},
+        {"Salts", ptrU64Type},
+        {"Offsets", ptrU64Type},
+        {"Entries", ptrU64Type},
+        {"Rows", ptrI64Type},
+        {"Work", ptrI64Type},
+        {"Keys", types.MakePointer(types.MakeInteger(TIntegerType::U8))},
+        {"Capacity", i64Type},
+    });
+}
+
+TTypePtr HashTableType(TTypeFactory& types) {
+    auto i64Type = types.MakeInteger();
+    auto ptrU8Type = types.MakePointer(types.MakeInteger(TIntegerType::U8));
+    auto ptrI64Type = types.MakePointer(i64Type);
     auto ptrPtrU8Type = types.MakePointer(ptrU8Type);
+    return types.MakeStruct(TFields{
+        {"Keys", ptrU8Type},
+        {"Ctrl", ptrU8Type},
+        {"SlotId", ptrI64Type},
+        {"GroupKeys", ptrU8Type},
+        {"AggBuffers", types.MakePointer(ptrI64Type)},
+        {"OwnedBlocks", ptrPtrU8Type},
+        {"OwnedBlockCount", i64Type},
+        {"OwnedBlockCapacity", i64Type},
+        {"Capacity", i64Type},
+        {"Size", i64Type},
+        {"NumAggs", i64Type},
+        {"NumKeys", i64Type},
+        {"KeySize", i64Type},
+        {"RowArena", types.MakeNamed("RowArena", RowArenaType(types))},
+        {"RowTable", types.MakeNamed("RowTable", RowTableType(types))},
+        {"RowScratch", types.MakeNamed("RowScratch", RowScratchType(types))},
+        {"RowSwitchGroups", i64Type},
+        {"RowExpectedGroups", i64Type},
+        {"RowRebuilds", i64Type},
+        {"RowMovedFromSlots", i64Type},
+    });
+}
 
-    auto pairBufferType = types.MakeStruct(
-        std::vector<std::pair<std::string, TTypePtr>>{
-            {"Count", i64Type},
-            {"Capacity", i64Type},
-            {"Data", ptrI64Type},
-        });
+struct TTypeBuilder {
+    std::string_view Name;
+    TTypePtr (*Build)(TTypeFactory&);
+};
 
-    // Row table (kernel/row_table.oz); mirrored by TRowJoinProcessor's
-    // state structs in exec/row_join_exec.h.
-    auto rowArenaType = types.MakeStruct(
-        std::vector<std::pair<std::string, TTypePtr>>{
-            {"Blocks", ptrPtrU8Type},
-            {"BlockCount", i64Type},
-            {"BlockCapacity", i64Type},
-            {"BlockRows", i64Type},
-            {"RowBytes", i64Type},
-            {"Rows", i64Type},
-            {"CurRows", i64Type},
-        });
-    auto rowTableType = types.MakeStruct(
-        std::vector<std::pair<std::string, TTypePtr>>{
-            {"Entries", ptrU64Type},
-            {"Capacity", i64Type},
-            {"Mask", u64Type},
-            {"Shift", i64Type},
-            {"Rows", i64Type},
-            {"Keys", i64Type},
-        });
-    auto rowScratchType = types.MakeStruct(
-        std::vector<std::pair<std::string, TTypePtr>>{
-            {"Hashes", ptrU64Type},
-            {"Salts", ptrU64Type},
-            {"Offsets", ptrU64Type},
-            {"Entries", ptrU64Type},
-            {"Rows", ptrI64Type},
-            {"Work", ptrI64Type},
-            {"Keys", ptrU8Type},
-            {"Capacity", i64Type},
-        });
+// The types qumirdb.oz declares, built on demand.
+constexpr TTypeBuilder QumirDbTypeBuilders[] = {
+    {"TColumn", ColumnType},
+    {"TRowSet", RowSetType},
+    {"HashTable", HashTableType},
+    {"PairBuffer", PairBufferType},
+    {"RowArena", RowArenaType},
+    {"RowTable", RowTableType},
+    {"RowScratch", RowScratchType},
+    {"StringView", StringHandleType},
+    {"OwnedString", StringHandleType},
+};
 
-    auto hashTableType = types.MakeStruct(
-        std::vector<std::pair<std::string, TTypePtr>>{
-            {"Keys", ptrU8Type},
-            {"Ctrl", ptrU8Type},
-            {"SlotId", ptrI64Type},
-            {"GroupKeys", ptrU8Type},
-            {"AggBuffers", ptrPtrI64Type},
-            {"OwnedBlocks", ptrPtrU8Type},
-            {"OwnedBlockCount", i64Type},
-            {"OwnedBlockCapacity", i64Type},
-            {"Capacity", i64Type},
-            {"Size", i64Type},
-            {"NumAggs", i64Type},
-            {"NumKeys", i64Type},
-            {"KeySize", i64Type},
-            {"RowArena", types.MakeNamed("RowArena", rowArenaType)},
-            {"RowTable", types.MakeNamed("RowTable", rowTableType)},
-            {"RowScratch", types.MakeNamed("RowScratch", rowScratchType)},
-            {"RowSwitchGroups", i64Type},
-            {"RowExpectedGroups", i64Type},
-            {"RowRebuilds", i64Type},
-            {"RowMovedFromSlots", i64Type},
-        });
+} // namespace
 
-    return {
-        { .Name = "TColumn", .Type = columnType },
-        { .Name = "TRowSet", .Type = rowSetType },
-        { .Name = "HashTable", .Type = hashTableType },
-        { .Name = "PairBuffer", .Type = pairBufferType },
-        { .Name = "RowArena", .Type = rowArenaType },
-        { .Name = "RowTable", .Type = rowTableType },
-        { .Name = "RowScratch", .Type = rowScratchType },
-        { .Name = "StringView", .Type = stringViewType },
-        { .Name = "OwnedString", .Type = ownedStringType },
-    };
+std::vector<TExternalType> QumirDbExternalTypes(TTypeFactory& types) {
+    std::vector<TExternalType> result;
+    for (const auto& builder : QumirDbTypeBuilders) {
+        result.push_back({ .Name = std::string(builder.Name), .Type = builder.Build(types) });
+    }
+    return result;
 }
 
 NAst::TTypePtr QumirDbNamedType(NAst::TTypeFactory& types, std::string_view name) {
-    for (const auto& type : QumirDbExternalTypes(types)) {
-        if (type.Name == name) {
-            return types.MakeNamed(std::string(name), type.Type);
+    for (const auto& builder : QumirDbTypeBuilders) {
+        if (builder.Name == name) {
+            return types.MakeNamed(std::string(name), builder.Build(types));
         }
     }
     throw std::logic_error("qumirdb.oz declares no type " + std::string(name));
