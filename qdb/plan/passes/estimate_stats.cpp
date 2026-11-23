@@ -231,10 +231,10 @@ bool MayBeNull(const TExprPtr& expr, const TStructType& input) {
         }
         return true;
     }
-    std::vector<TExprPtr> operands;
+    std::span<const TExprPtr> operands;
     if (auto maybeCall = TMaybeNode<TCallExpr>(expr)) {
         auto call = maybeCall.Cast();
-        auto callee = TMaybeNode<TIdentExpr>(call->Callee);
+        auto callee = TMaybeNode<TIdentExpr>(call->Callee());
         if (!callee) {
             return true;
         }
@@ -246,7 +246,7 @@ bool MayBeNull(const TExprPtr& expr, const TStructType& input) {
         if (name != "qdb_in_list" && name != "qdb_string_view_sql_like") {
             return true;
         }
-        operands = call->Args;
+        operands = call->Args();
     } else if (TMaybeNode<TCastExpr>(expr) || TMaybeNode<TUnaryExpr>(expr) || TMaybeNode<TBinaryExpr>(expr)) {
         operands = expr->Children();
     } else {
@@ -303,7 +303,7 @@ private:
     }
 
     double EstimateCall(const TExprPtr& atom, const TCallExpr& call) {
-        auto maybeCallee = TMaybeNode<TIdentExpr>(call.Callee);
+        auto maybeCallee = TMaybeNode<TIdentExpr>(call.Callee());
         if (!maybeCallee) {
             return 0.5;
         }
@@ -313,10 +313,10 @@ private:
         }
         // A source's null count and row count describe the same rows.
         if (
-            callee->Name == "qdb_is_null" && call.Args.size() == 1 &&
+            callee->Name == "qdb_is_null" && call.Args().size() == 1 &&
             OverSource_ && InputStats_.RowCount > 0)
         {
-            if (auto column = TMaybeNode<TIdentExpr>(call.Args[0])) {
+            if (auto column = TMaybeNode<TIdentExpr>(call.Args()[0])) {
                 auto colIt = InputStats_.ColumnStats.find(column.Cast()->Name);
                 if (colIt != InputStats_.ColumnStats.end() && colIt->second->NullCount) {
                     return static_cast<double>(*colIt->second->NullCount)
@@ -468,8 +468,8 @@ private:
     // their share of the column's values, of its non-NULL rows.
     double EstimateEquality(const TBinaryExpr& binary) {
         const bool negated = binary.Operator == "!="_op;
-        auto leftIdent = TMaybeNode<TIdentExpr>(binary.Left);
-        auto rightIdent = TMaybeNode<TIdentExpr>(binary.Right);
+        auto leftIdent = TMaybeNode<TIdentExpr>(binary.Left());
+        auto rightIdent = TMaybeNode<TIdentExpr>(binary.Right());
         if (leftIdent && rightIdent) {
             return EstimateColumnEquality(
                 leftIdent.Cast()->Name,
@@ -478,12 +478,12 @@ private:
         }
         const std::string* column = nullptr;
         const TExprPtr* value = nullptr;
-        if (leftIdent && IsConstExpr(binary.Right)) {
+        if (leftIdent && IsConstExpr(binary.Right())) {
             column = &leftIdent.Cast()->Name;
-            value = &binary.Right;
-        } else if (rightIdent && IsConstExpr(binary.Left)) {
+            value = &binary.Right();
+        } else if (rightIdent && IsConstExpr(binary.Left())) {
             column = &rightIdent.Cast()->Name;
-            value = &binary.Left;
+            value = &binary.Left();
         }
         if (!column) {
             return 0.5;
@@ -648,8 +648,8 @@ private:
     std::optional<double> EstimateColumnComparison(const TBinaryExpr& binary) const {
         const bool less = binary.Operator == "<"_op || binary.Operator == "<="_op;
         const bool greater = binary.Operator == ">"_op || binary.Operator == ">="_op;
-        auto maybeLeft = TMaybeNode<TIdentExpr>(binary.Left);
-        auto maybeRight = TMaybeNode<TIdentExpr>(binary.Right);
+        auto maybeLeft = TMaybeNode<TIdentExpr>(binary.Left());
+        auto maybeRight = TMaybeNode<TIdentExpr>(binary.Right());
         if ((!less && !greater) || !maybeLeft || !maybeRight) {
             return std::nullopt;
         }
@@ -711,17 +711,17 @@ private:
                 : static_cast<double>(number->IntValue);
         };
         // `col OP const`
-        if (auto leftIdent = TMaybeNode<TIdentExpr>(binary->Left)) {
+        if (auto leftIdent = TMaybeNode<TIdentExpr>(binary->Left())) {
             const auto& name = leftIdent.Cast()->Name;
-            if (auto f = FractionBelow(name, binary->Right, less != inclusive)) {
-                return TRangeBound{name, less, {value(binary->Right), inclusive, *f}};
+            if (auto f = FractionBelow(name, binary->Right(), less != inclusive)) {
+                return TRangeBound{name, less, {value(binary->Right()), inclusive, *f}};
             }
         }
         // `const OP col`  ==  `col (flip OP) const`
-        if (auto rightIdent = TMaybeNode<TIdentExpr>(binary->Right)) {
+        if (auto rightIdent = TMaybeNode<TIdentExpr>(binary->Right())) {
             const auto& name = rightIdent.Cast()->Name;
-            if (auto f = FractionBelow(name, binary->Left, greater != inclusive)) {
-                return TRangeBound{name, greater, {value(binary->Left), inclusive, *f}};
+            if (auto f = FractionBelow(name, binary->Left(), greater != inclusive)) {
+                return TRangeBound{name, greater, {value(binary->Left()), inclusive, *f}};
             }
         }
         return std::nullopt;
@@ -831,15 +831,15 @@ private:
             return std::nullopt;
         }
         auto call = maybeCall.Cast();
-        auto callee = TMaybeNode<TIdentExpr>(call->Callee);
-        if (!callee || callee.Cast()->Name != "qdb_in_list" || call->Args.size() < 2) {
+        auto callee = TMaybeNode<TIdentExpr>(call->Callee());
+        if (!callee || callee.Cast()->Name != "qdb_in_list" || call->Args().size() < 2) {
             return std::nullopt;
         }
-        auto column = TMaybeNode<TIdentExpr>(call->Args[0]);
+        auto column = TMaybeNode<TIdentExpr>(call->Args()[0]);
         if (!column) {
             return std::nullopt;
         }
-        return ColumnValues(column.Cast()->Name, std::span(call->Args).subspan(1));
+        return ColumnValues(column.Cast()->Name, call->Args().subspan(1));
     }
 
     // The values a conjunct rules out of a column: `col <> c`, `NOT IN` and
@@ -863,15 +863,15 @@ private:
 
     // The constant a column is compared with, as a set of one value.
     std::optional<TValueSet> ComparedValue(const TBinaryExpr& binary) {
-        auto maybeLeft = TMaybeNode<TIdentExpr>(binary.Left);
-        auto maybeRight = TMaybeNode<TIdentExpr>(binary.Right);
-        if (maybeLeft && !maybeRight && IsConstExpr(binary.Right)) {
+        auto maybeLeft = TMaybeNode<TIdentExpr>(binary.Left());
+        auto maybeRight = TMaybeNode<TIdentExpr>(binary.Right());
+        if (maybeLeft && !maybeRight && IsConstExpr(binary.Right())) {
             auto left = maybeLeft.Cast();
-            return ColumnValues(left->Name, std::span(&binary.Right, 1));
+            return ColumnValues(left->Name, std::span(&binary.Right(), 1));
         }
-        if (maybeRight && !maybeLeft && IsConstExpr(binary.Left)) {
+        if (maybeRight && !maybeLeft && IsConstExpr(binary.Left())) {
             auto right = maybeRight.Cast();
-            return ColumnValues(right->Name, std::span(&binary.Left, 1));
+            return ColumnValues(right->Name, std::span(&binary.Left(), 1));
         }
         return std::nullopt;
     }
@@ -888,7 +888,7 @@ private:
         };
         for (const auto& item : items) {
             if (auto maybeNull = TMaybeNode<TCallExpr>(item)) {
-                auto nullCallee = TMaybeNode<TIdentExpr>(maybeNull.Cast()->Callee);
+                auto nullCallee = TMaybeNode<TIdentExpr>(maybeNull.Cast()->Callee());
                 if (nullCallee && nullCallee.Cast()->Name == "qdb_sql_null") {
                     values.HasNull = true;
                     continue;

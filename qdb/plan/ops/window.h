@@ -72,10 +72,6 @@ public:
     // column it actually owns, plus this node's own references. Mirrors join.
     std::unordered_set<std::string> RequiredColumnsForChild(
         size_t childIdx, const std::unordered_set<std::string>& needed) const override;
-    std::vector<NQumir::NAst::TExprPtr> Children() const override {
-        return {Input_};
-    }
-
     const std::string ToString() const override;
 
     TOperatorPtr Input() const {

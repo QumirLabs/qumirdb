@@ -78,10 +78,8 @@ void CollectKeys(const TOperatorPtr& op, std::vector<std::pair<std::string, std:
             out.emplace_back(key.Left, key.Right);
         }
     }
-    for (const auto& child : op->Children()) {
-        if (auto childOp = TMaybeNode<IOperator>(child)) {
-            CollectKeys(TOperatorPtr(childOp.Cast()), out);
-        }
+    for (const auto& child : op->Inputs()) {
+        CollectKeys(child, out);
     }
 }
 
@@ -124,10 +122,8 @@ std::set<std::string> LeafAliases(const TOperatorPtr& op) {
         out.insert(std::string(source->GetAlias()));
         return out;
     }
-    for (const auto& child : op->Children()) {
-        if (auto childOp = TMaybeNode<IOperator>(child)) {
-            out.merge(LeafAliases(TOperatorPtr(childOp.Cast())));
-        }
+    for (const auto& child : op->Inputs()) {
+        out.merge(LeafAliases(child));
     }
     return out;
 }

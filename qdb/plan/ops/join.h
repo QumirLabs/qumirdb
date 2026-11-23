@@ -57,8 +57,6 @@ public:
     // + (parent-required & side). childIdx 0 = left, 1 = right.
     std::unordered_set<std::string> RequiredColumnsForChild(
         size_t childIdx, const std::unordered_set<std::string>& needed) const override;
-    // First operator with TWO children.
-    std::vector<NQumir::NAst::TExprPtr> Children() const override { return {Left(), Right()}; }
     const std::string ToString() const override;
 
     TOperatorPtr Left() const { return Inputs_[0]; }

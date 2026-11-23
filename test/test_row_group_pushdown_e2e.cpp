@@ -157,11 +157,9 @@ NQumir::TIntrusivePtr<TSourceOperator> FindSource(const TOperatorPtr& node) {
     if (auto source = TMaybeOp<TSourceOperator>(node)) {
         return source.Cast();
     }
-    for (const auto& child : node->Children()) {
-        if (auto op = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            if (auto source = FindSource(TOperatorPtr(op.Cast()))) {
-                return source;
-            }
+    for (const auto& child : node->Inputs()) {
+        if (auto source = FindSource(child)) {
+            return source;
         }
     }
     return nullptr;

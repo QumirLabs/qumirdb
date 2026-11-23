@@ -736,11 +736,9 @@ TEST(SexpParser, FlattenKeepsAnnotatedJoin) {
             join && join->RuntimeFilter()) {
             return join;
         }
-        for (const auto& child : node->Children()) {
-            if (auto childOp = TMaybeNode<IOperator>(child)) {
-                if (auto* found = findAnnotated(childOp.Cast())) {
-                    return found;
-                }
+        for (const auto& child : node->Inputs()) {
+            if (auto* found = findAnnotated(child.Get())) {
+                return found;
             }
         }
         return nullptr;

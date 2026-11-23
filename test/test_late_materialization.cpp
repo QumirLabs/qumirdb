@@ -127,11 +127,9 @@ NQumir::TIntrusivePtr<TLateMaterializeOperator> FindLateMaterialize(
     if (auto late = TMaybeOp<TLateMaterializeOperator>(plan)) {
         return late.Cast();
     }
-    for (const auto& child : plan->Children()) {
-        if (auto op = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            if (auto late = FindLateMaterialize(TOperatorPtr(op.Cast()))) {
-                return late;
-            }
+    for (const auto& child : plan->Inputs()) {
+        if (auto late = FindLateMaterialize(child)) {
+            return late;
         }
     }
     return {};

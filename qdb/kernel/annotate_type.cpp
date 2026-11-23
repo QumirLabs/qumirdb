@@ -82,8 +82,8 @@ public:
                 generic.ValueType = Erase(generic.ValueType);
             }
         }
-        for (auto* child : expr->MutableChildren()) {
-            Erase(*child);
+        for (auto& child : expr->MutableChildren()) {
+            Erase(child);
         }
     }
 
@@ -101,8 +101,8 @@ public:
                 return true;
             }
         }
-        for (auto* child : expr->MutableChildren()) {
-            if (Holds(*child)) {
+        for (auto& child : expr->MutableChildren()) {
+            if (Holds(child)) {
                 return true;
             }
         }
@@ -213,12 +213,12 @@ TTypePtr FindResultType(const TExprPtr& node, const std::string& resultName) {
         if (var.Cast()->Type) {
             return var.Cast()->Type;
         }
-        if (var.Cast()->Init && var.Cast()->Init->Type) {
-            return var.Cast()->Init->Type;
+        if (var.Cast()->Init() && var.Cast()->Init()->Type) {
+            return var.Cast()->Init()->Type;
         }
     }
-    for (auto* child : node->MutableChildren()) {
-        if (auto found = FindResultType(*child, resultName)) {
+    for (auto& child : node->MutableChildren()) {
+        if (auto found = FindResultType(child, resultName)) {
             return found;
         }
     }
@@ -276,7 +276,7 @@ public:
             Frontend_.UniqueName("__annotate_");
         const std::string resultName = "__result_" + functionName;
         auto resultVar = NQumir::MakeIntrusive<TVarStmt>(loc, resultName, nullptr);
-        resultVar->Init = cloned;
+        resultVar->Init() = cloned;
         auto body = NQumir::MakeIntrusive<TBlockExpr>(
             loc, std::vector<TExprPtr>{resultVar});
         auto fn = NQumir::MakeIntrusive<TFunDecl>(
@@ -345,8 +345,8 @@ private:
         {
             ExternReturns_.emplace(fn.Cast()->Name, FromQumirType(Frontend_.Types(), fn.Cast()->RetType));
         }
-        for (auto* child : node->MutableChildren()) {
-            CollectReturns(*child);
+        for (auto& child : node->MutableChildren()) {
+            CollectReturns(child);
         }
     }
 
@@ -501,7 +501,7 @@ bool IsNullLiteral(const TExprPtr& e) {
         return true;
     }
     if (auto call = TMaybeNode<TCallExpr>(e)) {
-        if (auto id = TMaybeNode<TIdentExpr>(call.Cast()->Callee)) {
+        if (auto id = TMaybeNode<TIdentExpr>(call.Cast()->Callee())) {
             return id.Cast()->Name == "qdb_sql_null";
         }
     }
@@ -515,18 +515,18 @@ bool IsNullOnly(const TExprPtr& e) {
         return true;
     }
     if (auto ifp = TMaybeNode<TIfExpr>(e)) {
-        return IsNullOnly(ifp.Cast()->Then) && IsNullOnly(ifp.Cast()->Else);
+        return IsNullOnly(ifp.Cast()->Then()) && IsNullOnly(ifp.Cast()->Else());
     }
     if (auto un = TMaybeNode<TUnaryExpr>(e)) {
         return IsNullOnly(un.Cast()->Operand);
     }
     if (auto bin = TMaybeNode<TBinaryExpr>(e)) {
-        return IsNullOnly(bin.Cast()->Left) && IsNullOnly(bin.Cast()->Right);
+        return IsNullOnly(bin.Cast()->Left()) && IsNullOnly(bin.Cast()->Right());
     }
     if (auto call = TMaybeNode<TCallExpr>(e)) {
-        auto id = TMaybeNode<TIdentExpr>(call.Cast()->Callee);
+        auto id = TMaybeNode<TIdentExpr>(call.Cast()->Callee());
         return id && id.Cast()->Name == "coalesce" &&
-            std::ranges::all_of(call.Cast()->Args, IsNullOnly);
+            std::ranges::all_of(call.Cast()->Args(), IsNullOnly);
     }
     return false;
 }
@@ -986,8 +986,8 @@ bool IsNumericArithmetic(
     if (auto bin = TMaybeNode<TBinaryExpr>(e)) {
         const TOperator op = bin.Cast()->Operator;
         return (op == "+" || op == "-" || op == "*" || op == "/" || op == "%")
-            && IsNumericArithmetic(types, context, bin.Cast()->Left, schema)
-            && IsNumericArithmetic(types, context, bin.Cast()->Right, schema);
+            && IsNumericArithmetic(types, context, bin.Cast()->Left(), schema)
+            && IsNumericArithmetic(types, context, bin.Cast()->Right(), schema);
     }
     const TTypePtr value = ValueType(InferType(types, context, e, schema));
     return value && (DecimalSpecOfValueType(value) || IsInt(UnwrapNamedValueType(value)));
@@ -1013,8 +1013,8 @@ bool AbsorbedByReal(
         return true;
     }
     if (auto ifp = TMaybeNode<TIfExpr>(e)) {
-        return AbsorbedByReal(types, context, ifp.Cast()->Then, schema)
-            && AbsorbedByReal(types, context, ifp.Cast()->Else, schema);
+        return AbsorbedByReal(types, context, ifp.Cast()->Then(), schema)
+            && AbsorbedByReal(types, context, ifp.Cast()->Else(), schema);
     }
     const TTypePtr value = ValueType(InferType(types, context, e, *schema));
     return !value || DecimalSpecOfValueType(value) || IsInt(UnwrapNamedValueType(value))
@@ -1026,7 +1026,7 @@ bool IsRealCommonType(
     NQumir::NAst::TTypeFactory& types,
     const TAnnotationContext& context,
     const std::vector<TTypePtr>& argTypes,
-    const std::vector<TExprPtr>& exprs,
+    std::span<const TExprPtr> exprs,
     const TStructType* schema)
 {
     bool real = false;
@@ -1113,7 +1113,7 @@ std::pair<TTypePtr, bool> CoalesceValueType(
     NQumir::NAst::TTypeFactory& types,
     const TAnnotationContext& context,
     const std::vector<TTypePtr>& argTypes,
-    const std::vector<TExprPtr>& args,
+    std::span<const TExprPtr> args,
     const TStructType* schema = nullptr)
 {
     if (IsRealCommonType(types, context, argTypes, args, schema)) {
@@ -1280,12 +1280,12 @@ TTypePtr InferType(
     }
     if (auto bin = TMaybeNode<TBinaryExpr>(e)) {
         auto node =bin.Cast();
-        TTypePtr lt = InferType(types, context, node->Left, schema);
-        TTypePtr rt = InferType(types, context, node->Right, schema);
+        TTypePtr lt = InferType(types, context, node->Left(), schema);
+        TTypePtr rt = InferType(types, context, node->Right(), schema);
         // A bare-NULL operand is typed as Expand types it.
-        TTypePtr R = BinaryValueTypeWithNull(types, node->Operator, node->Left, node->Right, lt, rt);
+        TTypePtr R = BinaryValueTypeWithNull(types, node->Operator, node->Left(), node->Right(), lt, rt);
         TTypePtr type = Propagate(types, {lt, rt}, R);
-        if (type && IsNullOnZeroDivisor(node->Operator, R) && MayBeZero(node->Right)) {
+        if (type && IsNullOnZeroDivisor(node->Operator, R) && MayBeZero(node->Right())) {
             return MakeNullableType(types, UnwrapNullableType(type));
         }
         return type;
@@ -1315,18 +1315,18 @@ TTypePtr InferType(
     if (auto call = TMaybeNode<TCallExpr>(e)) {
         auto node =call.Cast();
         std::string name;
-        if (auto cid = TMaybeNode<TIdentExpr>(node->Callee)) {
+        if (auto cid = TMaybeNode<TIdentExpr>(node->Callee())) {
             name = cid.Cast()->Name;
         }
         std::vector<TTypePtr> at;
-        for (const auto& a : node->Args) {
+        for (const auto& a : node->Args()) {
             at.push_back(InferType(types, context, a, schema));
         }
         if (name == "qdb_is_null" || name == "qdb_is_true") {
             return types.Make<TBoolType>(); // non-null bool regardless of args
         }
         if (name == "coalesce") {
-            auto [v, allNullable] = CoalesceValueType(types, context, at, node->Args, &schema);
+            auto [v, allNullable] = CoalesceValueType(types, context, at, node->Args(), &schema);
             if (!v) return nullptr;
             return allNullable
                 ? MakeNullableType(types, v) : v;
@@ -1367,10 +1367,10 @@ TTypePtr InferType(
         auto node =ifp.Cast();
         // The condition does not shape the result type, but it is typed too: it may
         // call an unknown function.
-        InferType(types, context, node->Cond, schema);
-        TTypePtr tt = InferType(types, context, node->Then, schema);
-        TTypePtr et = node->Else ? InferType(types, context, node->Else, schema) : nullptr;
-        TTypePtr base = UnifyBranchTypes(types, context, tt, et, node->Then, node->Else, &schema);
+        InferType(types, context, node->Cond(), schema);
+        TTypePtr tt = InferType(types, context, node->Then(), schema);
+        TTypePtr et = node->Else() ? InferType(types, context, node->Else(), schema) : nullptr;
+        TTypePtr base = UnifyBranchTypes(types, context, tt, et, node->Then(), node->Else(), &schema);
         if (!base) {
             return nullptr;
         }
@@ -1411,7 +1411,7 @@ TExprPtr BindTemp(const TExprPtr& expr, std::vector<TExprPtr>& stmts, uint64_t& 
 {
     std::string name = "__nx" + std::to_string(counter++);
     auto var = NQumir::MakeIntrusive<TVarStmt>(loc, name, nullptr);
-    var->Init = expr;
+    var->Init() = expr;
     stmts.push_back(var);
     return Ident(name, loc);
 }
@@ -1850,11 +1850,11 @@ std::pair<TExprPtr, TTypePtr> ExpandInList(
     const TLocation loc = node.Location;
     auto boolType = types.Make<TBoolType>();
     auto nullableBool = MakeNullableType(types, boolType);
-    if (node.Args.size() < 2) {
+    if (node.Args().size() < 2) {
         throw NQumir::TError("qdb_in_list expects an lhs and at least one item");
     }
 
-    TExprPtr lhs = node.Args.front();
+    TExprPtr lhs = node.Args().front();
     TTypePtr lhsType = Expand(types, context, lhs, inputType, counter);
     if (!lhsType) {
         return {
@@ -1870,9 +1870,9 @@ std::pair<TExprPtr, TTypePtr> ExpandInList(
         : lhsRef;
 
     std::vector<std::pair<TExprPtr, TTypePtr>> items;
-    items.reserve(node.Args.size() - 1);
-    for (size_t i = 1; i < node.Args.size(); ++i) {
-        TExprPtr item = node.Args[i];
+    items.reserve(node.Args().size() - 1);
+    for (size_t i = 1; i < node.Args().size(); ++i) {
+        TExprPtr item = node.Args()[i];
         TTypePtr itemType = Expand(types, context, item, inputType, counter);
         items.emplace_back(std::move(item), std::move(itemType));
     }
@@ -1979,7 +1979,7 @@ std::pair<TExprPtr, TTypePtr> ExpandCoalesce(
     std::vector<std::pair<TExprPtr, TTypePtr>> args; // (expr, type); bare NULLs dropped
     std::vector<TTypePtr> argTypes;
     std::vector<TExprPtr> exprs;
-    for (const auto& a : node.Args) {
+    for (const auto& a : node.Args()) {
         TExprPtr arg = a;
         TTypePtr t = Expand(types, context, arg, inputType, counter);
         if (t) { args.emplace_back(arg, t); argTypes.push_back(t); exprs.push_back(arg); }
@@ -2097,31 +2097,31 @@ TTypePtr Expand(
 
     if (auto ifp = TMaybeNode<TIfExpr>(e)) {
         auto node = ifp.Cast();
-        Expand(types, context, node->Cond, inputType, counter);
-        if (!node->Then) node->Then = MakeNull(node->Location);
-        if (!node->Else) node->Else = MakeNull(node->Location);
-        TTypePtr thenT = Expand(types, context, node->Then, inputType, counter);
-        TTypePtr elseT = Expand(types, context, node->Else, inputType, counter);
+        Expand(types, context, node->Cond(), inputType, counter);
+        if (!node->Then()) node->Then() = MakeNull(node->Location);
+        if (!node->Else()) node->Else() = MakeNull(node->Location);
+        TTypePtr thenT = Expand(types, context, node->Then(), inputType, counter);
+        TTypePtr elseT = Expand(types, context, node->Else(), inputType, counter);
         const bool thenNull = !thenT, elseNull = !elseT;
         const bool thenNullable = thenNull || IsNullableType(thenT);
         const bool elseNullable = elseNull || IsNullableType(elseT);
         if (!thenNullable && !elseNullable) {
             // no null - unify (i32/i64 -> i64)
-            return UnifyBranchTypes(types, context, thenT, elseT, node->Then, node->Else);
+            return UnifyBranchTypes(types, context, thenT, elseT, node->Then(), node->Else());
         }
-        TTypePtr value = UnifyBranchTypes(types, context, thenT, elseT, node->Then, node->Else);
+        TTypePtr value = UnifyBranchTypes(types, context, thenT, elseT, node->Then(), node->Else());
         if (!value) {
             return nullptr; // both branches NULL - untyped, leave for the parent
         }
-        node->Then = CoerceBranch(types, node->Then, thenT, thenNull, value, counter, node->Location);
-        node->Else = CoerceBranch(types, node->Else, elseT, elseNull, value, counter, node->Location);
+        node->Then() = CoerceBranch(types, node->Then(), thenT, thenNull, value, counter, node->Location);
+        node->Else() = CoerceBranch(types, node->Else(), elseT, elseNull, value, counter, node->Location);
         return MakeNullableType(types, value);
     }
 
     if (auto bp = TMaybeNode<TBinaryExpr>(e)) {
         auto node = bp.Cast();
-        TTypePtr lt = Expand(types, context, node->Left, inputType, counter);
-        TTypePtr rt = Expand(types, context, node->Right, inputType, counter);
+        TTypePtr lt = Expand(types, context, node->Left(), inputType, counter);
+        TTypePtr rt = Expand(types, context, node->Right(), inputType, counter);
         TOperator op = node->Operator;
         const bool lNull = !lt || IsNullableType(lt);
         bool rNull = !rt || IsNullableType(rt);
@@ -2129,28 +2129,28 @@ TTypePtr Expand(
             if (!lNull && !rNull) {
                 return types.Make<TBoolType>();
             }
-            e = Build3VL(types, op == "&&", node->Left, lt, node->Right, rt, counter, node->Location);
+            e = Build3VL(types, op == "&&", node->Left(), lt, node->Right(), rt, counter, node->Location);
             return MakeNullableType(types, types.Make<TBoolType>());
         }
-        if (lt && rt && MayBeZero(node->Right)) {
-            TTypePtr R = BinaryValueType(types, op, node->Left, node->Right, lt, rt);
+        if (lt && rt && MayBeZero(node->Right())) {
+            TTypePtr R = BinaryValueType(types, op, node->Left(), node->Right(), lt, rt);
             if (IsNullOnZeroDivisor(op, R)) {
-                if (TMaybeNode<TNumberExpr>(node->Right)) {
+                if (TMaybeNode<TNumberExpr>(node->Right())) {
                     // `x % 0`: NULL on every row.
                     e = NQumir::MakeIntrusive<TCastExpr>(node->Location, MakeNull(node->Location), NullableQ(types, R));
                     return MakeNullableType(types, R);
                 }
-                node->Right = NullIfZero(types, node->Right, rt, counter, node->Location);
+                node->Right() = NullIfZero(types, node->Right(), rt, counter, node->Location);
                 rt = MakeNullableType(types, ValueType(rt));
                 rNull = true;
             }
         }
         if (!lNull && !rNull) {
-            return BinaryValueType(types, op, node->Left, node->Right, lt, rt);
+            return BinaryValueType(types, op, node->Left(), node->Right(), lt, rt);
         }
         // Bare-NULL operand => the whole op is unconditionally NULL[R].
         if (!lt || !rt) {
-            TTypePtr R = BinaryValueTypeWithNull(types, op, node->Left, node->Right, lt, rt);
+            TTypePtr R = BinaryValueTypeWithNull(types, op, node->Left(), node->Right(), lt, rt);
             if (!R) {
                 // No operand has a type (`NULL + NULL`): the result is an untyped NULL.
                 e = MakeNull(node->Location);
@@ -2159,8 +2159,8 @@ TTypePtr Expand(
             e = NQumir::MakeIntrusive<TCastExpr>(node->Location, MakeNull(node->Location), NullableQ(types, R));
             return MakeNullableType(types, R);
         }
-        TTypePtr R = BinaryValueType(types, op, node->Left, node->Right, lt, rt);
-        TExprPtr l = node->Left, r = node->Right;
+        TTypePtr R = BinaryValueType(types, op, node->Left(), node->Right(), lt, rt);
+        TExprPtr l = node->Left(), r = node->Right();
         e = BuildNullStrict(types, {{l, lNull}, {r, rNull}},
             [op, node](std::vector<TExprPtr> a) {
                 return NQumir::MakeIntrusive<TBinaryExpr>(node->Location, op, a[0], a[1]);
@@ -2256,14 +2256,14 @@ TTypePtr Expand(
     if (auto cl = TMaybeNode<TCallExpr>(e)) {
         auto node = cl.Cast();
         std::string name;
-        if (auto id = TMaybeNode<TIdentExpr>(node->Callee)) {
+        if (auto id = TMaybeNode<TIdentExpr>(node->Callee())) {
             name = id.Cast()->Name;
         }
-        if (name == "qdb_string_view_sql_like" && node->Args.size() == 2) {
-            if (auto* literal = MutableStringLiteral(node->Args[1])) {
+        if (name == "qdb_string_view_sql_like" && node->Args().size() == 2) {
+            if (auto* literal = MutableStringLiteral(node->Args()[1])) {
                 if (auto fast = ClassifyLikePattern(literal->Value)) {
                     literal->Value = std::move(fast->Literal);
-                    node->Callee = NQumir::MakeIntrusive<TIdentExpr>(
+                    node->Callee() = NQumir::MakeIntrusive<TIdentExpr>(
                         node->Location, fast->Func);
                     name = fast->Func;
                 }
@@ -2284,7 +2284,7 @@ TTypePtr Expand(
             // __arena__ is a placeholder the codegen binds to the kernel's scratch
             // arena. Null-strict: NULL if any operand is NULL (SQL `NULL || x = NULL`).
             std::vector<std::pair<TExprPtr, bool>> ops;
-            for (auto& arg : node->Args) {
+            for (auto& arg : node->Args()) {
                 auto t = Expand(types, context, arg, inputType, counter);
                 ops.emplace_back(arg, !t || IsNullableType(t));
             }
@@ -2299,19 +2299,19 @@ TTypePtr Expand(
             bool anyNull = false;
             for (const auto& [expr, nullable] : ops) anyNull = anyNull || nullable;
             if (!anyNull) {
-                e = apply(node->Args);
+                e = apply({node->Args().begin(), node->Args().end()});
                 return R;
             }
             e = BuildNullStrict(types, ops, apply, R, counter, loc);
             return MakeNullableType(types, R);
         }
         std::vector<TTypePtr> argTypes;
-        for (auto& arg : node->Args) {
+        for (auto& arg : node->Args()) {
             argTypes.push_back(Expand(types, context, arg, inputType, counter));
         }
-        if (name == "qdb_is_true" && node->Args.size() == 1) {
-            node->Args[0] = TypeUntypedNull(
-                types, {node->Args[0], argTypes[0]}, types.Make<TBoolType>()).first;
+        if (name == "qdb_is_true" && node->Args().size() == 1) {
+            node->Args()[0] = TypeUntypedNull(
+                types, {node->Args()[0], argTypes[0]}, types.Make<TBoolType>()).first;
         }
         if (name == "qdb_is_null" || name == "qdb_is_true") {
             // Non-null bool. The arguments are expanded already: typing them again with
@@ -2330,13 +2330,13 @@ TTypePtr Expand(
                 return value;
             }
             std::vector<std::pair<TExprPtr, bool>> operands;
-            for (size_t i = 0; i < node->Args.size(); ++i) {
-                operands.emplace_back(node->Args[i], !argTypes[i] || IsNullableType(argTypes[i]));
+            for (size_t i = 0; i < node->Args().size(); ++i) {
+                operands.emplace_back(node->Args()[i], !argTypes[i] || IsNullableType(argTypes[i]));
             }
             e = BuildNullStrict(types, operands,
                 [node](std::vector<TExprPtr> a) {
                     return NQumir::MakeIntrusive<TCallExpr>(
-                        node->Location, node->Callee, std::move(a));
+                        node->Location, node->Callee(), std::move(a));
                 }, value, counter, node->Location);
             return MakeNullableType(types, value);
         }
@@ -2346,12 +2346,12 @@ TTypePtr Expand(
             return ret;
         }
         std::vector<std::pair<TExprPtr, bool>> operands;
-        for (size_t i = 0; i < node->Args.size(); ++i) {
-            operands.emplace_back(node->Args[i], !argTypes[i] || IsNullableType(argTypes[i]));
+        for (size_t i = 0; i < node->Args().size(); ++i) {
+            operands.emplace_back(node->Args()[i], !argTypes[i] || IsNullableType(argTypes[i]));
         }
         e = BuildNullStrict(types, operands,
             [node](std::vector<TExprPtr> a) {
-                return NQumir::MakeIntrusive<TCallExpr>(node->Location, node->Callee, std::move(a));
+                return NQumir::MakeIntrusive<TCallExpr>(node->Location, node->Callee(), std::move(a));
             }, R, counter, node->Location);
         return MakeNullableType(types, R);
     }
@@ -2364,8 +2364,8 @@ TTypePtr Expand(
 
     // Anything else (field access already produced by this pass, etc.): recurse into
     // children to rewrite nested nullables, then type by rule.
-    for (auto* child : e->MutableChildren()) {
-        Expand(types, context, *child, inputType, counter);
+    for (auto& child : e->MutableChildren()) {
+        Expand(types, context, child, inputType, counter);
     }
     return InferType(types, context, e, inputType);
 }
@@ -2484,8 +2484,8 @@ TTypePtr ExpandDecimalBlock(
     for (auto& stmt : node.Stmts) {
         if (auto var = TMaybeNode<TVarStmt>(stmt)) {
             TTypePtr initType = nullptr;
-            if (var.Cast()->Init) {
-                initType = ExpandDecimalNode(types, context, var.Cast()->Init, inputType, local);
+            if (var.Cast()->Init()) {
+                initType = ExpandDecimalNode(types, context, var.Cast()->Init(), inputType, local);
             }
             TTypePtr varType = var.Cast()->Type ? FromQumirType(types, var.Cast()->Type) : initType;
             if (varType) {
@@ -2557,19 +2557,19 @@ TTypePtr ExpandDecimalNode(
     }
     if (auto ifp = TMaybeNode<TIfExpr>(e)) {
         auto node = ifp.Cast();
-        ExpandDecimalNode(types, context, node->Cond, inputType, env);
-        TTypePtr thenT = ExpandDecimalNode(types, context, node->Then, inputType, env);
-        TTypePtr elseT = node->Else ? ExpandDecimalNode(types, context, node->Else, inputType, env) : nullptr;
-        TTypePtr result = UnifyBranchTypes(types, context, thenT, elseT, node->Then, node->Else);
+        ExpandDecimalNode(types, context, node->Cond(), inputType, env);
+        TTypePtr thenT = ExpandDecimalNode(types, context, node->Then(), inputType, env);
+        TTypePtr elseT = node->Else() ? ExpandDecimalNode(types, context, node->Else(), inputType, env) : nullptr;
+        TTypePtr result = UnifyBranchTypes(types, context, thenT, elseT, node->Then(), node->Else());
         if (auto decimal = DecimalSpecOfValueType(result)) {
-            node->Then = DecimalValueAs(types, node->Then, thenT, *decimal, node->Location);
-            if (node->Else) {
-                node->Else = DecimalValueAs(types, node->Else, elseT, *decimal, node->Location);
+            node->Then() = DecimalValueAs(types, node->Then(), thenT, *decimal, node->Location);
+            if (node->Else()) {
+                node->Else() = DecimalValueAs(types, node->Else(), elseT, *decimal, node->Location);
             }
         } else if (result && IsFloat(result)) {
-            node->Then = DecimalValueAsFloat(types, node->Then, thenT, result, node->Location);
-            if (node->Else) {
-                node->Else = DecimalValueAsFloat(types, node->Else, elseT, result, node->Location);
+            node->Then() = DecimalValueAsFloat(types, node->Then(), thenT, result, node->Location);
+            if (node->Else()) {
+                node->Else() = DecimalValueAsFloat(types, node->Else(), elseT, result, node->Location);
             }
         }
         bool nullable = !thenT || !elseT || IsNullableType(thenT) || IsNullableType(elseT);
@@ -2579,26 +2579,26 @@ TTypePtr ExpandDecimalNode(
     }
     if (auto bp = TMaybeNode<TBinaryExpr>(e)) {
         auto node = bp.Cast();
-        TTypePtr lt = ExpandDecimalNode(types, context, node->Left, inputType, env);
-        TTypePtr rt = ExpandDecimalNode(types, context, node->Right, inputType, env);
+        TTypePtr lt = ExpandDecimalNode(types, context, node->Left(), inputType, env);
+        TTypePtr rt = ExpandDecimalNode(types, context, node->Right(), inputType, env);
         if (DecimalSpecOfValueType(ValueType(lt)) && IsFloat(UnwrapNamedValueType(ValueType(rt)))) {
-            if (auto lit = DecimalLiteralOf(node->Right)) {
-                node->Right = DecimalConstant(types, *lit, node->Location);
+            if (auto lit = DecimalLiteralOf(node->Right())) {
+                node->Right() = DecimalConstant(types, *lit, node->Location);
                 rt = MakeDecimalType(types, lit->Spec);
             }
         } else if (DecimalSpecOfValueType(ValueType(rt)) && IsFloat(UnwrapNamedValueType(ValueType(lt)))) {
-            if (auto lit = DecimalLiteralOf(node->Left)) {
-                node->Left = DecimalConstant(types, *lit, node->Location);
+            if (auto lit = DecimalLiteralOf(node->Left())) {
+                node->Left() = DecimalConstant(types, *lit, node->Location);
                 lt = MakeDecimalType(types, lit->Spec);
             }
         }
         auto dl = DecimalSpecOfValueType(ValueType(lt));
         auto dr = DecimalSpecOfValueType(ValueType(rt));
         if (node->Operator != "%"_op &&
-            IsDecimalBesideFloat(dl, dr, ValueType(lt), ValueType(rt), node->Left, node->Right)) {
+            IsDecimalBesideFloat(dl, dr, ValueType(lt), ValueType(rt), node->Left(), node->Right())) {
             // The comparison or arithmetic then runs on DOUBLEs, with the decimal converted
             // like CAST(... AS DOUBLE). The converted operand keeps its nullability.
-            auto& decimalOperand = dl ? node->Left : node->Right;
+            auto& decimalOperand = dl ? node->Left() : node->Right();
             auto& decimalType = dl ? lt : rt;
             decimalOperand = DecimalValueAsDouble(types, std::move(decimalOperand), decimalType, node->Location);
             TTypePtr floatType = types.MakeFloat();
@@ -2610,7 +2610,7 @@ TTypePtr ExpandDecimalNode(
         if (node->Operator == "/"_op && dl && dr && IsDecimalQuotientDouble(*dl, *dr)) {
             // Both operands convert like CAST(... AS DOUBLE); nullability is kept.
             TTypePtr floatType = types.MakeFloat();
-            for (auto [operand, type] : {std::pair{&node->Left, &lt}, std::pair{&node->Right, &rt}}) {
+            for (auto [operand, type] : {std::pair{&node->Left(), &lt}, std::pair{&node->Right(), &rt}}) {
                 *operand = DecimalValueAsDouble(types, std::move(*operand), *type, node->Location);
                 *type = IsNullableType(*type)
                     ? MakeNullableType(types, floatType)
@@ -2620,13 +2620,13 @@ TTypePtr ExpandDecimalNode(
         }
         if (!dl && !dr) {
             return Propagate(types, {lt, rt},
-                BinaryValueType(types, node->Operator, node->Left, node->Right, lt, rt));
+                BinaryValueType(types, node->Operator, node->Left(), node->Right(), lt, rt));
         }
-        TTypePtr result = BinaryValueType(types, node->Operator, node->Left, node->Right, lt, rt);
+        TTypePtr result = BinaryValueType(types, node->Operator, node->Left(), node->Right(), lt, rt);
         if (IsComparison(node->Operator)) {
-            const TDecimalSpec spec = DecimalComparisonSpec(node->Left, lt, node->Right, rt);
-            node->Left = DecimalValueAs(types, node->Left, lt, spec, node->Location);
-            node->Right = DecimalValueAs(types, node->Right, rt, spec, node->Location);
+            const TDecimalSpec spec = DecimalComparisonSpec(node->Left(), lt, node->Right(), rt);
+            node->Left() = DecimalValueAs(types, node->Left(), lt, spec, node->Location);
+            node->Right() = DecimalValueAs(types, node->Right(), rt, spec, node->Location);
             return Propagate(types, {lt, rt}, result);
         }
         auto resultDecimal = DecimalSpecOfValueType(result);
@@ -2636,8 +2636,8 @@ TTypePtr ExpandDecimalNode(
         // Operands of + - % take the result's spec: it holds either of them, and an i64
         // result computes with the i64 operators.
         if (node->Operator == "+"_op || node->Operator == "-"_op || node->Operator == "%"_op) {
-            node->Left = DecimalValueAs(types, node->Left, lt, *resultDecimal, node->Location);
-            node->Right = DecimalValueAs(types, node->Right, rt, *resultDecimal, node->Location);
+            node->Left() = DecimalValueAs(types, node->Left(), lt, *resultDecimal, node->Location);
+            node->Right() = DecimalValueAs(types, node->Right(), rt, *resultDecimal, node->Location);
             return Propagate(types, {lt, rt}, result);
         }
         // The unscaled product is at scale s1 + s2, the result's scale. An i64 result has at
@@ -2646,18 +2646,18 @@ TTypePtr ExpandDecimalNode(
         if (node->Operator == "*") {
             const bool narrow = IsDecimal64(*resultDecimal);
             if (dl && dr) {
-                node->Left = DecimalValueAs(types, node->Left, lt, narrow ? *dl : Wide(*dl), node->Location);
-                node->Right = DecimalValueAs(types, node->Right, rt, narrow ? *dr : Wide(*dr), node->Location);
+                node->Left() = DecimalValueAs(types, node->Left(), lt, narrow ? *dl : Wide(*dl), node->Location);
+                node->Right() = DecimalValueAs(types, node->Right(), rt, narrow ? *dr : Wide(*dr), node->Location);
                 if (!narrow) {
                     e = Call("qdb_decimal_mul", {
-                        std::move(node->Left),
-                        std::move(node->Right),
+                        std::move(node->Left()),
+                        std::move(node->Right()),
                     }, node->Location);
                 }
                 return Propagate(types, {lt, rt}, result);
             }
-            auto& decimalOperand = dl ? node->Left : node->Right;
-            auto& integerOperand = dl ? node->Right : node->Left;
+            auto& decimalOperand = dl ? node->Left() : node->Right();
+            auto& integerOperand = dl ? node->Right() : node->Left();
             const TDecimalSpec decimal = dl ? *dl : *dr;
             decimalOperand = DecimalValueAs(types, decimalOperand, dl ? lt : rt,
                 narrow ? decimal : Wide(decimal), node->Location);
@@ -2674,8 +2674,8 @@ TTypePtr ExpandDecimalNode(
             if (dl && dr) {
                 // The dividend is scaled up past both scales, which needs i128 whatever
                 // the operands are; an i64 result is narrowed back.
-                node->Left = DecimalValueAs(types, node->Left, lt, Wide(*dl), node->Location);
-                node->Right = DecimalValueAs(types, node->Right, rt, Wide(*dr), node->Location);
+                node->Left() = DecimalValueAs(types, node->Left(), lt, Wide(*dl), node->Location);
+                node->Right() = DecimalValueAs(types, node->Right(), rt, Wide(*dr), node->Location);
                 const int32_t dividendScaleDelta =
                     resultDecimal->Scale + dr->Scale - dl->Scale;
                 if (dividendScaleDelta < 0) {
@@ -2683,14 +2683,14 @@ TTypePtr ExpandDecimalNode(
                         "decimal / decimal produced negative dividend scale delta");
                 }
                 if (dividendScaleDelta > 0) {
-                    node->Left = Call("qdb_decimal_scale_up", {
-                        std::move(node->Left),
+                    node->Left() = Call("qdb_decimal_scale_up", {
+                        std::move(node->Left()),
                         DecimalScaleLiteral(types, node->Location, dividendScaleDelta),
                     }, node->Location);
                 }
                 e = Call("qdb_decimal_div", {
-                    std::move(node->Left),
-                    std::move(node->Right),
+                    std::move(node->Left()),
+                    std::move(node->Right()),
                 }, node->Location);
                 if (IsDecimal64(*resultDecimal)) {
                     e = Call("qdb_decimal64_narrow", {std::move(e)}, node->Location);
@@ -2698,11 +2698,11 @@ TTypePtr ExpandDecimalNode(
                 return Propagate(types, {lt, rt}, result);
             }
             if (dl && !dr) {
-                node->Left = DecimalValueAs(types, node->Left, lt, *dl, node->Location);
-                node->Right = CastToI64(types, node->Right, node->Location);
+                node->Left() = DecimalValueAs(types, node->Left(), lt, *dl, node->Location);
+                node->Right() = CastToI64(types, node->Right(), node->Location);
                 e = Call(IsDecimal64(*dl) ? "qdb_decimal64_div_i64" : "qdb_decimal_div_i64", {
-                    std::move(node->Left),
-                    std::move(node->Right),
+                    std::move(node->Left()),
+                    std::move(node->Right()),
                 }, node->Location);
                 return Propagate(types, {lt, rt}, result);
             }
@@ -2753,11 +2753,11 @@ TTypePtr ExpandDecimalNode(
     if (auto cl = TMaybeNode<TCallExpr>(e)) {
         auto node = cl.Cast();
         std::vector<TTypePtr> argTypes;
-        argTypes.reserve(node->Args.size());
-        for (auto& arg : node->Args) {
+        argTypes.reserve(node->Args().size());
+        for (auto& arg : node->Args()) {
             argTypes.push_back(ExpandDecimalNode(types, context, arg, inputType, env));
         }
-        if (auto cid = TMaybeNode<TIdentExpr>(node->Callee)) {
+        if (auto cid = TMaybeNode<TIdentExpr>(node->Callee())) {
             if (cid.Cast()->Name == "qdb_is_null" || cid.Cast()->Name == "qdb_is_true") {
                 return types.Make<TBoolType>();
             }
@@ -2766,16 +2766,16 @@ TTypePtr ExpandDecimalNode(
                 return types.Make<TBoolType>();
             }
             if (cid.Cast()->Name == "coalesce") {
-                auto [value, allNullable] = CoalesceValueType(types, context, argTypes, node->Args);
+                auto [value, allNullable] = CoalesceValueType(types, context, argTypes, node->Args());
                 return value && allNullable
                     ? MakeNullableType(types, value)
                     : value;
             }
             if (auto value = NumericPreservingUnaryCall(cid.Cast()->Name, argTypes)) {
                 if (auto decimal = DecimalSpecOfValueType(value)) {
-                    node->Args[0] = DecimalValueAs(
-                        types, std::move(node->Args[0]), argTypes[0], *decimal, node->Location);
-                    e = Call(cid.Cast()->Name, {std::move(node->Args[0])}, node->Location);
+                    node->Args()[0] = DecimalValueAs(
+                        types, std::move(node->Args()[0]), argTypes[0], *decimal, node->Location);
+                    e = Call(cid.Cast()->Name, {std::move(node->Args()[0])}, node->Location);
                 }
                 return Propagate(types, {argTypes[0]}, value);
             }
@@ -2809,8 +2809,8 @@ TTypePtr ExpandDecimalNode(
     }
     if (auto var = TMaybeNode<TVarStmt>(e)) {
         TTypePtr initType = nullptr;
-        if (var.Cast()->Init) {
-            initType = ExpandDecimalNode(types, context, var.Cast()->Init, inputType, env);
+        if (var.Cast()->Init()) {
+            initType = ExpandDecimalNode(types, context, var.Cast()->Init(), inputType, env);
         }
         TTypePtr varType = var.Cast()->Type ? FromQumirType(types, var.Cast()->Type) : initType;
         if (varType) {
@@ -2825,8 +2825,8 @@ TTypePtr ExpandDecimalNode(
         }
         return valueType;
     }
-    for (auto* child : e->MutableChildren()) {
-        ExpandDecimalNode(types, context, *child, inputType, env);
+    for (auto& child : e->MutableChildren()) {
+        ExpandDecimalNode(types, context, child, inputType, env);
     }
     return InferType(types, context, e, inputType);
 }
@@ -2910,19 +2910,19 @@ TTypePtr AnnotateExprTreeTypes(
     std::function<TTypePtr(const TExprPtr&)> annotate =
         [&](const TExprPtr& node) -> TTypePtr
     {
-        for (auto* child : node->MutableChildren()) {
-            if (*child) {
-                annotate(*child);
+        for (auto& child : node->MutableChildren()) {
+            if (child) {
+                annotate(child);
             }
         }
         if (auto binary = TMaybeNode<TBinaryExpr>(node)) {
-            auto leftType = UnwrapNamedValueType(ValueType(binary.Cast()->Left->Type));
-            auto rightType = UnwrapNamedValueType(ValueType(binary.Cast()->Right->Type));
+            auto leftType = UnwrapNamedValueType(ValueType(binary.Cast()->Left()->Type));
+            auto rightType = UnwrapNamedValueType(ValueType(binary.Cast()->Right()->Type));
             if (IsInt(leftType) && IsInt(rightType)) {
-                if (IntLiteralFits(binary.Cast()->Right, leftType)) {
-                    binary.Cast()->Right->Type = leftType;
-                } else if (IntLiteralFits(binary.Cast()->Left, rightType)) {
-                    binary.Cast()->Left->Type = rightType;
+                if (IntLiteralFits(binary.Cast()->Right(), leftType)) {
+                    binary.Cast()->Right()->Type = leftType;
+                } else if (IntLiteralFits(binary.Cast()->Left(), rightType)) {
+                    binary.Cast()->Left()->Type = rightType;
                 }
             }
         }
@@ -2970,7 +2970,7 @@ bool ContainsMustExpandCall(
 {
     if (!e) return false;
     if (auto call = TMaybeNode<TCallExpr>(e)) {
-        if (auto id = TMaybeNode<TIdentExpr>(call.Cast()->Callee)) {
+        if (auto id = TMaybeNode<TIdentExpr>(call.Cast()->Callee())) {
             const std::string& name = id.Cast()->Name;
             if (name == "coalesce" || name == "qdb_in_list" || ArenaStringFunction(name) ||
                 name == "qdb_string_view_sql_like")
@@ -2990,7 +2990,7 @@ bool ContainsMustExpandCall(
     }
     if (auto bin = TMaybeNode<TBinaryExpr>(e)) {
         const TOperator op = bin.Cast()->Operator;
-        if ((op == "%" || op == "/") && MayBeZero(bin.Cast()->Right)) {
+        if ((op == "%" || op == "/") && MayBeZero(bin.Cast()->Right())) {
             if (TTypePtr type = InferType(types, context, e, inputType); type && IsNullOnZeroDivisor(op, type)) {
                 return true;
             }
@@ -3077,9 +3077,9 @@ void CoerceRealOperands(
     TExprPtr& e,
     const TStructType& inputType)
 {
-    for (auto* child : e->MutableChildren()) {
-        if (*child) {
-            CoerceRealOperands(types, context, *child, inputType);
+    for (auto& child : e->MutableChildren()) {
+        if (child) {
+            CoerceRealOperands(types, context, child, inputType);
         }
     }
     auto typeOf = [&](const TExprPtr& operand) {
@@ -3093,21 +3093,21 @@ void CoerceRealOperands(
     };
     if (auto bin = TMaybeNode<TBinaryExpr>(e); bin && !IsLogical(bin.Cast()->Operator)) {
         auto node = bin.Cast();
-        const auto lt = typeOf(node->Left);
-        if (MixesReal(lt, typeOf(node->Right))) {
-            auto& real = IsReal(UnwrapNamedValueType(lt)) ? node->Left : node->Right;
+        const auto lt = typeOf(node->Left());
+        if (MixesReal(lt, typeOf(node->Right()))) {
+            auto& real = IsReal(UnwrapNamedValueType(lt)) ? node->Left() : node->Right();
             real = CastTo(types, real, TFloatType::F64);
         }
         return;
     }
     if (auto ifp = TMaybeNode<TIfExpr>(e)) {
         auto node = ifp.Cast();
-        const auto value = UnifyBranchTypes(types, context, typeOf(node->Then), typeOf(node->Else),
-            node->Then, node->Else, &inputType);
+        const auto value = UnifyBranchTypes(types, context, typeOf(node->Then()), typeOf(node->Else()),
+            node->Then(), node->Else(), &inputType);
         if (IsReal(UnwrapNamedValueType(ValueType(value)))) {
-            narrow(node->Then);
-            if (node->Else) {
-                narrow(node->Else);
+            narrow(node->Then());
+            if (node->Else()) {
+                narrow(node->Else());
             }
         }
         return;
@@ -3116,11 +3116,11 @@ void CoerceRealOperands(
     if (!call) {
         return;
     }
-    auto callee = TMaybeNode<TIdentExpr>(call.Cast()->Callee);
+    auto callee = TMaybeNode<TIdentExpr>(call.Cast()->Callee());
     if (!callee) {
         return;
     }
-    auto& args = call.Cast()->Args;
+    auto args = call.Cast()->Args();
     if (callee.Cast()->Name == "coalesce") {
         std::vector<TTypePtr> argTypes;
         for (const auto& arg : args) {

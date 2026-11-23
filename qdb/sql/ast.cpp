@@ -29,5 +29,48 @@ void TSqlSetOp::Accept(ISqlVisitor& visitor) { visitor.Visit(*this); }
 void TSqlExternalModule::Accept(ISqlVisitor& visitor) { visitor.Visit(*this); }
 void TSqlExternalFunction::Accept(ISqlVisitor& visitor) { visitor.Visit(*this); }
 
+namespace {
+
+bool HasOffset(TSqlFrameBound::EType type) {
+    return type == TSqlFrameBound::EType::Preceding || type == TSqlFrameBound::EType::Following;
+}
+
+} // namespace
+
+TWindowExpr::TWindowExpr(NQumir::NAst::TExprPtr expr, const TSqlWindowSpec& spec)
+    : NQumir::NAst::TExpr(expr->Location)
+{
+    Operands.push_back(std::move(expr));
+    if (spec.PartitionBy) {
+        HasPartitionBy = true;
+        Operands.push_back(spec.PartitionBy);
+    }
+    if (spec.OrderBy) {
+        for (const auto& item : spec.OrderBy->Items) {
+            Order.push_back({.Desc = item->Desc, .NullOrder = item->NullOrder});
+            Operands.push_back(item->Expr);
+        }
+    }
+    FrameType = spec.Frame->Type;
+    FrameStart = spec.Frame->Start->Type;
+    if (HasOffset(FrameStart)) {
+        Operands.push_back(spec.Frame->Start->Expr);
+    }
+    if (spec.Frame->End) {
+        FrameEnd = spec.Frame->End->Type;
+        if (HasOffset(*FrameEnd)) {
+            Operands.push_back(spec.Frame->End->Expr);
+        }
+    }
+}
+
+NQumir::NAst::TExprPtr TWindowExpr::FrameStartOffset() const {
+    return HasOffset(FrameStart) ? Operands[1 + HasPartitionBy + Order.size()] : nullptr;
+}
+
+NQumir::NAst::TExprPtr TWindowExpr::FrameEndOffset() const {
+    return FrameEnd && HasOffset(*FrameEnd) ? Operands.back() : nullptr;
+}
+
 } // namespace NSql
 } // namespace NQdb

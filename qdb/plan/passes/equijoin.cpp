@@ -103,8 +103,8 @@ void ExtractConjucts(std::vector<TConjuct>& ret, const TExprPtr& expr) {
         if (binary->Operator != "==") {
             continue;
         }
-        auto identLeft = TMaybeNode<TIdentExpr>(binary->Left);
-        auto identRight = TMaybeNode<TIdentExpr>(binary->Right);
+        auto identLeft = TMaybeNode<TIdentExpr>(binary->Left());
+        auto identRight = TMaybeNode<TIdentExpr>(binary->Right());
         if (!identLeft) {
             continue;
         }
@@ -234,8 +234,8 @@ void RemapIdents(NQumir::NAst::TExprPtr& expr, const std::unordered_map<std::str
         return;
     }
 
-    for (const auto& child : expr->MutableChildren()) {
-        RemapIdents(*child, renameFromTo);
+    for (auto& child : expr->MutableChildren()) {
+        RemapIdents(child, renameFromTo);
     }
 }
 
@@ -840,11 +840,11 @@ bool IsNullJoinKey(
     bool rightKey)
 {
     auto call = TMaybeNode<TCallExpr>(conjunct.Expr);
-    if (!call || call.Cast()->Args.size() != 1) {
+    if (!call || call.Cast()->Args().size() != 1) {
         return false;
     }
-    auto callee = TMaybeNode<TIdentExpr>(call.Cast()->Callee);
-    auto column = TMaybeNode<TIdentExpr>(call.Cast()->Args.front());
+    auto callee = TMaybeNode<TIdentExpr>(call.Cast()->Callee());
+    auto column = TMaybeNode<TIdentExpr>(call.Cast()->Args().front());
     if (!callee || callee.Cast()->Name != "qdb_is_null" || !column) {
         return false;
     }

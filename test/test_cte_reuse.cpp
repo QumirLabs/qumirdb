@@ -82,10 +82,8 @@ void CollectConsumers(
         out.push_back(consumer.Cast());
         return;
     }
-    for (const auto& child : op->Children()) {
-        if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            CollectConsumers(TOperatorPtr(childOp.Cast()), out);
-        }
+    for (const auto& child : op->Inputs()) {
+        CollectConsumers(child, out);
     }
 }
 
@@ -102,11 +100,9 @@ TOperatorPtr FindSource(const TOperatorPtr& op) {
     if (TMaybeOp<TSourceOperator>(op)) {
         return op;
     }
-    for (const auto& child : op->Children()) {
-        if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            if (auto found = FindSource(TOperatorPtr(childOp.Cast()))) {
-                return found;
-            }
+    for (const auto& child : op->Inputs()) {
+        if (auto found = FindSource(child)) {
+            return found;
         }
     }
     return nullptr;
@@ -119,11 +115,9 @@ NQumir::TIntrusivePtr<TFilterOperator> FindFilter(const TOperatorPtr& op) {
     if (auto filter = TMaybeOp<TFilterOperator>(op)) {
         return filter.Cast();
     }
-    for (const auto& child : op->Children()) {
-        if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            if (auto found = FindFilter(TOperatorPtr(childOp.Cast()))) {
-                return found;
-            }
+    for (const auto& child : op->Inputs()) {
+        if (auto found = FindFilter(child)) {
+            return found;
         }
     }
     return nullptr;
@@ -136,11 +130,9 @@ TOperatorPtr FindAggregate(const TOperatorPtr& op) {
     if (TMaybeOp<TAggregateOperator>(op)) {
         return op;
     }
-    for (const auto& child : op->Children()) {
-        if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            if (auto found = FindAggregate(TOperatorPtr(childOp.Cast()))) {
-                return found;
-            }
+    for (const auto& child : op->Inputs()) {
+        if (auto found = FindAggregate(child)) {
+            return found;
         }
     }
     return nullptr;
@@ -164,11 +156,9 @@ bool ContainsCteRef(const TOperatorPtr& op) {
     if (TMaybeOp<TCteRef>(op)) {
         return true;
     }
-    for (const auto& child : op->Children()) {
-        if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            if (ContainsCteRef(TOperatorPtr(childOp.Cast()))) {
-                return true;
-            }
+    for (const auto& child : op->Inputs()) {
+        if (ContainsCteRef(child)) {
+            return true;
         }
     }
     return false;

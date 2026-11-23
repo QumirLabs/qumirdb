@@ -146,8 +146,8 @@ void SpecializeFilterPredicate(
             return;
         }
     }
-    for (auto* child : expr->MutableChildren()) {
-        SpecializeFilterPredicate(types, *child, stringFields, stringValues);
+    for (auto& child : expr->MutableChildren()) {
+        SpecializeFilterPredicate(types, child, stringFields, stringValues);
     }
 }
 
@@ -796,7 +796,7 @@ std::vector<NQumir::NAst::TExprPtr> GenKeyOwnershipFunDecls(
     TExprPtr cloneValue;
     if (key.HasDistinctLookupType()) {
         auto offset = NQumir::MakeIntrusive<TVarStmt>(loc, "owned_offset", i64Type);
-        offset->Init = NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t{0}, types);
+        offset->Init() = NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t{0}, types);
         cloneBody.push_back(std::move(offset));
         size_t nextTemporary = 0;
         path.clear();
@@ -838,8 +838,8 @@ void SubstFieldsInPlace(
         }
         return;
     }
-    for (auto* child : expr->MutableChildren()) {
-        SubstFieldsInPlace(*child, fieldValues);
+    for (auto& child : expr->MutableChildren()) {
+        SubstFieldsInPlace(child, fieldValues);
     }
 }
 
@@ -1134,26 +1134,26 @@ NQumir::NAst::TExprPtr CloneFilterExpr(NQumir::NAst::TTypeFactory& types, const 
             CloneFilterExpr(types, n.Cast()->Operand));
     } else if (auto n = TMaybeNode<TBinaryExpr>(expr)) {
         out = NQumir::MakeIntrusive<TBinaryExpr>(loc, n.Cast()->Operator,
-            CloneFilterExpr(types, n.Cast()->Left), CloneFilterExpr(types, n.Cast()->Right));
+            CloneFilterExpr(types, n.Cast()->Left()), CloneFilterExpr(types, n.Cast()->Right()));
     } else if (auto n = TMaybeNode<TCallExpr>(expr)) {
         std::vector<TExprPtr> args;
-        args.reserve(n.Cast()->Args.size());
-        for (const auto& a : n.Cast()->Args) {
+        args.reserve(n.Cast()->Args().size());
+        for (const auto& a : n.Cast()->Args()) {
             args.push_back(CloneFilterExpr(types, a));
         }
         out = NQumir::MakeIntrusive<TCallExpr>(loc,
-            CloneFilterExpr(types, n.Cast()->Callee), std::move(args));
+            CloneFilterExpr(types, n.Cast()->Callee()), std::move(args));
     } else if (auto n = TMaybeNode<TCastExpr>(expr)) {
         out = NQumir::MakeIntrusive<TCastExpr>(loc,
             CloneFilterExpr(types, n.Cast()->Operand), n.Cast()->Type);
     } else if (auto n = TMaybeNode<TIndexExpr>(expr)) {
         out = NQumir::MakeIntrusive<TIndexExpr>(loc,
-            CloneFilterExpr(types, n.Cast()->Collection), CloneFilterExpr(types, n.Cast()->Index));
+            CloneFilterExpr(types, n.Cast()->Collection()), CloneFilterExpr(types, n.Cast()->Index()));
     } else if (auto n = TMaybeNode<TIfExpr>(expr)) {
         auto ifExpr = n.Cast();
         out = NQumir::MakeIntrusive<TIfExpr>(loc,
-            CloneFilterExpr(types, ifExpr->Cond), CloneFilterExpr(types, ifExpr->Then),
-            ifExpr->Else ? CloneFilterExpr(types, ifExpr->Else) : nullptr);
+            CloneFilterExpr(types, ifExpr->Cond()), CloneFilterExpr(types, ifExpr->Then()),
+            ifExpr->Else() ? CloneFilterExpr(types, ifExpr->Else()) : nullptr);
     } else if (auto n = TMaybeNode<TFieldAccessExpr>(expr)) {
         out = NQumir::MakeIntrusive<TFieldAccessExpr>(loc,
             CloneFilterExpr(types, n.Cast()->Object), n.Cast()->FieldName);
@@ -1164,7 +1164,7 @@ NQumir::NAst::TExprPtr CloneFilterExpr(NQumir::NAst::TTypeFactory& types, const 
         out = NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(stmts));
     } else if (auto n = TMaybeNode<TVarStmt>(expr)) {
         auto v = NQumir::MakeIntrusive<TVarStmt>(loc, n.Cast()->Name, n.Cast()->Type);
-        if (n.Cast()->Init) v->Init = CloneFilterExpr(types, n.Cast()->Init);
+        if (n.Cast()->Init()) v->Init() = CloneFilterExpr(types, n.Cast()->Init());
         out = std::move(v);
     } else {
         throw std::runtime_error(

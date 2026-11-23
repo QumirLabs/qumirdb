@@ -168,7 +168,11 @@ class TWindowCollector {
         std::string Func;
         NQumir::NAst::TExprPtr Arg;
         std::vector<NQumir::NAst::TExprPtr> PartitionExprs;
-        std::vector<NSql::TSqlPtr<NSql::TSqlOrderItem>> OrderItems;
+        struct TOrderItem {
+            NQumir::NAst::TExprPtr Expr;
+            NSql::TWindowOrder Order;
+        };
+        std::vector<TOrderItem> OrderItems;
         std::optional<TWindowFrame> Frame;
         std::string Signature;
     };

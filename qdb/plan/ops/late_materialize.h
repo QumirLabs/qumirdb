@@ -31,10 +31,6 @@ public:
         size_t childIdx,
         const std::unordered_set<std::string>& needed) const override;
 
-    std::vector<NQumir::NAst::TExprPtr> Children() const override {
-        return {Input_};
-    }
-
     const TOperatorPtr& Input() const { return Input_; }
     TOperatorPtr& MutableInput() { return Input_; }
     const std::string& LocatorColumn() const { return LocatorColumn_; }

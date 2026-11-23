@@ -54,90 +54,82 @@ std::string NullOrderName(TSqlOrderItem::ENullOrder nullOrder) {
 }
 
 void PrintWindowFrameBound(
-    const TSqlPtr<TSqlFrameBound>& bound,
+    TSqlFrameBound::EType type,
+    const TExprPtr& offset,
     NCore::TPrinter& p,
     NCore::TPrintFrame frame)
 {
     auto& out = p.GetOut();
-    if (!bound) {
-        out << "(null)";
-        return;
-    }
-    out << '(' << FrameBoundName(bound->Type);
-    if (bound->Expr) {
+    out << '(' << FrameBoundName(type);
+    if (offset) {
         p.Separator(frame.Level + 1);
-        p.PrintExpr(bound->Expr, frame.AllowTypeWrap, frame.Level + 1);
+        p.PrintExpr(offset, frame.AllowTypeWrap, frame.Level + 1);
     }
     out << ')';
 }
 
 void PrintWindowFrame(
-    const TSqlPtr<TSqlWindowFrame>& windowFrame,
+    const TWindowExpr& window,
     NCore::TPrinter& p,
     NCore::TPrintFrame frame)
 {
     auto& out = p.GetOut();
-    if (!windowFrame) {
-        return;
-    }
-    out << '(' << FrameTypeName(windowFrame->Type);
+    out << '(' << FrameTypeName(window.FrameType);
     p.Separator(frame.Level + 1);
-    if (windowFrame->End) {
+    if (window.FrameEnd) {
         out << "(between";
         p.Separator(frame.Level + 2);
-        PrintWindowFrameBound(windowFrame->Start, p, {frame.AllowTypeWrap, frame.Level + 2});
+        PrintWindowFrameBound(window.FrameStart, window.FrameStartOffset(), p, {frame.AllowTypeWrap, frame.Level + 2});
         p.Separator(frame.Level + 2);
-        PrintWindowFrameBound(windowFrame->End, p, {frame.AllowTypeWrap, frame.Level + 2});
+        PrintWindowFrameBound(*window.FrameEnd, window.FrameEndOffset(), p, {frame.AllowTypeWrap, frame.Level + 2});
         out << ')';
     } else {
-        PrintWindowFrameBound(windowFrame->Start, p, {frame.AllowTypeWrap, frame.Level + 1});
+        PrintWindowFrameBound(window.FrameStart, window.FrameStartOffset(), p, {frame.AllowTypeWrap, frame.Level + 1});
     }
     out << ')';
 }
 
 void PrintWindowOrderItem(
-    const TSqlPtr<TSqlOrderItem>& item,
+    const TWindowOrder& order,
+    const TExprPtr& key,
     NCore::TPrinter& p,
     NCore::TPrintFrame frame)
 {
     auto& out = p.GetOut();
-    std::string head = item->Desc ? "(order desc" : "(order asc";
-    head += NullOrderName(item->NullOrder);
+    std::string head = order.Desc ? "(order desc" : "(order asc";
+    head += NullOrderName(order.NullOrder);
     out << head;
     p.Separator(frame.Level + 1);
-    p.PrintExpr(item->Expr, frame.AllowTypeWrap, frame.Level + 1);
+    p.PrintExpr(key, frame.AllowTypeWrap, frame.Level + 1);
     out << ')';
 }
 
 void PrintWindowSpec(
-    const TSqlPtr<TSqlWindowSpec>& spec,
+    const TWindowExpr& window,
     NCore::TPrinter& p,
     NCore::TPrintFrame frame)
 {
     auto& out = p.GetOut();
     out << "(over";
-    if (spec) {
-        if (spec->PartitionBy) {
-            p.Separator(frame.Level + 1);
-            out << "(partition-by";
-            p.Separator(frame.Level + 2);
-            p.PrintExpr(spec->PartitionBy, frame.AllowTypeWrap, frame.Level + 2);
-            out << ')';
-        }
-        if (spec->OrderBy) {
-            p.Separator(frame.Level + 1);
-            out << "(order-by";
-            for (const auto& item : spec->OrderBy->Items) {
-                p.Separator(frame.Level + 2);
-                PrintWindowOrderItem(item, p, {frame.AllowTypeWrap, frame.Level + 2});
-            }
-            out << ')';
-        }
-        if (spec->Frame) {
-            p.Separator(frame.Level + 1);
-            PrintWindowFrame(spec->Frame, p, {frame.AllowTypeWrap, frame.Level + 1});
-        }
+    if (auto partitionBy = window.PartitionBy()) {
+        p.Separator(frame.Level + 1);
+        out << "(partition-by";
+        p.Separator(frame.Level + 2);
+        p.PrintExpr(partitionBy, frame.AllowTypeWrap, frame.Level + 2);
+        out << ')';
     }
+    if (!window.Order.empty()) {
+        p.Separator(frame.Level + 1);
+        out << "(order-by";
+        const auto keys = window.OrderKeys();
+        for (size_t i = 0; i < keys.size(); ++i) {
+            p.Separator(frame.Level + 2);
+            PrintWindowOrderItem(window.Order[i], keys[i], p, {frame.AllowTypeWrap, frame.Level + 2});
+        }
+        out << ')';
+    }
+    p.Separator(frame.Level + 1);
+    PrintWindowFrame(window, p, {frame.AllowTypeWrap, frame.Level + 1});
     out << ')';
 }
 
@@ -149,9 +141,9 @@ void PrintWindowExpr(
     auto& out = p.GetOut();
     out << "(window";
     p.Separator(frame.Level + 1);
-    p.PrintExpr(window.Expr, frame.AllowTypeWrap, frame.Level + 1);
+    p.PrintExpr(window.Expr(), frame.AllowTypeWrap, frame.Level + 1);
     p.Separator(frame.Level + 1);
-    PrintWindowSpec(window.WindowSpec, p, {frame.AllowTypeWrap, frame.Level + 1});
+    PrintWindowSpec(window, p, {frame.AllowTypeWrap, frame.Level + 1});
     out << ')';
 }
 

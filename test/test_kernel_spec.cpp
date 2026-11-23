@@ -402,10 +402,10 @@ TEST(OzFunBuilder, BuildsFunctionDeclaration) {
     EXPECT_EQ(fun.Cast()->Params[0]->Name, "value");
     EXPECT_EQ(fun.Cast()->Params[0]->Type, i64);
     EXPECT_EQ(fun.Cast()->RetType, i64);
-    ASSERT_NE(fun.Cast()->Body, nullptr);
-    ASSERT_EQ(fun.Cast()->Body->Stmts.size(), 1u);
+    ASSERT_NE(fun.Cast()->Body(), nullptr);
+    ASSERT_EQ(fun.Cast()->Body()->Stmts.size(), 1u);
 
-    auto ret = TMaybeNode<TReturnExpr>(fun.Cast()->Body->Stmts[0]);
+    auto ret = TMaybeNode<TReturnExpr>(fun.Cast()->Body()->Stmts[0]);
     ASSERT_TRUE(ret);
     auto ident = TMaybeNode<TIdentExpr>(ret.Cast()->Value);
     ASSERT_TRUE(ident);

@@ -110,11 +110,9 @@ NQumir::TIntrusivePtr<TAggregateOperator> FindAggregate(const TOperatorPtr& op) 
     if (auto aggregate = TMaybeOp<TAggregateOperator>(op)) {
         return aggregate.Cast();
     }
-    for (const auto& child : op->Children()) {
-        if (auto childOp = TMaybeNode<IOperator>(child)) {
-            if (auto aggregate = FindAggregate(TOperatorPtr(childOp.Cast()))) {
-                return aggregate;
-            }
+    for (const auto& child : op->Inputs()) {
+        if (auto aggregate = FindAggregate(child)) {
+            return aggregate;
         }
     }
     return nullptr;

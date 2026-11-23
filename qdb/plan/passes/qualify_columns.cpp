@@ -106,8 +106,8 @@ void QualifyExpr(TExprPtr& expr, const TStructType& schema) {
         ident.Cast()->Name = QualifyIdent(schema, ident.Cast()->Name);
         return;
     }
-    for (TExprPtr* child : expr->MutableChildren()) {
-        QualifyExpr(*child, schema);
+    for (auto& child : expr->MutableChildren()) {
+        QualifyExpr(child, schema);
     }
 }
 

@@ -123,11 +123,9 @@ std::vector<NQumir::TIntrusivePtr<TJoinOperator>> Joins(const TOperatorPtr& root
     if (auto join = TMaybeOp<TJoinOperator>(root)) {
         result.push_back(join.Cast());
     }
-    for (const auto& child : root->Children()) {
-        if (auto op = TMaybeNode<IOperator>(child)) {
-            auto joins = Joins(TOperatorPtr(op.Cast()));
-            result.insert(result.end(), joins.begin(), joins.end());
-        }
+    for (const auto& child : root->Inputs()) {
+        auto joins = Joins(child);
+        result.insert(result.end(), joins.begin(), joins.end());
     }
     return result;
 }
