@@ -286,7 +286,6 @@ public:
         , Diagnostics_(diagnostics)
         , KernelSink_(kernelSink)
         , Annotation_(annotation)
-        , ExternalCatalog_(annotation ? annotation->ExternalCatalog : nullptr)
         , RuntimeFilterBindings_(std::move(filterBindings))
         , RuntimeContext_(std::make_shared<TRuntimeContext>())
         , TaskContext_{.Runtime = RuntimeContext_}
@@ -2800,7 +2799,6 @@ private:
     std::ostream* Diagnostics_;
     std::vector<TGeneratedKernel>* KernelSink_ = nullptr;
     const NKernel::TAnnotationContext* Annotation_ = nullptr;
-    std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog_;
     std::shared_ptr<IRuntimeFilterBindingFactory> RuntimeFilterBindings_;
     std::shared_ptr<TRuntimeContext> RuntimeContext_;
     // Slots follow KernelSink_; Tables reuses the plan's opened tables.
