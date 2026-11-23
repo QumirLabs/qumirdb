@@ -307,7 +307,7 @@ TEST_F(CompileJoin, ProducesWorkingInnerJoinKernels) {
     const auto& leftType = *TestTypes().MakeStruct({{"lv", i64()}, {"lk", i64()}});
     const auto& rightType = *TestTypes().MakeStruct({{"rv", i64()}, {"rk", i64()}});
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     auto kernels = compiler.CompileJoin(spec);
 
@@ -394,7 +394,7 @@ TEST_F(CompileJoin, NormalizesNullableResidualIfBranch) {
         EJoinType::Inner,
         ParseExpr("(> (if (< lv (: 10.0 f64)) lv rv) (: 0.0 f64))"));
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto kernels = compiler.CompileJoin(spec);
     EXPECT_TRUE(static_cast<bool>(kernels.Dispatch));
 }
@@ -406,7 +406,7 @@ TEST_F(CompileJoin, RejectsGeneralOuterFinalizationWithResidual) {
     };
     const auto& leftType = *TestTypes().MakeStruct({{"lk", i64()}, {"lv", i64()}});
     const auto& rightType = *TestTypes().MakeStruct({{"rk", i64()}, {"rv", i64()}});
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
 
     for (auto type : {EJoinType::Left, EJoinType::Right}) {
         SCOPED_TRACE(static_cast<int>(type));
@@ -461,7 +461,7 @@ TEST_F(CompileJoinHash, ProducesMatchingSideHashes) {
     const auto& leftType = *TestTypes().MakeStruct({{"lk", i64()}, {"lv", i64()}});
     const auto& rightType = *TestTypes().MakeStruct({{"rv", i64()}, {"rk", i64()}});
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     auto kernels = compiler.CompileJoinHash(spec);
 
@@ -512,7 +512,7 @@ TEST_F(CompileJoinHash, F32KeyCanonicalizesZeroAndNaN) {
     const auto& leftType = *TestTypes().MakeStruct({{"lf", f32()}, {"li", i32()}, {"ll", i64()}});
     const auto& rightType = *TestTypes().MakeStruct({{"rf", f32()}, {"ri", i32()}, {"rl", i64()}});
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto spec = NKernel::BuildJoinKernelSpec(TestTypes(),
         leftType, rightType, {{"lf", "rf"}, {"li", "ri"}, {"ll", "rl"}}, EJoinType::Inner);
     auto kernels = compiler.CompileJoinHash(spec);
@@ -556,7 +556,7 @@ TEST_F(CompileJoin, F32KeyMatchesSignedZeroAndNaN) {
     const auto& leftType = *TestTypes().MakeStruct({{"lv", i64()}, {"lk", f32()}});
     const auto& rightType = *TestTypes().MakeStruct({{"rv", i64()}, {"rk", f32()}});
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     auto kernels = compiler.CompileJoin(spec);
 
@@ -627,7 +627,7 @@ protected:
         const auto& leftType = *TestTypes().MakeStruct({{"lk", i64()}});
         const auto& rightType = *TestTypes().MakeStruct({{"rk", i64()}});
         Spec_ = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
-        Hash_ = TKernelCompiler({.Types = SharedTestTypes()}).CompileJoinHash(Spec_);
+        Hash_ = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileJoinHash(Spec_);
     }
 
     // Hashes the side with its own kernel and attaches the result to the batch.
@@ -686,7 +686,7 @@ TEST_F(JoinKeyHash, JoinWithPrecomputedHashesSkipsUnselectedRows) {
     Prepare(right, Hash_.Right);
 
     Spec_.HasPrecomputedHash = true;
-    auto kernels = TKernelCompiler({.Types = SharedTestTypes()}).CompileJoin(Spec_);
+    auto kernels = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileJoin(Spec_);
     THashTable leftTable{}, rightTable{};
     TPairBuffer pairs{};
     ASSERT_TRUE(kernels.Dispatch(
@@ -736,7 +736,7 @@ TEST_F(CompileJoin, ProbeOnlyStreamsWithoutInserting) {
     const auto& leftType = *TestTypes().MakeStruct({{"lk", i64()}, {"lv", i64()}});
     const auto& rightType = *TestTypes().MakeStruct({{"rk", i64()}, {"rv", i64()}});
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     auto kernels = compiler.CompileJoin(spec);
 
@@ -849,7 +849,7 @@ TEST_F(CompileJoin, AcceptsStringKeyAndRejectsUnsupportedSpecs) {
     auto i64 = [] {
         return TestTypes().MakeInteger(TIntegerType::I64);
     };
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
 
     const auto& strLeft = *TestTypes().MakeStruct({{"lk", TestTypes().Make<TStringType>()}});
     const auto& strRight = *TestTypes().MakeStruct({{"rk", TestTypes().Make<TStringType>()}});
@@ -1172,7 +1172,7 @@ TEST_F(JoinMaterialize, GathersFixedAndStringColumnsWithNullPadding) {
     const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}, {"lname", TestTypes().Make<TStringType>()}});
     const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}, {"rv", i32}});
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Left);
     auto kernels = compiler.CompileJoin(spec);
 
@@ -1264,7 +1264,7 @@ TEST_F(JoinMaterialize, PropagatesSourceNullsAndReadsStreamBatches) {
     const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}, {"lv", MakeNullableType(TestTypes(), i64)}});
     const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}});
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     auto kernels = compiler.CompileJoin(spec);
 
@@ -1319,7 +1319,7 @@ TEST_F(JoinMaterialize, FullOuterPadsBothSides) {
     const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}});
     const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}});
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Full);
     auto kernels = compiler.CompileJoin(spec);
 
@@ -1377,7 +1377,7 @@ TEST_F(JoinMaterialize, SemiAntiOutputsLeftColumnsOnly) {
     const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}, {"lv", i64}});
     const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}});
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto spec =
         NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::LeftSemi);
     auto kernels = compiler.CompileJoin(spec);
@@ -1420,7 +1420,7 @@ TEST_F(JoinMaterialize, GathersBoolAndDecimalWorkers) {
     // DECIMAL(20,2) is stored in i128 (BinInt); one of p <= 18 would be a plain i64.
     const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}, {"amount", MakeDecimalType(TestTypes(), {20, 2})}});
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Left);
     auto kernels = compiler.CompileJoin(spec);
 
@@ -1474,7 +1474,7 @@ TEST_F(CompileCrossJoin, EmitsSelectedPairsAndMaterializesStringPayload) {
     const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}, {"lname", TestTypes().Make<TStringType>()}});
     const auto& rightType = *TestTypes().MakeStruct({{"rv", i64}});
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto spec = NKernel::BuildCrossJoinKernelSpec(TestTypes(), leftType, rightType);
     auto kernels = compiler.CompileCrossJoin(spec);
 
@@ -1582,7 +1582,7 @@ TCrossJoinKernels CompileResidualCrossJoin(EJoinType type) {
     auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
     const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}});
     const auto& rightType = *TestTypes().MakeStruct({{"rv", i64}});
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     return compiler.CompileCrossJoin(
         NKernel::BuildCrossJoinKernelSpec(TestTypes(), leftType, rightType, type, ParseExpr("(< lk rv)")));
 }
@@ -1677,7 +1677,7 @@ TEST_F(JoinStringKey, InnerJoinMatchesAndMaterializes) {
     const auto& leftType = *TestTypes().MakeStruct({{"lk", TestTypes().Make<TStringType>()}, {"lv", i64}});
     const auto& rightType = *TestTypes().MakeStruct({{"rk", TestTypes().Make<TStringType>()}, {"rv", i64}});
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     auto kernels = compiler.CompileJoin(spec);
 
@@ -1764,7 +1764,7 @@ TEST_F(JoinStringKey, SemiAntiClonesRightKeysAndSurvivesRehash) {
         rightKeys.push_back("key_" + std::to_string(rnd() % 20));
     }
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto spec =
         NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::LeftAnti);
     auto kernels = compiler.CompileJoin(spec);
@@ -1869,7 +1869,7 @@ TEST_F(JoinStringKey, CompositeStringIntKey) {
     const auto& leftType = *TestTypes().MakeStruct({{"lk", TestTypes().Make<TStringType>()}, {"ln", i64}, {"lv", i64}});
     const auto& rightType = *TestTypes().MakeStruct({{"rk", TestTypes().Make<TStringType>()}, {"rn", i64}, {"rv", i64}});
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto spec = NKernel::BuildJoinKernelSpec(TestTypes(),
         leftType,
         rightType,
@@ -2184,7 +2184,7 @@ TEST_F(MarkJoinKernel, NullableKeyFollowsThreeValuedIn) {
     const auto& leftType = *TestTypes().MakeStruct({{"lk", nullableI64}, {"lv", i64}});
     const auto& rightType = *TestTypes().MakeStruct({{"rk", nullableI64}});
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto kernels = compiler.CompileJoin(MarkJoinSpec(leftType, rightType, {{"lk", "rk"}}));
 
     struct TCase {
@@ -2279,7 +2279,7 @@ TEST_F(MarkJoinKernel, NonNullableCompositeKeyIsTwoValued) {
     const auto& leftType = *TestTypes().MakeStruct({{"la", i64}, {"lb", i32}, {"lv", i64}});
     const auto& rightType = *TestTypes().MakeStruct({{"rb", i32}, {"ra", i64}});
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto kernels =
         compiler.CompileJoin(MarkJoinSpec(leftType, rightType, {{"la", "ra"}, {"lb", "rb"}}));
 
@@ -2342,7 +2342,7 @@ TEST_F(MarkJoinKernel, NullableStringKeys) {
     const auto& leftType = *TestTypes().MakeStruct({{"lk", nullableString}, {"lv", i64}});
     const auto& rightType = *TestTypes().MakeStruct({{"rk", nullableString}});
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto kernels = compiler.CompileJoin(MarkJoinSpec(leftType, rightType, {{"lk", "rk"}}));
 
     // A NULL row keeps a payload that equals a key of the other side.
@@ -2411,7 +2411,7 @@ TEST_F(MarkJoinKernel, RehashSizedSidesMatchReference) {
     const auto& leftType = *TestTypes().MakeStruct({{"lk", nullableI64}, {"lv", i64}});
     const auto& rightType = *TestTypes().MakeStruct({{"rk", nullableI64}});
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto kernels = compiler.CompileJoin(MarkJoinSpec(leftType, rightType, {{"lk", "rk"}}));
 
     uint32_t seed = 2024;
@@ -2464,7 +2464,7 @@ TEST_F(MarkJoinKernel, ReadsPrecomputedLeftHashes) {
     const auto& leftType = *TestTypes().MakeStruct({{"lk", nullableI64}, {"lv", i64}});
     const auto& rightType = *TestTypes().MakeStruct({{"rk", nullableI64}});
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto spec = MarkJoinSpec(leftType, rightType, {{"lk", "rk"}});
     auto hash = compiler.CompileJoinHash(spec);
     spec.HasPrecomputedHash = true;
@@ -2507,7 +2507,7 @@ TEST_F(MarkJoinKernel, RejectsUnsupportedSpecs) {
     auto nullableI64 = MakeNullableType(TestTypes(), i64);
     const auto& leftType = *TestTypes().MakeStruct({{"lk", nullableI64}, {"ln", i64}, {"lv", i64}});
     const auto& rightType = *TestTypes().MakeStruct({{"rk", nullableI64}, {"rn", i64}});
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
 
     auto expectError = [&](const NKernel::TOperatorKernelSpec& spec, const std::string& message) {
         try {
@@ -2588,8 +2588,8 @@ std::vector<int64_t>
 FilterRows(const NQumir::NAst::TTypePtr& type, TRowSet rowSet, const std::string& predicate) {
     auto schema = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(type);
     EXPECT_TRUE(schema);
-    auto dispatch = TKernelCompiler({.Types = SharedTestTypes()}).CompileFilter(
-        NKernel::BuildFilterKernelSpec(TestTypes(), *schema.Cast(), ParseExpr(predicate)));
+    auto dispatch = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileFilter(
+        NKernel::BuildFilterKernelSpec(TestTypes(), TestAnnotation(), *schema.Cast(), ParseExpr(predicate)));
     std::vector<uint8_t> selection(rowSet.RowCount);
     rowSet.Selection = selection.data();
     dispatch(rowSet, nullptr);
@@ -2620,7 +2620,7 @@ TEST_F(MarkJoinKernel, MarkerColumnReadsBackAsDeclaredType) {
         THashTable& rightTable,
         TRowSet& out)
     {
-        auto kernels = TKernelCompiler({.Types = SharedTestTypes()}).CompileJoin(spec);
+        auto kernels = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileJoin(spec);
         TRowSet leftBatch = left;
         TRowSet rightBatch = right;
         ASSERT_TRUE(kernels.Dispatch(
@@ -2783,7 +2783,7 @@ TEST_F(RowJoinProcessor, ChainsNullKeysAndStringPayload) {
     };
     TRowSet rightBatch{.Columns = rcols.data(), .ColumnCount = 2, .RowCount = 5, .RefCount = 1};
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     TRowJoinProcessor processor(
         compiler.CompileRowJoin(spec, /*buildIsLeft=*/false),
@@ -2865,7 +2865,7 @@ std::vector<TRowSet> RunRowJoin(
     std::vector<TRowSet> leftBatches,
     std::vector<TRowSet> rightBatches)
 {
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     TRowJoinProcessor processor(
         compiler.CompileRowJoin(spec, buildSide == EJoinBuildSide::Left),
         buildSide,
@@ -2991,7 +2991,7 @@ TEST_F(RowJoinProcessor, HoldsProbeBatchesUntilTheTableIsBuilt) {
     };
     TRowSet build{.Columns = rcols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     TRowJoinProcessor processor(
         compiler.CompileRowJoin(spec, /*buildIsLeft=*/false),
@@ -3120,7 +3120,7 @@ THeldProbeRun RunHeldProbe(
         TColumn{.Data = reinterpret_cast<char*>(rv.data())},
     };
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     TRowJoinProcessor processor(
         compiler.CompileRowJoin(spec, buildLeft),
@@ -3275,7 +3275,7 @@ TEST_F(RowJoinProcessor, ReleasesHeldProbeBatchesWhenDestroyedBeforeTheBuild) {
     auto countDestroy = [](TRowSet* rs) {
         ++*static_cast<int*>(rs->Private);
     };
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     {
         TRowJoinProcessor processor(
@@ -3776,7 +3776,7 @@ TEST_F(RowJoinProcessor, RejectsJoinsItCannotStream) {
     auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
     const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}, {"lv", i64}});
     const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}, {"rv", i64}});
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto spec = [&](EJoinType type, TExprPtr residual = nullptr) {
         return NKernel::BuildJoinKernelSpec(TestTypes(),
             leftType, rightType, {{"lk", "rk"}}, type, residual);

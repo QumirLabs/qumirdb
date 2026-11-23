@@ -63,12 +63,12 @@ TOperatorPtr BuildAnnotated(const std::string& sexp, const std::map<std::string,
     auto root = NQumir::StaticPointerCast<IOperator>(*parsed);
     AssignSourceAliases(TestTypes(), root);
     QualifyColumns(TestTypes(), root);
-    AnnotateTypes(TestTypes(), root);
+    AnnotateTypes(TestTypes(), root, TestAnnotation());
     return root;
 }
 
 TOperatorPtr Optimize(const std::string& sexp, const std::map<std::string, ITable*>& tables) {
-    TConstFolder folder(TestTypes());
+    TConstFolder folder(TestTypes(), TestAnnotation());
     return ExtractEquiJoins(BuildAnnotated(sexp, tables), folder);
 }
 
@@ -210,8 +210,8 @@ TEST(EquiJoin, ExtractsKeysThroughLimitAndSort) {
         10);
 
     QualifyColumns(TestTypes(), root);
-    AnnotateTypes(TestTypes(), root);
-    TConstFolder folder(TestTypes());
+    AnnotateTypes(TestTypes(), root, TestAnnotation());
+    TConstFolder folder(TestTypes(), TestAnnotation());
     root = ExtractEquiJoins(root, folder);
 
     EXPECT_EQ(Keys(root), (TKeys{{"a.aid", "b.bid"}}));
@@ -244,8 +244,8 @@ TEST(JoinOrder, ReordersThroughLimitAndSort) {
         10);
 
     QualifyColumns(TestTypes(), root);
-    AnnotateTypes(TestTypes(), root);
-    TConstFolder folder(TestTypes());
+    AnnotateTypes(TestTypes(), root, TestAnnotation());
+    TConstFolder folder(TestTypes(), TestAnnotation());
     root = ReorderJoins(TestTypes(), root, folder);
 
     auto limit = AsLimit(root);
@@ -274,7 +274,7 @@ TEST(PushDown, SingleTableToLeafEqualityStaysAbove) {
     NQdb::TMockSource b({"bid", "bval"});
     std::map<std::string, ITable*> tables = {{"A", &a}, {"B", &b}};
 
-    TConstFolder folder(TestTypes());
+    TConstFolder folder(TestTypes(), TestAnnotation());
     auto root = PushDownPredicates(BuildAnnotated(
         "(rel filter"
         "  (rel join (rel source \"A\" \"a\") (rel source \"B\" \"b\") () (inner))"
@@ -306,7 +306,7 @@ TEST(PushDown, PartitionPredicateThroughWindow) {
     NQdb::TMockSource t({"a", "b"});
     std::map<std::string, ITable*> tables = {{"T", &t}};
 
-    TConstFolder folder(TestTypes());
+    TConstFolder folder(TestTypes(), TestAnnotation());
     auto root = PushDownPredicates(BuildAnnotated(
         "(rel filter"
         "  (rel window (rel source \"T\" \"t\") (partition a) (fn w_0 rank))"
@@ -348,7 +348,7 @@ TEST(PushDown, ProjectRewritesAndPushesPredicate) {
     NQdb::TMockSource a({"aid"});
     std::map<std::string, ITable*> tables = {{"A", &a}};
 
-    TConstFolder folder(TestTypes());
+    TConstFolder folder(TestTypes(), TestAnnotation());
     auto root = PushDownPredicates(BuildAnnotated(
         "(rel filter"
         "  (rel project (rel source \"A\" \"a\") (x aid))"
@@ -376,7 +376,7 @@ TEST(PushDown, UnionAllPrunesConstantBranch) {
     NQdb::TMockSource b({"bid"});
     std::map<std::string, ITable*> tables = {{"A", &a}, {"B", &b}};
 
-    TConstFolder folder(TestTypes());
+    TConstFolder folder(TestTypes(), TestAnnotation());
     auto root = PushDownPredicates(BuildAnnotated(
         "(rel filter"
         "  (rel union-all"
@@ -401,7 +401,7 @@ TEST(PushDown, UnionAllShrinksToMultipleSurvivingBranches) {
     NQdb::TMockSource c({"cid"});
     std::map<std::string, ITable*> tables = {{"A", &a}, {"B", &b}, {"C", &c}};
 
-    TConstFolder folder(TestTypes());
+    TConstFolder folder(TestTypes(), TestAnnotation());
     auto root = PushDownPredicates(BuildAnnotated(
         "(rel filter"
         "  (rel union-all"
@@ -432,7 +432,7 @@ TEST(PushDown, UnionAllPrunesAllBranchesToEmpty) {
     NQdb::TMockSource b({"bid"});
     std::map<std::string, ITable*> tables = {{"A", &a}, {"B", &b}};
 
-    TConstFolder folder(TestTypes());
+    TConstFolder folder(TestTypes(), TestAnnotation());
     auto root = PushDownPredicates(BuildAnnotated(
         "(rel filter"
         "  (rel union-all"

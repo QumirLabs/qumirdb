@@ -511,7 +511,7 @@ std::expected<TPositionedOutputs, TError> PositionedOutputs(
         size_t width = std::max<size_t>(projection.ColumnAliases.size(), 1);
         if (projection.ColumnAliases.empty() && !typedAbove) {
             try {
-                width = FlattenedArity(NKernel::AnnotateExprType(types, expression, schema, &annotation));
+                width = FlattenedArity(NKernel::AnnotateExprType(types, expression, schema, annotation));
             } catch (const TError& error) {
                 return std::unexpected(error);
             }
@@ -3626,9 +3626,9 @@ std::expected<TRelation, TError> BuildQuery(
 
 std::expected<TOperatorPtr, TError> BuildPlan(
     NQumir::NAst::TTypeFactory& types,
+    const NKernel::TAnnotationContext& annotation,
     const NQdb::NSql::TSqlNodePtr& query,
-    const TTableSourceFactory& sources,
-    const NKernel::TAnnotationContext& annotation)
+    const TTableSourceFactory& sources)
 {
     auto root = NSql::TMaybeNode<NSql::TSqlQuery>(query);
     if (!root) {

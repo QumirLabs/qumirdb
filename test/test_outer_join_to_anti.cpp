@@ -94,7 +94,7 @@ TOperatorPtr PlanSql(
     const std::map<std::string, ITable*> tables = {
         {"sales", &sales.Source}, {"returns", &returns.Source},
     };
-    auto plan = BuildPlan(TestTypes(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view name)
+    auto plan = BuildPlan(TestTypes(), TestAnnotation(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view name)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         return NQumir::MakeIntrusive<TSourceOperator>(types,
@@ -105,14 +105,14 @@ TOperatorPtr PlanSql(
     }
     auto root = *plan;
     if (optimize) {
-        ApplyPlanPasses(TestTypes(), root);
+        ApplyPlanPasses(TestTypes(), root, {.Annotation = TestAnnotation()});
     } else {
         AssignSourceAliases(TestTypes(), root);
         QualifyColumns(TestTypes(), root);
-        AnnotateTypes(TestTypes(), root);
-        TConstFolder folder(TestTypes());
+        AnnotateTypes(TestTypes(), root, TestAnnotation());
+        TConstFolder folder(TestTypes(), TestAnnotation());
         root = ExtractEquiJoins(root, folder);
-        AnnotateTypes(TestTypes(), root);
+        AnnotateTypes(TestTypes(), root, TestAnnotation());
         ApplyColumnPruning(TestTypes(), root);
     }
     return root;
@@ -197,7 +197,7 @@ ON s.key = r.key AND s.value = r.value
     for (auto& key : Joins(plan).front()->MutableKeys()) {
         key.NullsEqual = key.Left == "s.key";
     }
-    ApplyPlanPasses(TestTypes(), plan);
+    ApplyPlanPasses(TestTypes(), plan, {.Annotation = TestAnnotation()});
     auto join = Joins(plan).front();
     ASSERT_EQ(join->Keys().size(), 2);
     EXPECT_EQ(std::ranges::count_if(join->Keys(), [](const TJoinKey& key) {
@@ -215,7 +215,7 @@ WHERE r.key IS NULL
 )sql", sales, returns, false);
     Joins(plan).front()->MutableKeys().front().NullsEqual = true;
     EXPECT_FALSE(RewriteOuterJoinAsAnti(TestTypes(), plan));
-    ApplyPlanPasses(TestTypes(), plan);
+    ApplyPlanPasses(TestTypes(), plan, {.Annotation = TestAnnotation()});
     EXPECT_EQ(Joins(plan).front()->JoinType(), EJoinType::Left);
     EXPECT_EQ(RunValues(plan, Settings()), (std::vector<int64_t>{20, 20}));
 }

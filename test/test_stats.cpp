@@ -39,6 +39,12 @@ using TColumnStats = NQdb::TStats::TColumnStats;
 
 namespace {
 
+// The estimates of `plan`, with a folder of their own, as one query has.
+NQdb::TStatsPtr Estimate(NQdb::TOperatorPtr plan) {
+    NQdb::TConstFolder folder(NQdb::TestTypes(), NQdb::TestAnnotation());
+    return NQdb::EstimateStats(std::move(plan), folder);
+}
+
 // Build a histogram (raw uint64 bit patterns) from typed boundary values.
 template<typename T>
 std::vector<uint64_t> Hist(std::initializer_list<T> values) {
@@ -227,16 +233,16 @@ TEST(StatsTest, ParquetRowGroupPredicateUsesPerGroupBounds) {
 
     auto filter = NQdb::MakeFilter(NQdb::TestTypes(), sourceOp, "(> x 50)");
     ASSERT_TRUE(filter.has_value()) << filter.error().ToString();
-    NQdb::AnnotateTypes(NQdb::TestTypes(), *filter);
+    NQdb::AnnotateTypes(NQdb::TestTypes(), *filter, NQdb::TestAnnotation());
     auto typedFilter = NQdb::TMaybeOp<NQdb::TFilterOperator>(*filter).Cast();
-    const auto annotation = NQdb::NKernel::MakeAnnotationContext(NQdb::TestTypes(), nullptr);
+    const auto annotation = NQdb::TestAnnotation();
     auto kept = source.PruneRowGroups(NQdb::TestTypes(), typedFilter->Predicate(), "", annotation);
     ASSERT_EQ(kept.size(), 1u);
     EXPECT_EQ(kept[0].RowGroup, 1u);
 
     auto sparse = NQdb::MakeFilter(NQdb::TestTypes(), sourceOp, "(< x 10)");
     ASSERT_TRUE(sparse.has_value()) << sparse.error().ToString();
-    NQdb::AnnotateTypes(NQdb::TestTypes(), *sparse);
+    NQdb::AnnotateTypes(NQdb::TestTypes(), *sparse, NQdb::TestAnnotation());
     auto sparseFilter = NQdb::TMaybeOp<NQdb::TFilterOperator>(*sparse).Cast();
     auto sparseGroups = source.PruneRowGroups(NQdb::TestTypes(), sparseFilter->Predicate(), "", annotation);
     ASSERT_EQ(sparseGroups.size(), 2u);
@@ -245,7 +251,7 @@ TEST(StatsTest, ParquetRowGroupPredicateUsesPerGroupBounds) {
 
     auto impossible = NQdb::MakeFilter(NQdb::TestTypes(), sourceOp, "(> x 200)");
     ASSERT_TRUE(impossible.has_value()) << impossible.error().ToString();
-    NQdb::AnnotateTypes(NQdb::TestTypes(), *impossible);
+    NQdb::AnnotateTypes(NQdb::TestTypes(), *impossible, NQdb::TestAnnotation());
     auto impossibleFilter =
         NQdb::TMaybeOp<NQdb::TFilterOperator>(*impossible).Cast();
     EXPECT_TRUE(source.PruneRowGroups(
@@ -313,7 +319,7 @@ TEST(StatsTest, FilterSelectivityPropagation) {
     ASSERT_TRUE(filter.has_value()) << filter.error().ToString();
     plan = *filter;
 
-    NQdb::ApplyPlanPasses(NQdb::TestTypes(), plan);
+    NQdb::ApplyPlanPasses(NQdb::TestTypes(), plan, {.Annotation = NQdb::TestAnnotation()});
 
     ASSERT_TRUE(plan->Stats_ != nullptr) << "filter got no propagated stats";
     // x < 250 over uniform [0,1000) => ~25% of 1000 rows.
@@ -346,8 +352,8 @@ protected:
         }
         NQdb::AssignSourceAliases(NQdb::TestTypes(), plan);
         NQdb::QualifyColumns(NQdb::TestTypes(), plan);
-        NQdb::AnnotateTypes(NQdb::TestTypes(), plan);
-        return NQdb::EstimateStats(NQdb::TestTypes(), plan)->RowCount;
+        NQdb::AnnotateTypes(NQdb::TestTypes(), plan, NQdb::TestAnnotation());
+        return Estimate(plan)->RowCount;
     }
 
     TStatsSource Src{{{"x", 100}, {"n", 100}}, 1000};
@@ -379,7 +385,7 @@ TEST(StatsTest, AggregateStatsAccountForGroupingSets) {
         std::vector<NQdb::TAggregateSpec>{});
     aggregate->MutableGroupingSets() = {{0}, {1}};
 
-    auto stats = NQdb::EstimateStats(NQdb::TestTypes(), aggregate);
+    auto stats = Estimate(aggregate);
 
     ASSERT_TRUE(stats);
     EXPECT_EQ(stats->RowCount, 200u);
@@ -633,7 +639,7 @@ TEST(StatsTest, RowGroupHintCollectsNestedFilterChain) {
     auto outer = NQdb::MakeFilter(NQdb::TestTypes(), *inner, "(< x 20)");
     ASSERT_TRUE(outer.has_value()) << outer.error().ToString();
 
-    NQdb::AnnotateTypes(NQdb::TestTypes(), *outer);
+    NQdb::AnnotateTypes(NQdb::TestTypes(), *outer, NQdb::TestAnnotation());
     NQdb::AttachRowGroupPredicates(*outer);
 
     ASSERT_TRUE(source->RowGroupPredicate());
@@ -654,7 +660,7 @@ TEST(StatsTest, ProjectStatsPropagation) {
     ASSERT_TRUE(project.has_value()) << project.error().ToString();
     plan = *project;
 
-    NQdb::ApplyPlanPasses(NQdb::TestTypes(), plan);
+    NQdb::ApplyPlanPasses(NQdb::TestTypes(), plan, {.Annotation = NQdb::TestAnnotation()});
 
     ASSERT_TRUE(plan->Stats_ != nullptr) << "project got no propagated stats";
     // Project drops no rows: output row count == input row count.
@@ -683,7 +689,7 @@ TEST(StatsTest, JoinKeyNdvCollapse) {
     ASSERT_TRUE(join.has_value()) << join.error().ToString();
     NQdb::TOperatorPtr plan = *join;
 
-    NQdb::ApplyPlanPasses(NQdb::TestTypes(), plan);
+    NQdb::ApplyPlanPasses(NQdb::TestTypes(), plan, {.Annotation = NQdb::TestAnnotation()});
 
     ASSERT_TRUE(plan->Stats_ != nullptr) << "join got no propagated stats";
     const auto& cols = plan->Stats_->ColumnStats;
@@ -733,7 +739,7 @@ protected:
         auto join = NQdb::MakeJoin(NQdb::TestTypes(), dimension, fact, {{"x", "k"}}, NQdb::EJoinType::Inner);
         EXPECT_TRUE(join.has_value()) << join.error().ToString();
         NQdb::TOperatorPtr plan = *join;
-        NQdb::ApplyPlanPasses(NQdb::TestTypes(), plan);
+        NQdb::ApplyPlanPasses(NQdb::TestTypes(), plan, {.Annotation = NQdb::TestAnnotation()});
         return plan->Stats_;
     }
 
@@ -789,8 +795,8 @@ TEST_F(SharedKeyRangeStats, SelectedKeysAreNotSpreadByTheBaseHistogram) {
     NQdb::TOperatorPtr plan = *join;
     NQdb::AssignSourceAliases(NQdb::TestTypes(), plan);
     NQdb::QualifyColumns(NQdb::TestTypes(), plan);
-    NQdb::AnnotateTypes(NQdb::TestTypes(), plan);
-    auto stats = NQdb::EstimateStats(NQdb::TestTypes(), plan);
+    NQdb::AnnotateTypes(NQdb::TestTypes(), plan, NQdb::TestAnnotation());
+    auto stats = Estimate(plan);
     ASSERT_TRUE(stats);
     const double selectedRows = static_cast<double>((*selected)->Stats_->RowCount);
     EXPECT_NEAR(selectedRows, 10.0, 1.0);
@@ -812,10 +818,10 @@ TEST_F(SharedKeyRangeStats, JoinOrderEstimatesKeysAnotherJoinSelected) {
     for (auto& leaf : leaves) {
         NQdb::AssignSourceAliases(NQdb::TestTypes(), leaf);
         NQdb::QualifyColumns(NQdb::TestTypes(), leaf);
-        NQdb::AnnotateTypes(NQdb::TestTypes(), leaf);
-        NQdb::EstimateStats(NQdb::TestTypes(), leaf);
+        NQdb::AnnotateTypes(NQdb::TestTypes(), leaf, NQdb::TestAnnotation());
+        Estimate(leaf);
     }
-    NQdb::TConstFolder folder(NQdb::TestTypes());
+    NQdb::TConstFolder folder(NQdb::TestTypes(), NQdb::TestAnnotation());
     auto tree = NQdb::NCbo::DpccpJoinOrder(
         NQdb::TestTypes(), leaves, {{"d.y", "s.z"}, {"d.x", "f.k"}}, {}, folder);
     ASSERT_TRUE(tree && tree->Stats_);
@@ -860,8 +866,8 @@ uint64_t CompositeKeyJoinRows(TKeyedRelation& left, TKeyedRelation& right) {
     NQdb::TOperatorPtr plan = *join;
     NQdb::AssignSourceAliases(NQdb::TestTypes(), plan);
     NQdb::QualifyColumns(NQdb::TestTypes(), plan);
-    NQdb::AnnotateTypes(NQdb::TestTypes(), plan);
-    return NQdb::EstimateStats(NQdb::TestTypes(), plan)->RowCount;
+    NQdb::AnnotateTypes(NQdb::TestTypes(), plan, NQdb::TestAnnotation());
+    return Estimate(plan)->RowCount;
 }
 
 } // namespace
@@ -909,7 +915,7 @@ protected:
     uint64_t Rows(const std::string& predicate) {
         auto filter = NQdb::MakeFilter(NQdb::TestTypes(), Source, predicate);
         EXPECT_TRUE(filter.has_value()) << filter.error().ToString();
-        return NQdb::EstimateStats(NQdb::TestTypes(), *filter)->RowCount;
+        return Estimate(*filter)->RowCount;
     }
 
     TStatsSource Src{{{"x", 100}, {"n", 100}, {"f", 100}, {"g", 100}}, 1000};
@@ -945,7 +951,7 @@ TEST_F(SelfEqualityStats, GroupEstimateIsNotCappedBySelfEquality) {
     NQdb::TOperatorPtr plan = NQumir::MakeIntrusive<NQdb::TAggregateOperator>(NQdb::TestTypes(),
         *filter, std::vector<std::string>{"x"}, std::vector<NQdb::TAggregateSpec>{});
 
-    NQdb::ApplyPlanPasses(NQdb::TestTypes(), plan);
+    NQdb::ApplyPlanPasses(NQdb::TestTypes(), plan, {.Annotation = NQdb::TestAnnotation()});
 
     ASSERT_TRUE(plan->Stats_);
     EXPECT_EQ(plan->Stats_->RowCount, 100u); // one group per distinct x

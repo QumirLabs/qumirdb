@@ -41,7 +41,7 @@ std::expected<TOperatorPtr, NQumir::TError> BuildSqlPlan(
         }
         return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(*it->second), std::string(table));
     };
-    return BuildPlan(TestTypes(), parsed.value(), factory);
+    return BuildPlan(TestTypes(), TestAnnotation(), parsed.value(), factory);
 }
 
 const TWindowOperator* FindWindow(const IOperator* op) {
@@ -164,7 +164,7 @@ TEST(WindowPlan, FullPipelineOverJoin) {
 
     // Full pipeline must run through the window (join reorder + equi-key
     // extraction + column pruning all recurse into the window's child).
-    ApplyPlanPasses(TestTypes(), *plan);
+    ApplyPlanPasses(TestTypes(), *plan, {.Annotation = TestAnnotation()});
 
     EXPECT_EQ(CountWindows(plan->Get()), 1);
     // The join equality below the window was lifted into a join key.
@@ -214,7 +214,7 @@ TEST(WindowPlan, HavingScalarSubqueryIgnoresFunctionCalleeForCorrelation) {
         ") v",
         tables);
     ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
-    ApplyPlanPasses(TestTypes(), *plan);
+    ApplyPlanPasses(TestTypes(), *plan, {.Annotation = TestAnnotation()});
 
     auto* window = FindWindow(plan->Get());
     ASSERT_NE(window, nullptr);
@@ -240,7 +240,7 @@ TEST(WindowPlan, ColumnListAliasesSurviveTyping) {
     }) {
         auto plan = BuildSqlPlan(sql, tables);
         ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
-        ApplyPlanPasses(TestTypes(), *plan);
+        ApplyPlanPasses(TestTypes(), *plan, {.Annotation = TestAnnotation()});
         auto* output = static_cast<const NQumir::NAst::TStructType*>(
             (*plan)->OutputColumns());
         ASSERT_NE(output, nullptr);

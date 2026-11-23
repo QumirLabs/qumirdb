@@ -16,13 +16,13 @@ namespace NQdb {
 void AnnotateTypes(
     NQumir::NAst::TTypeFactory& types,
     const TOperatorPtr& root,
-    const NKernel::TAnnotationContext& context = {});
+    const NKernel::TAnnotationContext& context);
 
 // Applies the same type rules to one node whose inputs are already typed.
 void AnnotateOperatorType(
     NQumir::NAst::TTypeFactory& types,
     const TOperatorPtr& root,
-    const NKernel::TAnnotationContext& context = {});
+    const NKernel::TAnnotationContext& context);
 
 // Inserts cast projections on UNION ALL branches so every branch produces the unified
 // column layout. Run after AnnotateTypes (needs the union's unified output type), then
@@ -30,7 +30,7 @@ void AnnotateOperatorType(
 void CoerceSetOpBranches(
     NQumir::NAst::TTypeFactory& types,
     const TOperatorPtr& root,
-    const NKernel::TAnnotationContext& context = {});
+    const NKernel::TAnnotationContext& context);
 
 // Equi-join keys compare equal bytes, so INTEGER = BIGINT or DECIMAL(10,2) = DECIMAL(10,3)
 // cannot share a key. Casts the narrower key of each join to the common integer or

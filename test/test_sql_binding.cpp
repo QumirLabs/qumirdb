@@ -24,7 +24,7 @@ namespace {
 std::expected<TOperatorPtr, NQumir::TError> Build(
     std::string_view text,
     TMockSource& source,
-    const NKernel::TAnnotationContext& annotation = {})
+    const NKernel::TAnnotationContext& annotation = TestAnnotation())
 {
     std::istringstream input{std::string(text)};
     NSql::TTokenStream tokens(input);
@@ -33,11 +33,11 @@ std::expected<TOperatorPtr, NQumir::TError> Build(
     if (!query) {
         return std::unexpected(query.error());
     }
-    return BuildPlan(TestTypes(), *query, [&](NQumir::NAst::TTypeFactory& types, std::string_view name)
+    return BuildPlan(TestTypes(), annotation, *query, [&](NQumir::NAst::TTypeFactory& types, std::string_view name)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(name));
-    }, annotation);
+    });
 }
 
 } // namespace
@@ -127,7 +127,7 @@ TEST(SqlBinding, RepeatedLabelsSortByInputExpression) {
     TMockSource source(TMockColumns{}, {{"x", i64}, {"y", i64}});
     auto plan = Build("SELECT x AS a, y AS a FROM t ORDER BY y", source);
     ASSERT_TRUE(plan) << plan.error().ToString();
-    ApplyPlanPasses(TestTypes(), *plan);
+    ApplyPlanPasses(TestTypes(), *plan, {.Annotation = TestAnnotation()});
     auto output = TMaybeOp<TProjectOperator>(*plan);
     ASSERT_TRUE(output);
     auto sorted = output.Cast()->Input();
@@ -160,7 +160,7 @@ TEST(SqlPositions, StructItemsCountTheirFields) {
     ASSERT_TRUE(catalog.Apply(TestTypes(), *NSql::TMaybeNode<NSql::TSqlExternalModule>((*statements)[0]).Cast()));
     ASSERT_TRUE(catalog.Apply(*NSql::TMaybeNode<NSql::TSqlExternalFunction>((*statements)[1]).Cast()));
     const auto annotation = NKernel::MakeAnnotationContext(
-        TestTypes(), catalog.Snapshot(SharedTestTypes()));
+        TestTypes(), TestModuleBase(), catalog.Snapshot(SharedTestTypes()));
     auto f64 = TestTypes().MakeFloat();
     TMockSource source(TMockColumns{}, {{"x", f64}, {"y", f64}});
 

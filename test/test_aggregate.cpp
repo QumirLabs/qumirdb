@@ -78,7 +78,7 @@ TOperatorPtr ParsePlan(const std::string& sexp, ITable& source) {
     }
 
     auto root = NQumir::StaticPointerCast<IOperator>(result.value());
-    AnnotateTypes(TestTypes(), root);
+    AnnotateTypes(TestTypes(), root, TestAnnotation());
     ApplyColumnPruning(TestTypes(), root);
     return root;
 }
@@ -91,7 +91,7 @@ TOperatorPtr BuildSqlPlan(const std::string& sql, const TTableSourceFactory& sou
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
     }
-    auto plan = BuildPlan(TestTypes(), *parsed, sources);
+    auto plan = BuildPlan(TestTypes(), TestAnnotation(), *parsed, sources);
     if (!plan) {
         throw std::runtime_error(plan.error().ToString());
     }
@@ -259,7 +259,7 @@ TEST(AggregateE2E, GlobalIdentitySurvivesParallelCascade) {
                         : right;
                     return NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), std::string(table));
                 });
-                ApplyPlanPasses(TestTypes(), root);
+                ApplyPlanPasses(TestTypes(), root, {.Annotation = TestAnnotation()});
                 NScheduler::TSettings settings;
                 settings.Scheduler.WorkerCount = 2;
                 settings.Aggregate.CascadeGlobal = cascade
@@ -304,7 +304,7 @@ TEST(AggregateE2E, AutoCascadeFollowsTheParquetEstimate) {
     for (const uint64_t bound : {rows, rows + 1}) {
         SCOPED_TRACE(::testing::Message() << "partial_min_input_rows=" << bound);
         auto root = BuildSqlPlan("SELECT COUNT(*), SUM(v), MIN(v), MAX(v) FROM t", source);
-        ApplyPlanPasses(TestTypes(), root);
+        ApplyPlanPasses(TestTypes(), root, {.Annotation = TestAnnotation()});
         auto aggregate = FindAggregate(root);
         ASSERT_NE(aggregate, nullptr);
         ASSERT_TRUE(aggregate->Input()->Stats_);
@@ -317,7 +317,7 @@ TEST(AggregateE2E, AutoCascadeFollowsTheParquetEstimate) {
         settings.Aggregate.PartialMinInputRows = bound;
         ASSERT_EQ(settings.Aggregate.CascadeGlobal, NScheduler::EGlobalCascadeMode::Auto);
 
-        auto lowered = NScheduler::LowerPlanToGraph(root, SharedTestTypes(), settings, nullptr);
+        auto lowered = NScheduler::LowerPlanToGraph(root, SharedTestTypes(), settings, nullptr, TestAnnotation());
         EXPECT_EQ(std::ranges::count_if(lowered.Graph->Nodes(),
             [](const auto& node) { return node->DebugKind == "source"; }), 4);
         std::vector<EAggregatePhase> phases;
@@ -379,9 +379,9 @@ TEST(AggregateE2E, PartialAggregateProcessorJudgesItsReduction) {
         .Name = "v", .Func = "sum",
         .Arg = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "v"),
     }};
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     const auto kernels = compiler.CompileAggregate(
-        NKernel::BuildAggregateKernelSpec(TestTypes(), input, {"k"}, aggs));
+        NKernel::BuildAggregateKernelSpec(TestTypes(), TestAnnotation(), input, {"k"}, aggs));
     // The partial state of one row, (k, sum v), is the row itself.
     const TUnaryStreamProcess identity = [](TRowSet&, TUnaryStreamingKernelState&) {};
 
@@ -582,7 +582,7 @@ TEST(AggregateE2E, PartialAggregateModesAgree) {
                 ITable& source = table == "l" ? left : right;
                 return NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), std::string(table));
             });
-        ApplyPlanPasses(TestTypes(), root);
+        ApplyPlanPasses(TestTypes(), root, {.Annotation = TestAnnotation()});
         NScheduler::TSettings settings;
         settings.Scheduler.WorkerCount = 2;
         settings.Aggregate.EnablePartial = mode.Partial;
@@ -644,7 +644,7 @@ TEST(AggregateE2E, EmptyExplicitGroupsHaveNoIdentityRow) {
             TMockSource source({"v"});
             auto root = BuildSqlPlan(sql, source);
             ASSERT_FALSE(FindAggregate(root)->IsGlobal());
-            ApplyPlanPasses(TestTypes(), root);
+            ApplyPlanPasses(TestTypes(), root, {.Annotation = TestAnnotation()});
             NScheduler::TSettings settings;
             settings.Scheduler.WorkerCount = 2;
             settings.Aggregate.CascadeGlobal = cascade
@@ -1955,9 +1955,9 @@ TEST(AggregateE2E, CompilesNullableReducerArgumentWithUnwrappedAstType) {
         .Func = "sum",
         .Arg = NQumir::MakeIntrusive<TIdentExpr>(loc, "v"),
     }};
-    auto spec = NQdb::NKernel::BuildAggregateKernelSpec(TestTypes(), inputType, {"k"}, aggs);
+    auto spec = NQdb::NKernel::BuildAggregateKernelSpec(TestTypes(), TestAnnotation(), inputType, {"k"}, aggs);
     EXPECT_NO_THROW(
-        NQdb::TKernelCompiler({.Types = SharedTestTypes()}).CompileAggregate(spec));
+        NQdb::TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileAggregate(spec));
 }
 
 // CompileAggregateHash uses the same rh_hash generator as the aggregate's table.
@@ -1966,7 +1966,7 @@ TEST(AggregateE2E, CompileAggregateHashMatchesEqualCompositeKeys) {
         {"k1", TestTypes().MakeInteger()},
         {"k2", TestTypes().MakeInteger()},
     });
-    auto hash = NQdb::TKernelCompiler({.Types = SharedTestTypes()}).CompileAggregateHash(inputType, {"k1", "k2"});
+    auto hash = NQdb::TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileAggregateHash(inputType, {"k1", "k2"});
 
     std::vector<int64_t> k1 = {1, 2, 1, 1};
     std::vector<int64_t> k2 = {10, 10, 10, 99};
@@ -1994,7 +1994,7 @@ TEST(AggregateE2E, CompileAggregateHashDistinguishesNullFromValue) {
         {"k", TestTypes().MakeInteger()},
         {"v", MakeNullableType(TestTypes(), TestTypes().MakeInteger())},
     });
-    auto hash = NQdb::TKernelCompiler({.Types = SharedTestTypes()}).CompileAggregateHash(inputType, {"k", "v"});
+    auto hash = NQdb::TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileAggregateHash(inputType, {"k", "v"});
 
     std::vector<int64_t> k = {1, 1};
     std::vector<int64_t> v = {5, 5};
@@ -2028,8 +2028,8 @@ TEST(AggregateE2E, RejectsUnsupportedStringReducer) {
         .Func = "sum",
         .Arg = NQumir::MakeIntrusive<TIdentExpr>(loc, "v"),
     }};
-    auto spec = NQdb::NKernel::BuildAggregateKernelSpec(TestTypes(), inputType, {"k"}, aggs);
-    EXPECT_THROW(NQdb::TKernelCompiler({.Types = SharedTestTypes()}).CompileAggregate(spec), NQumir::TError);
+    auto spec = NQdb::NKernel::BuildAggregateKernelSpec(TestTypes(), TestAnnotation(), inputType, {"k"}, aggs);
+    EXPECT_THROW(NQdb::TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileAggregate(spec), NQumir::TError);
 }
 
 // M13.8: a nullable reducer argument must distinguish count(*) (every row) from
@@ -2433,9 +2433,9 @@ void CheckAggregateStatesAcrossRepeatedGrowth(bool stringKeys) {
         .Name = "s", .Func = "sum",
         .Arg = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "v"),
     }};
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     TAggregateProcessor processor(compiler.CompileAggregate(
-        NKernel::BuildAggregateKernelSpec(TestTypes(), input, {"k"}, aggs)), {.InitialCapacity = 8});
+        NKernel::BuildAggregateKernelSpec(TestTypes(), TestAnnotation(), input, {"k"}, aggs)), {.InitialCapacity = 8});
     std::map<int64_t, int64_t> expected;
     std::vector<int64_t> insertionOrder;
     // Interleave inserts with updates across enough batches to grow repeatedly.
@@ -2523,9 +2523,9 @@ TEST(AggregateE2E, NullableFloatAndWideStatesSurviveRepeatedGrowth) {
             add(std::string(column) + func, func, column);
         }
     }
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     TAggregateProcessor processor(compiler.CompileAggregate(
-        NKernel::BuildAggregateKernelSpec(TestTypes(), input, {"k"}, aggs)), {.InitialCapacity = 8});
+        NKernel::BuildAggregateKernelSpec(TestTypes(), TestAnnotation(), input, {"k"}, aggs)), {.InitialCapacity = 8});
     struct TReference {
         int64_t Count = 0;
         int64_t ValidCount = 0;
@@ -2633,9 +2633,9 @@ TEST(AggregateE2E, MixedStringAndNumericReducersSurviveRepeatedGrowth) {
         {.Name = "min", .Func = "min", .Arg = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "s")},
         {.Name = "max", .Func = "max", .Arg = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "s")},
     };
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     TAggregateProcessor processor(compiler.CompileAggregate(
-        NKernel::BuildAggregateKernelSpec(TestTypes(), input, {"k"}, aggs)), {.InitialCapacity = 8});
+        NKernel::BuildAggregateKernelSpec(TestTypes(), TestAnnotation(), input, {"k"}, aggs)), {.InitialCapacity = 8});
     struct TReference {
         int64_t Sum = 0;
         std::string Min;

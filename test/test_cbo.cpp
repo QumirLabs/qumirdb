@@ -117,7 +117,7 @@ struct TModel {
     std::vector<TResidual> Residuals;
     // A join tree of each connected set, carrying the set's statistics.
     mutable std::map<TSubset, TOperatorPtr> Sets;
-    mutable TConstFolder Folder{TestTypes()};
+    mutable TConstFolder Folder{TestTypes(), TestAnnotation()};
 
     TModel(
         const std::vector<TOperatorPtr>& leaves,
@@ -349,7 +349,7 @@ void ExpectOptimal(
     const std::vector<NCbo::TJoinEdge>& edges,
     const std::vector<NQumir::NAst::TExprPtr>& residuals = {})
 {
-    TConstFolder folder(TestTypes());
+    TConstFolder folder(TestTypes(), TestAnnotation());
     auto tree = NCbo::DpccpJoinOrder(TestTypes(), fx.Leaves, edges, residuals, folder);
     ASSERT_NE(tree, nullptr);
 
@@ -421,7 +421,7 @@ TEST(Cbo, ResidualScalesTheJoinItCompletes) {
         NQumir::TLocation{}, NQumir::NAst::TOperator("!="),
         NQumir::MakeIntrusive<NQumir::NAst::TIdentExpr>(NQumir::TLocation{}, "a_x"),
         NQumir::MakeIntrusive<NQumir::NAst::TIdentExpr>(NQumir::TLocation{}, "c_y"));
-    TConstFolder folder(TestTypes());
+    TConstFolder folder(TestTypes(), TestAnnotation());
     auto tree = NCbo::DpccpJoinOrder(TestTypes(),
         fx.Leaves, {{"a_b", "b_id"}, {"b_c", "c_id"}}, {residual}, folder);
     ASSERT_TRUE(tree && tree->Stats_);
@@ -439,14 +439,14 @@ TEST(Cbo, DisconnectedReturnsNull) {
     fx.Add({100, {{"a_id", 100}}});
     fx.Add({100, {{"b_id", 100}}}); // isolated
     fx.Add({100, {{"c_a", 100}}});
-    TConstFolder folder(TestTypes());
+    TConstFolder folder(TestTypes(), TestAnnotation());
     EXPECT_EQ(NCbo::DpccpJoinOrder(TestTypes(), fx.Leaves, {{"a_id", "c_a"}}, {}, folder), nullptr);
 }
 
 TEST(Cbo, SingleLeafReturnsLeaf) {
     TFixture fx;
     auto leaf = fx.Add({100, {{"a_id", 100}}});
-    TConstFolder folder(TestTypes());
+    TConstFolder folder(TestTypes(), TestAnnotation());
     EXPECT_EQ(NCbo::DpccpJoinOrder(TestTypes(), fx.Leaves, {}, {}, folder), leaf);
 }
 
@@ -455,7 +455,7 @@ TEST(Cbo, FallbackAboveMaxRelations) {
     for (size_t i = 0; i < NCbo::MaxRelations + 1; ++i) {
         fx.Add({100, {{"c" + std::to_string(i), 100}}});
     }
-    TConstFolder folder(TestTypes());
+    TConstFolder folder(TestTypes(), TestAnnotation());
     EXPECT_EQ(NCbo::DpccpJoinOrder(TestTypes(), fx.Leaves, {}, {}, folder), nullptr);
 }
 
@@ -543,7 +543,7 @@ TEST(Cbo, CompositeKeyThroughAnEquatedColumn) {
         {"s_suppkey", "l_suppkey"}, {"ps_suppkey", "l_suppkey"}, {"ps_partkey", "l_partkey"}};
     ExpectOptimal(fx, edges);
 
-    TConstFolder folder(TestTypes());
+    TConstFolder folder(TestTypes(), TestAnnotation());
     auto lineitemSupplier = NQumir::MakeIntrusive<TJoinOperator>(TestTypes(),
         fx.Leaves[0], fx.Leaves[1], std::vector<TJoinKey>{{"l_suppkey", "s_suppkey"}},
         EJoinType::Inner, nullptr);
@@ -620,7 +620,7 @@ TWidthPlan PlanWithPayload(size_t payloadColumns, bool demandPayload) {
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
     }
-    auto built = BuildPlan(TestTypes(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
+    auto built = BuildPlan(TestTypes(), TestAnnotation(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         return NQumir::MakeIntrusive<TSourceOperator>(types,
@@ -631,7 +631,11 @@ TWidthPlan PlanWithPayload(size_t payloadColumns, bool demandPayload) {
     }
     auto plan = *built;
     TPlanPassDiagnostics diagnostics;
-    ApplyPlanPasses(TestTypes(), plan, {.EnableRuntimeFilters = false, .Diagnostics = &diagnostics});
+    ApplyPlanPasses(TestTypes(), plan, {
+        .EnableRuntimeFilters = false,
+        .Diagnostics = &diagnostics,
+        .Annotation = TestAnnotation(),
+    });
     TWidthPlan result;
     result.UsedCbo = diagnostics.JoinReorder.UsedCbo;
     result.OutputColumns = plan->OutputColumns()->Fields.size();

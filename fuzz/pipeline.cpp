@@ -2,6 +2,7 @@
 
 #include <qdb/catalog/external_module.h>
 #include <qdb/io/parquet/source.h>
+#include <qdb/kernel/query_modules.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
@@ -161,8 +162,8 @@ void WriteTable(const fs::path& path, const TFields& fields) {
     Check(output->Close());
 }
 
-// Process-wide state of the targets: the tables live in a private temporary
-// directory that is removed at exit.
+// Process-wide state of the targets: the module base, and the tables in a private
+// temporary directory that is removed at exit.
 class TEnvironment {
 public:
     TEnvironment() {
@@ -195,8 +196,13 @@ public:
             : found->second;
     }
 
+    const std::shared_ptr<const NKernel::TModuleBase>& Base() const {
+        return Base_;
+    }
+
 private:
     NQumir::NCodeGen::TLLVMInitializer LlvmInit_;
+    std::shared_ptr<const NKernel::TModuleBase> Base_ = std::make_shared<const NKernel::TModuleBase>();
     fs::path Dir_;
     std::map<std::string, std::shared_ptr<TParquetFile>, std::less<>> Files_;
 };
@@ -217,7 +223,7 @@ void RunStatements(std::string_view sql, const TPlanHandler& handler) {
         return NQumir::MakeIntrusive<TSourceOperator>(types, std::move(file), std::string(table));
     };
     TExternalModuleCatalog catalog;
-    NCompiler::TQueryCompiler compiler(catalog, factory);
+    NCompiler::TQueryCompiler compiler(environment.Base(), catalog, factory);
     try {
         std::istringstream input{std::string(sql)};
         auto query = compiler.Parse(input);

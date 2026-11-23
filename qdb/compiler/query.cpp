@@ -116,10 +116,12 @@ std::expected<TParsedQuery, NQumir::TError> TQueryCompiler::Parse(
 }
 
 TQueryCompiler::TQueryCompiler(
+    std::shared_ptr<const NKernel::TModuleBase> base,
     TExternalModuleCatalog& catalog,
     TTableSourceFactory sources,
     TPlanPassOptions options)
-    : Types_(NKernel::MakeQueryTypes())
+    : Base_(std::move(base))
+    , Types_(NKernel::MakeQueryTypes(*Base_))
     , Catalog_(catalog)
     , Sources_(std::move(sources))
     , Options_(std::move(options))
@@ -148,10 +150,10 @@ std::expected<std::optional<TPreparedQuery>, NQumir::TError> TQueryCompiler::Pre
     }
     TPreparedQuery prepared{
         .Types = Types_,
-        .Annotation = NKernel::MakeAnnotationContext(*Types_, Catalog_.Snapshot(Types_)),
+        .Annotation = NKernel::MakeAnnotationContext(*Types_, Base_, Catalog_.Snapshot(Types_)),
     };
     if (sql) {
-        auto plan = BuildPlan(*Types_, *sql, Sources_, prepared.Annotation);
+        auto plan = BuildPlan(*Types_, prepared.Annotation, *sql, Sources_);
         if (!plan) {
             return std::unexpected(plan.error());
         }

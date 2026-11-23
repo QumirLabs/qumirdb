@@ -80,7 +80,7 @@ TOperatorPtr BuildSqlPlan(
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
     }
-    auto root = BuildPlan(TestTypes(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
+    auto root = BuildPlan(TestTypes(), TestAnnotation(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         auto it = sources.find(std::string(table));
@@ -93,7 +93,7 @@ TOperatorPtr BuildSqlPlan(
         throw std::runtime_error(root.error().ToString());
     }
     TOperatorPtr plan = *root;
-    ApplyPlanPasses(TestTypes(), plan);
+    ApplyPlanPasses(TestTypes(), plan, {.Annotation = TestAnnotation()});
     return plan;
 }
 
@@ -299,7 +299,7 @@ TEST(CteMaterialize, ParallelSpoolKeepsDefinitionLanes) {
             settings.Scheduler.WorkerCount = 4;
         }
         auto lowered = NScheduler::LowerPlanToGraph(
-            BuildSqlPlan(sql, sources), SharedTestTypes(), settings, nullptr);
+            BuildSqlPlan(sql, sources), SharedTestTypes(), settings, nullptr, TestAnnotation());
         EXPECT_EQ(CountTasks(*lowered.Graph, "source"), 4u);
         EXPECT_EQ(CountTasks(*lowered.Graph, "cte-producer"), 4u);
         EXPECT_EQ(CountTasks(*lowered.Graph, "cte-consumer"), 8u);

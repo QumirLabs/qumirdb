@@ -34,11 +34,12 @@ struct TPreparedQuery {
 // Parse -> Prepare each statement in order (nullopt for declarations).
 // Then Explain, or LowerPlanToGraph -> JitFinalizeKernels -> RunPlanIntoSink.
 // Sources must outlive the prepared plan and its execution. A compiler compiles one
-// query: it owns the query's type factory, which its statements share and which it
-// hands to each prepared statement.
+// query: it owns the query's type factory, a child of the process's module `base`,
+// which its statements share and which it hands to each prepared statement.
 class TQueryCompiler {
 public:
     TQueryCompiler(
+        std::shared_ptr<const NKernel::TModuleBase> base,
         TExternalModuleCatalog& catalog,
         TTableSourceFactory sources,
         TPlanPassOptions options = {});
@@ -53,6 +54,7 @@ public:
         bool explain = false) const;
 
 private:
+    std::shared_ptr<const NKernel::TModuleBase> Base_;
     std::shared_ptr<NQumir::NAst::TTypeFactory> Types_;
     TExternalModuleCatalog& Catalog_;
     TTableSourceFactory Sources_;

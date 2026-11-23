@@ -84,7 +84,7 @@ std::expected<TOperatorPtr, NQumir::TError> BuildSqlPlan(
     if (!parsed) {
         return std::unexpected(parsed.error());
     }
-    return BuildPlan(TestTypes(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
+    return BuildPlan(TestTypes(), TestAnnotation(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(table));
@@ -98,6 +98,7 @@ TPlanPassOptions LateMaterializationOptions(
         .EnableCbo = false,
         .LateMaterialization = {.Enabled = true},
         .Diagnostics = diagnostics,
+        .Annotation = TestAnnotation(),
     };
 }
 
@@ -146,6 +147,7 @@ TEST(LateMaterialization, CanBeDisabledInPlanPipeline) {
     ApplyPlanPasses(TestTypes(), *plan, {
         .EnableCbo = false,
         .LateMaterialization = {.Enabled = false},
+        .Annotation = TestAnnotation(),
     });
 
     EXPECT_FALSE(TMaybeOp<TLateMaterializeOperator>(*plan));
@@ -405,6 +407,7 @@ TEST(LateMaterialization, ExecutesParquetLookupAfterGlobalTopK) {
             .EnableCbo = false,
             .LateMaterialization = {.Enabled = enabled},
             .Diagnostics = &diagnostics,
+            .Annotation = TestAnnotation(),
         });
         if (enabled) {
             EXPECT_TRUE(TMaybeOp<TLateMaterializeOperator>(*plan))
@@ -452,6 +455,7 @@ TEST(LateMaterialization, ExecutesParquetLookupAfterGlobalTopK) {
             ApplyPlanPasses(TestTypes(), *plan, {
                 .EnableCbo = false,
                 .LateMaterialization = {.Enabled = true},
+                .Annotation = TestAnnotation(),
             });
             checkedSexprExecution = true;
         }
@@ -466,7 +470,7 @@ TEST(LateMaterialization, ExecutesParquetLookupAfterGlobalTopK) {
             !checkedExecPlan)
         {
             auto lowered = NScheduler::LowerPlanToGraph(
-                *plan, SharedTestTypes(), settings, nullptr);
+                *plan, SharedTestTypes(), settings, nullptr, TestAnnotation());
             const auto materializeTasks = std::ranges::count_if(
                 lowered.Graph->Nodes(),
                 [](const auto& node) {
@@ -505,7 +509,7 @@ TEST(LateMaterialization, ExecutesParquetLookupAfterGlobalTopK) {
             !checkedSingleWorkerGraph)
         {
             auto lowered = NScheduler::LowerPlanToGraph(
-                *plan, SharedTestTypes(), settings, nullptr);
+                *plan, SharedTestTypes(), settings, nullptr, TestAnnotation());
             EXPECT_EQ(std::ranges::count_if(
                 lowered.Graph->Nodes(),
                 [](const auto& node) {
@@ -611,7 +615,7 @@ TEST(LateMaterialization, ExecutesParquetLookupAfterGlobalTopK) {
         });
     // Lowering expects a pruned plan: the physical locator column is only
     // emitted once column pruning has put it in the source's required set.
-    AnnotateTypes(TestTypes(), multiLanePlan, {});
+    AnnotateTypes(TestTypes(), multiLanePlan, TestAnnotation());
     ApplyColumnPruning(TestTypes(), multiLanePlan);
 
     NScheduler::TSettings multiLaneSettings;
@@ -620,7 +624,7 @@ TEST(LateMaterialization, ExecutesParquetLookupAfterGlobalTopK) {
     multiLaneSettings.Scheduler.WorkerCount = 4;
     multiLaneSettings.ScanSplit.MaxScanTasks = 4;
     auto lowered = NScheduler::LowerPlanToGraph(
-        multiLanePlan, SharedTestTypes(), multiLaneSettings, nullptr);
+        multiLanePlan, SharedTestTypes(), multiLaneSettings, nullptr, TestAnnotation());
     auto broadcast = std::ranges::find_if(
         lowered.Graph->Nodes(),
         [](const auto& node) {

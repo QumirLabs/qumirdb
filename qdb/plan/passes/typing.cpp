@@ -155,7 +155,7 @@ std::vector<bool> UntypedNullColumns(
     for (size_t i = 0; input && i < result.size(); ++i) {
         const auto& expr = proj.Cast()->Projections()[i].Expression;
         result[i] = !TMaybeNode<TIdentExpr>(expr)
-            && NKernel::IsUntypedNullValue(types, expr, *input, &context);
+            && NKernel::IsUntypedNullValue(types, expr, *input, context);
     }
     return result;
 }
@@ -282,7 +282,7 @@ void AnnotateOperatorType(
                 } else {
                     // Computed column: rule-based SQL type inference (no rewrite).
                     fieldType = NKernel::AnnotateExprType(
-                        types, spec.Expression, *inputStruct, &context);
+                        types, spec.Expression, *inputStruct, context);
                 }
                 auto structType = TMaybeType<TStructType>(
                     UnwrapNamedValueType(UnwrapNullableType(fieldType)));

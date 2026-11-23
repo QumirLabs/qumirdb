@@ -153,10 +153,10 @@ std::string_view KernelKindName(EOperatorKernelKind kind) {
 
 TOperatorKernelSpec BuildFilterKernelSpec(
     NQumir::NAst::TTypeFactory& types,
+    const NKernel::TAnnotationContext& annotation,
     const NQumir::NAst::TStructType& inputType,
     const NQumir::NAst::TExprPtr& predicate,
     std::string entrypointName,
-    const NKernel::TAnnotationContext* annotation,
     TRuntimeContext* runtimeContext)
 {
     // Make NULL propagation explicit right before compilation (never in logical planning).
@@ -194,11 +194,11 @@ TOperatorKernelSpec BuildFilterKernelSpec(
 
 TOperatorKernelSpec BuildProjectKernelSpec(
     NQumir::NAst::TTypeFactory& types,
+    const NKernel::TAnnotationContext& annotation,
     const NQumir::NAst::TStructType& inputType,
     const std::vector<NQumir::NAst::TExprPtr>& computedExprs,
     const std::vector<NQumir::NAst::TTypePtr>& computedTypes,
     std::string entrypointName,
-    const NKernel::TAnnotationContext* annotation,
     TRuntimeContext* runtimeContext)
 {
     std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> outputFields;
@@ -250,10 +250,10 @@ TOperatorKernelSpec BuildProjectKernelSpec(
 
 TOperatorKernelSpec BuildAggregateKernelSpec(
     NQumir::NAst::TTypeFactory& types,
+    const NKernel::TAnnotationContext& annotation,
     const NQumir::NAst::TStructType& inputType,
     const std::vector<std::string>& groupKeys,
     const std::vector<TAggregateSpec>& aggs,
-    const NKernel::TAnnotationContext* annotation,
     std::vector<int64_t> emptyInputGroups)
 {
     auto columnRef = [&](const std::string& name) -> TKernelColumnRef {

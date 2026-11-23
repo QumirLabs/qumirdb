@@ -16,6 +16,7 @@ class TExternalCatalogSnapshot;
 
 namespace NQdb::NKernel {
 
+class TModuleBase;
 class TQueryModules;
 
 // Planner return types of qumirdb.oz functions and of external catalog functions.
@@ -49,14 +50,11 @@ struct TAnnotationContext {
     std::shared_ptr<TQueryModules> Modules;
 };
 
+// The context of a query whose factory `types` is a child of `base`.
 TAnnotationContext MakeAnnotationContext(
     NQumir::NAst::TTypeFactory& types,
+    std::shared_ptr<const TModuleBase> base,
     std::shared_ptr<const TExternalCatalogSnapshot> catalog);
-
-// `context` when MakeAnnotationContext made it, else a new context with its catalog.
-TAnnotationContext CompleteAnnotationContext(
-    NQumir::NAst::TTypeFactory& types,
-    const TAnnotationContext* context);
 
 // Kernels read a DATE as its storage integer, as qumirdb.oz declares DATE columns, so a
 // plan AST is erased before Qumir compiles it: every kernel and planning-time function.
@@ -75,7 +73,7 @@ NQumir::NAst::TTypePtr AnnotateExprType(
     NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType,
-    const TAnnotationContext* context = nullptr);
+    const TAnnotationContext& annotation);
 
 // Annotates every node in an expression tree with the same rule-based type
 // inference used by kernels. Integer literals adopt the adjacent integer
@@ -86,7 +84,7 @@ NQumir::NAst::TTypePtr AnnotateExprTreeTypes(
     NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType,
-    const TAnnotationContext* context = nullptr);
+    const TAnnotationContext& annotation);
 
 // A fractional literal beside a DECIMAL is a decimal of its own digits, as in DuckDB
 // (0.125 is DECIMAL(3,3)), instead of being rounded to the other operand's scale. The
@@ -115,7 +113,7 @@ std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandNullable(
     NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType,
-    const TAnnotationContext* context = nullptr);
+    const TAnnotationContext& annotation);
 
 // Whether ExpandNullable makes a call NULL whenever its argument `index` is NULL.
 // Calls with their own NULL semantics (`qdb_is_null`, `coalesce`, ...) are not
@@ -128,7 +126,7 @@ std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandKernelExpr(
     NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType,
-    const TAnnotationContext* context = nullptr);
+    const TAnnotationContext& annotation);
 
 // Whether `expr` is an untyped NULL value (`NULL`, `CASE WHEN c THEN NULL END`): AnnotateExprType
 // types it NULL[INTEGER] only because nothing else gives it a type. A UNION takes the type of
@@ -137,7 +135,7 @@ bool IsUntypedNullValue(
     NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType,
-    const TAnnotationContext* context = nullptr);
+    const TAnnotationContext& annotation);
 
 // ExpandKernelExpr for a filter or join residual predicate. A predicate is a boolean
 // context: an untyped NULL predicate (`WHERE NULL`) becomes NULL[bool], which selects no rows.
@@ -145,7 +143,7 @@ std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandKernelPredicate(
     NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType,
-    const TAnnotationContext* context = nullptr);
+    const TAnnotationContext& annotation);
 
 // ExpandKernelExpr for a projected column or an aggregate argument. Nothing there types
 // an untyped NULL (`SELECT NULL AS x`), so it becomes NULL[INTEGER], the type
@@ -154,6 +152,6 @@ std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandKernelValue(
     NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType,
-    const TAnnotationContext* context = nullptr);
+    const TAnnotationContext& annotation);
 
 } // namespace NQdb::NKernel

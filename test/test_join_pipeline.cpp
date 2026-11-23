@@ -73,7 +73,7 @@ TEST(JoinPipeline, TypingSetsTwoParamTypesAndConcatenatedOutput) {
         left, right, leftOp, rightOp);
     ASSERT_NE(root, nullptr);
 
-    AnnotateTypes(TestTypes(), root);
+    AnnotateTypes(TestTypes(), root, TestAnnotation());
 
     auto* fun = static_cast<const TFunctionType*>(root->Type);
     ASSERT_EQ(fun->ParamTypes.size(), 2u);
@@ -94,7 +94,7 @@ TEST(JoinPipeline, PruningNarrowsEachSideIndependently) {
         left, right, leftOp, rightOp);
     ASSERT_NE(root, nullptr);
 
-    AnnotateTypes(TestTypes(), root);
+    AnnotateTypes(TestTypes(), root, TestAnnotation());
     ApplyColumnPruning(TestTypes(), root);
 
     ASSERT_TRUE(leftOp);
@@ -119,7 +119,7 @@ TEST(JoinPipeline, PruningKeepsKeysEvenWhenNotSelectedDownstream) {
         left, right, leftOp, rightOp);
     ASSERT_NE(root, nullptr);
 
-    AnnotateTypes(TestTypes(), root);
+    AnnotateTypes(TestTypes(), root, TestAnnotation());
     ApplyColumnPruning(TestTypes(), root);
 
     EXPECT_EQ(ColNames(leftOp->OutputColumns()),

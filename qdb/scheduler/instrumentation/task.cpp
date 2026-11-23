@@ -92,9 +92,9 @@ void EnableOperatorInstrumentation(TLoweredPlan& lowered) {
     }
     TKernelCompiler compiler({
         .Types = lowered.Types,
+        .Annotation = lowered.Annotation,
         .Sink = &lowered.Kernels,
         .BindNow = false,
-        .Annotation = &lowered.Annotation,
     });
     auto kernel = compiler.CompileInstrumentation();
     for (const auto& node : lowered.Graph->Nodes()) {

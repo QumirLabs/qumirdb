@@ -22,8 +22,8 @@ using TTableSourceFactory = std::function<std::expected<TOperatorPtr, NQumir::TE
 // is built once.
 std::expected<TOperatorPtr, NQumir::TError> BuildPlan(
     NQumir::NAst::TTypeFactory& types,
+    const NKernel::TAnnotationContext& annotation,
     const NQdb::NSql::TSqlNodePtr& query,
-    const TTableSourceFactory& sources,
-    const NKernel::TAnnotationContext& annotation = {});
+    const TTableSourceFactory& sources);
 
 } // namespace NQdb

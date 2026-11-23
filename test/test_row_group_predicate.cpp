@@ -23,7 +23,7 @@ namespace {
 
 // One context for the whole binary, as one query has for all its sources.
 const NKernel::TAnnotationContext& Annotation() {
-    static const auto annotation = NKernel::MakeAnnotationContext(TestTypes(), nullptr);
+    static const auto annotation = TestAnnotation();
     return annotation;
 }
 

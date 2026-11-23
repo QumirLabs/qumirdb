@@ -1871,9 +1871,4 @@ TStatsPtr EstimateStats(TOperatorPtr op, TConstFolder& folder) {
     return op->Stats_ = std::move(stats);
 }
 
-TStatsPtr EstimateStats(NQumir::NAst::TTypeFactory& types, TOperatorPtr op) {
-    TConstFolder folder(types);
-    return EstimateStats(op, folder);
-}
-
 } // namespace NQdb

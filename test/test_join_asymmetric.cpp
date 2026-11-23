@@ -102,7 +102,7 @@ std::vector<TOut2> RunSemiAnti(
         rcols1[0].Mask = &invalid;
     }
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto kernels = CompileJoin(compiler, leftType, rightType, type, nullsEqual);
     TInnerJoinProcessor processor(std::move(kernels), type, buildSide);
 
@@ -177,7 +177,7 @@ std::vector<TOut4> RunAsymmetric(EJoinBuildSide buildSide) {
     auto rightBatch0 = KeyValBatch(rk0.data(), rv0.data(), 2, rcols0);
     auto rightBatch1 = KeyValBatch(rk1.data(), rv1.data(), 1, rcols1);
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::Inner);
     TInnerJoinProcessor processor(std::move(kernels), EJoinType::Inner, buildSide);
 
@@ -966,7 +966,7 @@ TEST_P(SemiAntiOrientation, LeftBuildMarksOnlyPairsTheResidualAccepts) {
         static_cast<const TStructType&>(*leftType),
         static_cast<const TStructType&>(*rightType),
         {{"lk", "rk"}}, type, residual);
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     TInnerJoinProcessor processor(compiler.CompileJoin(spec), type, EJoinBuildSide::Left);
 
     auto fetch = [](std::deque<TRowSet>& batches) {
@@ -1416,7 +1416,7 @@ protected:
         return rows;
     }
 
-    TKernelCompiler Compiler_{{.Types = SharedTestTypes()}};
+    TKernelCompiler Compiler_{{.Types = SharedTestTypes(), .Annotation = TestAnnotation()}};
     TTypePtr LeftType_ = TestTypes().MakeStruct(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"lk", MakeNullableType(TestTypes(), I64Type())}, {"lv", I64Type()}});
@@ -1676,7 +1676,7 @@ TEST(OuterStreamJoinPlan, MatchesGeneralPathAcrossPartitions) {
             NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(right), "R"),
             std::vector<TJoinKey>{{"lk", "rk"}}, type, nullptr);
         TOperatorPtr root = join;
-        AnnotateTypes(TestTypes(), root);
+        AnnotateTypes(TestTypes(), root, TestAnnotation());
 
         const bool isLeft = type == EJoinType::Left;
         if (streaming) {

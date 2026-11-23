@@ -420,25 +420,16 @@ void EraseDateTypes(NQumir::NAst::TTypeFactory& types, const TExprPtr& ast) {
 
 TAnnotationContext MakeAnnotationContext(
     NQumir::NAst::TTypeFactory& types,
+    std::shared_ptr<const TModuleBase> base,
     std::shared_ptr<const TExternalCatalogSnapshot> catalog)
 {
-    auto modules = std::make_shared<TQueryModules>(types);
+    auto modules = std::make_shared<TQueryModules>(types, std::move(base));
     auto resolver = std::make_shared<TExternalTypingResolver>(types, modules, catalog);
     return {
         .ExternalCatalog = std::move(catalog),
         .Resolver = std::move(resolver),
         .Modules = std::move(modules),
     };
-}
-
-TAnnotationContext CompleteAnnotationContext(
-    NQumir::NAst::TTypeFactory& types,
-    const TAnnotationContext* context)
-{
-    if (context && context->Resolver) {
-        return *context;
-    }
-    return MakeAnnotationContext(types, context ? context->ExternalCatalog : nullptr);
 }
 
 namespace {
@@ -2855,9 +2846,8 @@ TTypePtr AnnotateExprType(
     NQumir::NAst::TTypeFactory& types,
     const TExprPtr& expr,
     const TStructType& inputType,
-    const TAnnotationContext* context)
+    const TAnnotationContext& annotation)
 {
-    const auto annotation = CompleteAnnotationContext(types, context);
     if (!expr) {
         throw NQumir::TError("project type inference: null expression");
     }
@@ -2876,9 +2866,8 @@ bool IsUntypedNullValue(
     NQumir::NAst::TTypeFactory& types,
     const TExprPtr& expr,
     const TStructType& inputType,
-    const TAnnotationContext* context)
+    const TAnnotationContext& annotation)
 {
-    const auto annotation = CompleteAnnotationContext(types, context);
     return expr && IsUntypedNull(expr, InferType(types, annotation, expr, inputType));
 }
 
@@ -2909,9 +2898,8 @@ TTypePtr AnnotateExprTreeTypes(
     NQumir::NAst::TTypeFactory& types,
     const TExprPtr& expr,
     const TStructType& inputType,
-    const TAnnotationContext* context)
+    const TAnnotationContext& annotation)
 {
-    const auto annotation = CompleteAnnotationContext(types, context);
     if (!expr) {
         throw NQumir::TError("expression type inference: null expression");
     }
@@ -3187,9 +3175,8 @@ std::pair<TExprPtr, TTypePtr> ExpandNullable(
     NQumir::NAst::TTypeFactory& types,
     const TExprPtr& expr,
     const TStructType& inputType,
-    const TAnnotationContext* context)
+    const TAnnotationContext& annotation)
 {
-    const auto annotation = CompleteAnnotationContext(types, context);
     // Fast path: with no nullable column and no bare NULL there is nothing to propagate,
     // so leave the expression untouched (non-nullable path stays ordinary).
     bool anyNullable = false;
@@ -3216,15 +3203,14 @@ bool IsNullStrictCallArgument(const std::string& name, size_t index) {
 
 std::pair<TExprPtr, TTypePtr> ExpandKernelExpr(NQumir::NAst::TTypeFactory& types, const TExprPtr& expr,
     const TStructType& inputType,
-    const TAnnotationContext* context)
+    const TAnnotationContext& annotation)
 {
-    const auto annotation = CompleteAnnotationContext(types, context);
     TExprPtr coerced = expr;
     if (InvolvesReal(types, expr, inputType)) {
         coerced = CloneExpr(expr);
         CoerceRealOperands(types, annotation, coerced, inputType);
     }
-    auto nullable = ExpandNullable(types, coerced, inputType, &annotation);
+    auto nullable = ExpandNullable(types, coerced, inputType, annotation);
     auto expanded = !SchemaHasDecimal(inputType) && !ContainsDecimalTypeRef(nullable.first)
         ? std::move(nullable)
         : ExpandDecimal(types, annotation, nullable.first, inputType);
@@ -3238,19 +3224,19 @@ std::pair<TExprPtr, TTypePtr> ExpandKernelExpr(NQumir::NAst::TTypeFactory& types
 
 std::pair<TExprPtr, TTypePtr> ExpandKernelPredicate(NQumir::NAst::TTypeFactory& types, const TExprPtr& expr,
     const TStructType& inputType,
-    const TAnnotationContext* context)
+    const TAnnotationContext& annotation)
 {
     return TypeUntypedNull(types,
-        ExpandKernelExpr(types, expr, inputType, context),
+        ExpandKernelExpr(types, expr, inputType, annotation),
         types.Make<TBoolType>());
 }
 
 std::pair<TExprPtr, TTypePtr> ExpandKernelValue(NQumir::NAst::TTypeFactory& types, const TExprPtr& expr,
     const TStructType& inputType,
-    const TAnnotationContext* context)
+    const TAnnotationContext& annotation)
 {
     return TypeUntypedNull(types,
-        ExpandKernelExpr(types, expr, inputType, context),
+        ExpandKernelExpr(types, expr, inputType, annotation),
         UntypedNullValueType(types));
 }
 

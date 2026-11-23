@@ -31,7 +31,7 @@ struct TFixture {
         return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(Source), std::string(table));
     };
     // Parses and prepares with one factory, as a query does.
-    TQueryCompiler Compiler{Catalog, Sources};
+    TQueryCompiler Compiler{TestModuleBase(), Catalog, Sources};
 
     std::expected<TParsedQuery, NQumir::TError> Parse(
         const std::string& text,
@@ -103,7 +103,7 @@ TEST(QueryCompiler, DeclarationsAreAppliedBeforeQueries) {
 // AST, which compiling a query leaves as it is, and a base type is one object in all.
 TEST(QueryCompiler, QueriesShareTheModuleBase) {
     const auto file = NUtils::ModuleFile("qumirdb.oz");
-    const auto& base = **NKernel::TModuleBase::Get().Find(file);
+    const auto& base = **TestModuleBase()->Find(file);
     const auto text = NQumir::NAst::NCore::PrintAst(base.Ast);
     std::vector<NQumir::NAst::TTypePtr> rowSets;
     for (int i = 0; i < 2; ++i) {
@@ -119,7 +119,7 @@ TEST(QueryCompiler, QueriesShareTheModuleBase) {
         EXPECT_EQ(loader.Find("qumirdb")->Ast.Get(), base.Ast.Get());
 
         auto lowered = NScheduler::LowerPlanToGraph(
-            (**prepared).Plan, (**prepared).Types, {}, nullptr, &annotation);
+            (**prepared).Plan, (**prepared).Types, {}, nullptr, annotation);
         EXPECT_EQ(lowered.Annotation.Modules, annotation.Modules);
         FinalizeKernels(lowered.Kernels, lowered.Types, lowered.Annotation, EKernelBackend::Llvm);
         EXPECT_FALSE(lowered.Kernels.empty());
@@ -150,7 +150,7 @@ TEST(QueryCompiler, SourceErrorsArePreserved) {
         return std::unexpected(NQumir::TError("table unavailable"));
     };
     std::istringstream sexpr("(rel source \"missing\")");
-    TQueryCompiler compiler(catalog, sources);
+    TQueryCompiler compiler(TestModuleBase(), catalog, sources);
     auto parsedSexpr = compiler.Parse(sexpr, ESyntax::Sexpr);
     ASSERT_FALSE(parsedSexpr);
     EXPECT_NE(parsedSexpr.error().ToString().find("table unavailable"), std::string::npos);

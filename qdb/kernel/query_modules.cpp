@@ -43,11 +43,6 @@ TModuleBase::TModuleBase() {
     Types_->Freeze();
 }
 
-const TModuleBase& TModuleBase::Get() {
-    static const TModuleBase base;
-    return base;
-}
-
 std::shared_ptr<const NQumir::NAst::TTypeFactory> TModuleBase::Types() const {
     return Types_;
 }
@@ -58,12 +53,13 @@ std::expected<const NQumir::NFrontend::TSourceModule*, NQumir::TError> TModuleBa
     return Modules_.at(file);
 }
 
-std::shared_ptr<NQumir::NAst::TTypeFactory> MakeQueryTypes() {
-    return std::make_shared<NQumir::NAst::TTypeFactory>(TModuleBase::Get().Types());
+std::shared_ptr<NQumir::NAst::TTypeFactory> MakeQueryTypes(const TModuleBase& base) {
+    return std::make_shared<NQumir::NAst::TTypeFactory>(base.Types());
 }
 
-TQueryModules::TQueryModules(NQumir::NAst::TTypeFactory& types)
+TQueryModules::TQueryModules(NQumir::NAst::TTypeFactory& types, std::shared_ptr<const TModuleBase> base)
     : Types_(types)
+    , Base_(std::move(base))
 {
 }
 
@@ -75,7 +71,7 @@ std::expected<std::monostate, NQumir::TError> TQueryModules::Load(
     NQumir::NFrontend::TSourceModuleLoader& loader,
     const std::string& file)
 {
-    auto module = TModuleBase::Get().Find(file);
+    auto module = Base_->Find(file);
     if (!module) {
         return std::unexpected(module.error());
     }

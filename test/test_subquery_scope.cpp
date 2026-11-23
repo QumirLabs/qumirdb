@@ -28,7 +28,7 @@ std::string PlanningError(std::string_view sql) {
     if (!parsed) {
         return parsed.error().ToString();
     }
-    auto plan = BuildPlan(TestTypes(), parsed.value(), [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
+    auto plan = BuildPlan(TestTypes(), TestAnnotation(), parsed.value(), [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         if (table == "t") {

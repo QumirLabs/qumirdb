@@ -107,10 +107,7 @@ void ForEachPlan(TOperatorPtr& main, TFn&& fn, bool includeMain = true) {
 } // namespace
 
 void ApplyPlanPasses(NQumir::NAst::TTypeFactory& types, TOperatorPtr& plan, TPlanPassOptions options) {
-    if (!options.Annotation.Resolver) {
-        options.Annotation = NKernel::MakeAnnotationContext(types, options.Annotation.ExternalCatalog);
-    }
-    TConstFolder folder(types, &options.Annotation); // one per query: see TConstFolder
+    TConstFolder folder(types, options.Annotation); // one per query: see TConstFolder
     ForEachPlan(plan, [&](TOperatorPtr& current, TCteDefinition* def) {
         OptimizeOne(types, current, options, folder);
         if (def) {

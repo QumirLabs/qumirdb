@@ -13,12 +13,13 @@
 namespace NQdb::NKernel {
 
 // The source modules every query may use, qumirdb.oz and row_group_interval.oz, parsed once
-// per process into a frozen base factory with QumirDB's named types. The base and its ASTs
-// are used only from the compiling thread: TExpr reference counts are not atomic.
+// into a frozen base factory with QumirDB's named types. A process builds one base and passes
+// it to its queries. The base and its ASTs are used only from the compiling thread: TExpr
+// reference counts are not atomic.
 class TModuleBase {
 public:
-    // Built on first use; nothing in it changes afterwards.
-    static const TModuleBase& Get();
+    // Nothing in the base changes after it is built.
+    TModuleBase();
 
     std::shared_ptr<const NQumir::NAst::TTypeFactory> Types() const;
 
@@ -26,22 +27,20 @@ public:
     std::expected<const NQumir::NFrontend::TSourceModule*, NQumir::TError> Find(const std::string& file) const;
 
 private:
-    TModuleBase();
-
     std::shared_ptr<NQumir::NAst::TTypeFactory> Types_ = std::make_shared<NQumir::NAst::TTypeFactory>();
     std::map<std::string, NQumir::NFrontend::TSourceModuleLoader> Loaders_;
     std::map<std::string, std::expected<const NQumir::NFrontend::TSourceModule*, NQumir::TError>> Modules_;
 };
 
-// A query's type factory: a child of the module base, so the base's types are its types.
-std::shared_ptr<NQumir::NAst::TTypeFactory> MakeQueryTypes();
+// A query's type factory: a child of `base`, so the base's types are its types.
+std::shared_ptr<NQumir::NAst::TTypeFactory> MakeQueryTypes(const TModuleBase& base);
 
 // The source modules of one query. Consumers compose clones of the base's parsed modules
 // (cloneSourceModules), so a module's AST never changes. `types` is the query's factory,
-// a child of the module base.
+// a child of `base`.
 class TQueryModules {
 public:
-    explicit TQueryModules(NQumir::NAst::TTypeFactory& types);
+    TQueryModules(NQumir::NAst::TTypeFactory& types, std::shared_ptr<const TModuleBase> base);
 
     NQumir::NAst::TTypeFactory& Types() const;
 
@@ -52,6 +51,7 @@ public:
 
 private:
     NQumir::NAst::TTypeFactory& Types_;
+    std::shared_ptr<const TModuleBase> Base_;
 };
 
 } // namespace NQdb::NKernel

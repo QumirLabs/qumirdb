@@ -541,7 +541,7 @@ TFilterPlan BuildFilterPlan(
     }
 
     auto spec = NKernel::BuildFilterKernelSpec(
-        types, *inputStruct, filter.Predicate(), "<kernel>", options.Annotation,
+        types, options.Annotation, *inputStruct, filter.Predicate(), "<kernel>",
         options.RuntimeContext.get());
     TKernelCompiler compiler(std::move(options));
     auto dispatch = compiler.CompileFilter(spec);
@@ -618,7 +618,7 @@ TProjectColumnPlan BuildProjectColumnPlan(
     NQumir::NAst::TTypeFactory& types,
     TProjectOperator& project,
     const NQumir::NAst::TStructType& inputStruct,
-    const NKernel::TAnnotationContext* annotation)
+    const NKernel::TAnnotationContext& annotation)
 {
     TProjectColumnPlan plan;
     std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> outFields;
@@ -735,11 +735,10 @@ TProjectPlan BuildProjectPlan(
     std::optional<uint32_t> kernel;
     if (!plan.ComputedExprs.empty()) {
         auto spec = NKernel::BuildProjectKernelSpec(
-            types, *inputStruct,
+            types, options.Annotation, *inputStruct,
             plan.ComputedExprs,
             plan.ComputedJitTypes,
             "<project>",
-            options.Annotation,
             options.RuntimeContext.get());
         TKernelCompiler compiler(std::move(options));
         kernel = compiler.CompileProject(spec).Kernel;

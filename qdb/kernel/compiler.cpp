@@ -83,7 +83,7 @@ struct TJoinResidual {
 TJoinResidual PrepareJoinResidual(
     NQumir::NAst::TTypeFactory& types,
     const NKernel::TOperatorKernelSpec& spec,
-    const NKernel::TAnnotationContext* annotation,
+    const NKernel::TAnnotationContext& annotation,
     const std::string& kernel)
 {
     using namespace NQumir::NAst;
@@ -2392,7 +2392,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
         throw NQumir::TError(
             "CompileJoin: residual filter is not yet supported for this join type");
     }
-    const auto residual = PrepareJoinResidual(types, spec, &Annotation_, "CompileJoin");
+    const auto residual = PrepareJoinResidual(types, spec, Annotation_, "CompileJoin");
 
     if (Diagnostics_) {
         *Diagnostics_ << "\n========== KERNEL SPEC ==========\n";
@@ -2437,7 +2437,7 @@ TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
     auto pairBufferType = QumirDbNamedType(types, "PairBuffer");
     auto stringViewType = QumirDbNamedType(types, "StringView");
     const auto residual = PrepareJoinResidual(
-        types, spec, &Annotation_, "CompileCrossJoin");
+        types, spec, Annotation_, "CompileCrossJoin");
     const bool includeRight =
         spec.JoinType != EJoinType::LeftSemi && spec.JoinType != EJoinType::LeftAnti;
 

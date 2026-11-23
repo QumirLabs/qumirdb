@@ -166,7 +166,7 @@ TEST(RuntimeJoin, InnerJoinEndToEnd) {
     auto left = std::make_unique<TVectorRuntimeSource>(leftType, std::move(lbatches));
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
 
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::Inner);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Inner);
     ASSERT_TRUE(outputType);
@@ -204,7 +204,7 @@ TEST(InnerJoinProcessor, ProcessesInputsWithoutRuntimeNext) {
     auto leftBatch = KeyValBatch(lk.data(), lv.data(), 3, lcols);
     auto rightBatch = KeyValBatch(rk.data(), rv.data(), 3, rcols);
 
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::Inner);
     TInnerJoinProcessor processor(std::move(kernels));
 
@@ -277,7 +277,7 @@ TEST(RuntimeJoin, InnerJoinStreamsRightAfterLeftEof) {
     auto left = std::make_unique<TVectorRuntimeSource>(leftType, std::move(lbatches));
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
 
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::Inner);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Inner);
     ASSERT_TRUE(outputType);
@@ -325,7 +325,7 @@ TEST(RuntimeJoin, InnerJoinStreamsLeftAfterRightEof) {
     auto left = std::make_unique<TVectorRuntimeSource>(leftType, std::move(lbatches));
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
 
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::Inner);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Inner);
     ASSERT_TRUE(outputType);
@@ -378,7 +378,7 @@ TEST(RuntimeJoin, InnerJoinResidualReadsStreamBatchAfterEof) {
         NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "lv"),
         NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "rv"));
 
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto kernels = CompileJoin(
         compiler, leftType, rightType, EJoinType::Inner, residual);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Inner);
@@ -436,7 +436,7 @@ TEST(RuntimeJoin, MultipleBatchesMatchNestedLoop) {
     auto left = std::make_unique<TVectorRuntimeSource>(leftType, std::move(lbatches));
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
 
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::Inner);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Inner);
     ASSERT_TRUE(outputType);
@@ -534,7 +534,7 @@ TEST_P(RuntimeSemiAntiJoin, ScalarKey) {
     auto left  = std::make_unique<TVectorRuntimeSource>(leftType,  std::move(lbatches));
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
 
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto kernels = CompileJoin(compiler, leftType, rightType, jt);
     auto outputType = ComputeJoinOutputType(leftType, rightType, jt);
     ASSERT_TRUE(outputType);
@@ -567,7 +567,7 @@ TEST_P(RuntimeSemiAntiJoin, ResidualStreamsRight) {
         NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "lv"),
         NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "rv"));
 
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto kernels = CompileJoin(compiler, leftType, rightType, jt, residual);
     auto outputType = ComputeJoinOutputType(leftType, rightType, jt);
     ASSERT_TRUE(outputType);
@@ -596,7 +596,7 @@ TEST_P(RuntimeSemiAntiJoin, EmptyRight) {
     auto left  = std::make_unique<TVectorRuntimeSource>(leftType,  std::move(lbatches));
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::vector<TRowSet>{});
 
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto kernels = CompileJoin(compiler, leftType, rightType, jt);
     auto outputType = ComputeJoinOutputType(leftType, rightType, jt);
     ASSERT_TRUE(outputType);
@@ -637,7 +637,7 @@ TEST_P(RuntimeSemiAntiJoin, MultiBatch) {
     auto left  = std::make_unique<TVectorRuntimeSource>(leftType,  split(lk, lv));
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, split(rk, rv));
 
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto kernels = CompileJoin(compiler, leftType, rightType, jt);
     auto outputType = ComputeJoinOutputType(leftType, rightType, jt);
     ASSERT_TRUE(outputType);
@@ -723,7 +723,7 @@ TEST(RuntimeJoin, LeftOuterScalarKey) {
     auto left  = std::make_unique<TVectorRuntimeSource>(leftType,  std::move(lbatches));
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
 
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::Left);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Left);
     ASSERT_TRUE(outputType);
@@ -751,7 +751,7 @@ TEST(RuntimeJoin, LeftOuterEmptyRight) {
     auto left  = std::make_unique<TVectorRuntimeSource>(leftType,  std::move(lbatches));
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
 
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::Left);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Left);
     ASSERT_TRUE(outputType);
@@ -789,7 +789,7 @@ TEST(RuntimeJoin, LeftOuterMultiBatch) {
     auto left  = std::make_unique<TVectorRuntimeSource>(leftType,  split(lk, lv));
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, split(rk, rv));
 
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::Left);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Left);
     ASSERT_TRUE(outputType);
@@ -819,7 +819,7 @@ TEST(RuntimeJoin, RightOuterScalarKey) {
     auto left  = std::make_unique<TVectorRuntimeSource>(leftType,  std::move(lbatches));
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
 
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::Right);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Right);
     ASSERT_TRUE(outputType);

@@ -131,7 +131,7 @@ TEST(RuntimeFilterKernel, BindsWhenTheQueryIsFinalized) {
     auto context = std::make_shared<TRuntimeContext>();
     std::vector<TGeneratedKernel> kernels;
     TKernelCompiler compiler(TKernelCompilerOptions{
-        .Types = SharedTestTypes(), .Sink = &kernels,
+        .Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Sink = &kernels,
         .BindNow = false,
         .RuntimeContext = context,
     });
@@ -141,7 +141,7 @@ TEST(RuntimeFilterKernel, BindsWhenTheQueryIsFinalized) {
         RuntimeFilterKernelEntrypoints.begin(), RuntimeFilterKernelEntrypoints.end())));
     EXPECT_FALSE(kernels.front().Slot->Runner);
     FinalizeKernels(
-        kernels, SharedTestTypes(), NKernel::MakeAnnotationContext(TestTypes(), nullptr), EKernelBackend::Llvm);
+        kernels, SharedTestTypes(), TestAnnotation(), EKernelBackend::Llvm);
 
     TRuntimeFilter filter(context, /*maxKeys=*/8, /*bloomBytes=*/512);
     auto keys = Hashes(200, 23);

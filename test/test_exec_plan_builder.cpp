@@ -152,7 +152,7 @@ TOperatorPtr BuildSqlPlan(
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
     }
-    auto plan = BuildPlan(TestTypes(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
+    auto plan = BuildPlan(TestTypes(), TestAnnotation(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         auto it = sources.find(std::string(table));
@@ -167,6 +167,7 @@ TOperatorPtr BuildSqlPlan(
         throw std::runtime_error(plan.error().ToString());
     }
     auto root = *plan;
+    passes.Annotation = TestAnnotation();
     ApplyPlanPasses(TestTypes(), root, std::move(passes));
     return root;
 }
@@ -221,7 +222,7 @@ TBuiltPlan Lower(
     NScheduler::TSettings settings)
 {
     auto logical = BuildSqlPlan(sql, sources);
-    auto lowered = NScheduler::LowerPlanToGraph(logical, SharedTestTypes(), settings, nullptr);
+    auto lowered = NScheduler::LowerPlanToGraph(logical, SharedTestTypes(), settings, nullptr, TestAnnotation());
     auto exec = BuildExecPlan(lowered);
     if (!exec) {
         throw std::runtime_error(exec.error());
@@ -365,7 +366,7 @@ TEST(ExecPlanBuilder, LowererUsesInjectedRuntimeFilterBindings) {
         std::string::npos);
 
     auto bindings = std::make_shared<TRecordingFilterBindingFactory>();
-    auto lowered = NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), MultiSettings(), nullptr, nullptr, bindings);
+    auto lowered = NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), MultiSettings(), nullptr, TestAnnotation(), bindings);
     ASSERT_TRUE(lowered.Graph);
     EXPECT_EQ(bindings->Created,
         (std::vector<std::pair<uint32_t, size_t>>{{17, 4}}));
@@ -447,7 +448,7 @@ TEST(ExecPlanBuilder, RuntimeFilterStaysAfterOneSharedCteReader) {
     EXPECT_TRUE(right.Cast()->RuntimeFilterUses.empty());
     EXPECT_FALSE(HasRuntimeFilterUse(left.Cast()->Materialization()->Plan));
 
-    auto lowered = NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), MultiSettings(), nullptr);
+    auto lowered = NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), MultiSettings(), nullptr, TestAnnotation());
     size_t dependencyCount = 0;
     for (const auto& edge : lowered.Graph->Edges()) {
         if (edge->Kind == NScheduler::ETaskEdgeKind::Dependency) {
@@ -491,8 +492,8 @@ TEST(ExecPlanBuilder, RuntimeFiltersShareTheQueryJit) {
     outer->MutableRuntimeFilter() = TRuntimeFilterSpec{
         .Id = 2, .BuildSide = EJoinFilterSide::Right};
 
-    auto first = NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), MultiSettings(), nullptr);
-    auto second = NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), MultiSettings(), nullptr);
+    auto first = NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), MultiSettings(), nullptr, TestAnnotation());
+    auto second = NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), MultiSettings(), nullptr, TestAnnotation());
     ASSERT_EQ(first.RuntimeFilters.size(), 2u);
     EXPECT_EQ(std::ranges::count(first.Kernels, "runtime-filter",
         &TGeneratedKernel::Name), 1);
@@ -528,7 +529,7 @@ TEST(ExecPlanBuilder, RejectsDuplicateRuntimeFilterProducerIds) {
         .Id = 7, .BuildSide = EJoinFilterSide::Right};
     outer->MutableRuntimeFilter() = TRuntimeFilterSpec{
         .Id = 7, .BuildSide = EJoinFilterSide::Right};
-    EXPECT_THROW(NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), SingleSettings(), nullptr),
+    EXPECT_THROW(NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), SingleSettings(), nullptr, TestAnnotation()),
         std::runtime_error);
 }
 
@@ -596,7 +597,7 @@ TEST(ExecPlanBuilder, LoweringRecordsSpecsForSupportedNodeKinds) {
     };
     auto plan = BuildSqlPlan(
         "SELECT r.rv, count(*) AS n FROM l, r WHERE r.rv > l.lv GROUP BY r.rv", sources);
-    auto lowered = NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), MultiSettings(), nullptr);
+    auto lowered = NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), MultiSettings(), nullptr, TestAnnotation());
     TCollectSink sink;
     NScheduler::AttachSink(lowered, sink);
 
@@ -672,7 +673,7 @@ std::vector<std::string> ExpectQueryFromSpec(
     const std::unordered_map<std::string, ITable*> sources{{"t", source.get()}};
     auto plan = BuildSqlPlan(sql, sources, std::move(passes));
     auto lowered = std::make_unique<NScheduler::TLoweredPlan>(
-        NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), settings, nullptr));
+        NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), settings, nullptr, TestAnnotation()));
 
     // The schema's column names point into the output type.
     const auto outputType = lowered->OutputType;

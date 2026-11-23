@@ -595,9 +595,9 @@ TAggregateKernels CompileWithRows(
     const std::vector<std::string>& keys,
     const std::vector<TAggregateSpec>& aggs)
 {
-    auto spec = NKernel::BuildAggregateKernelSpec(TestTypes(), input, keys, aggs);
+    auto spec = NKernel::BuildAggregateKernelSpec(TestTypes(), TestAnnotation(), input, keys, aggs);
     spec.AggregateRowLayout = true;
-    return TKernelCompiler({.Types = SharedTestTypes()}).CompileAggregate(spec);
+    return TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileAggregate(spec);
 }
 
 struct TRun {
@@ -612,7 +612,7 @@ TRun Aggregate(
     std::vector<TBatch>& batches,
     const std::vector<EValue>& outputs)
 {
-    static const auto measure = TKernelCompiler({.Types = SharedTestTypes()}).CompileInstrumentation();
+    static const auto measure = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileInstrumentation();
     TOperatorInstrumentation counters;
     counters.Kernel = measure;
     TAggregateProcessor processor(kernels, plan);
@@ -870,7 +870,7 @@ TEST_F(AggregateTable, RowLayoutReportsItsMemory) {
     EXPECT_EQ(kernels.RowBytes, 32);
     EXPECT_EQ(kernels.StateWords, 2u);
     TOperatorInstrumentation counters;
-    counters.Kernel = TKernelCompiler({.Types = SharedTestTypes()}).CompileInstrumentation();
+    counters.Kernel = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileInstrumentation();
     TAggregateProcessor processor(kernels, {.Layout = EAggregateTableLayout::Row});
     processor.SetInstrumentation(&counters);
     TBatch batch({EValue::I64, EValue::I64});
@@ -920,9 +920,9 @@ TEST_F(AggregateTable, RowLayoutNeedsTheSpecFlag) {
     auto i64 = TestTypes().MakeInteger();
     const auto& input = *TestTypes().MakeStruct({{"k", i64}, {"v", i64}});
     const std::vector<TAggregateSpec> aggs = {Agg("c", "count"), Agg("s", "sum", "v")};
-    auto spec = NKernel::BuildAggregateKernelSpec(TestTypes(), input, {"k"}, aggs);
+    auto spec = NKernel::BuildAggregateKernelSpec(TestTypes(), TestAnnotation(), input, {"k"}, aggs);
     ASSERT_FALSE(spec.AggregateRowLayout);
-    const auto swiss = TKernelCompiler({.Types = SharedTestTypes()}).CompileAggregate(spec);
+    const auto swiss = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileAggregate(spec);
     EXPECT_EQ(swiss.RowBytes, 0);
     EXPECT_EQ(CompileWithRows(input, {"k"}, aggs).RowBytes, 32);
 
@@ -1039,10 +1039,10 @@ TEST_F(AggregateTable, StringReducersAndEmptyInputGroupsKeepTheSwissTable) {
     auto i64 = TestTypes().MakeInteger();
     const auto& numbers = *TestTypes().MakeStruct({{"k", i64}, {"s", TestTypes().Make<TStringType>()}});
     EXPECT_EQ(CompileWithRows(numbers, {"k"}, {Agg("m", "min", "s")}).RowBytes, 0);
-    auto seeded = NKernel::BuildAggregateKernelSpec(TestTypes(),
-        numbers, {"k"}, {Agg("c", "count")}, nullptr, {1});
+    auto seeded = NKernel::BuildAggregateKernelSpec(TestTypes(), TestAnnotation(),
+        numbers, {"k"}, {Agg("c", "count")}, {1});
     seeded.AggregateRowLayout = true;
-    const auto seededKernels = TKernelCompiler({.Types = SharedTestTypes()}).CompileAggregate(seeded);
+    const auto seededKernels = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileAggregate(seeded);
     EXPECT_EQ(seededKernels.RowBytes, 0);
     EXPECT_THROW(
         TAggregateProcessor(seededKernels, {.Layout = EAggregateTableLayout::Row}),
@@ -1087,7 +1087,7 @@ TEST_F(AggregateTable, ExpectRowGroupsSizesTheEntriesOfTheMove) {
          })
     {
         TOperatorInstrumentation counters;
-        counters.Kernel = TKernelCompiler({.Types = SharedTestTypes()}).CompileInstrumentation();
+        counters.Kernel = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileInstrumentation();
         TAggregateProcessor processor(kernels, {
             .InitialCapacity = 512, .RowSwitchGroups = 100, .RowExpectedGroups = expected});
         processor.SetInstrumentation(&counters);
@@ -1209,7 +1209,7 @@ TEST_F(AggregateTable, MoveIsSizedFromTheEstimate) {
     // The entries right after the move.
     auto movedCapacity = [&](const TAggregateTablePlan& plan) -> uint64_t {
         TOperatorInstrumentation counters;
-        counters.Kernel = TKernelCompiler({.Types = SharedTestTypes()}).CompileInstrumentation();
+        counters.Kernel = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileInstrumentation();
         TAggregateProcessor processor(kernels, plan);
         processor.SetInstrumentation(&counters);
         std::array<TColumn, 2> columns{};
@@ -1289,7 +1289,7 @@ TEST_F(AggregateTable, InstrumentationCountsTheMoveOnce) {
         return kernels.Dispatch(&table, batch, arg, static_cast<int64_t>(op));
     };
     TOperatorInstrumentation counters;
-    counters.Kernel = TKernelCompiler({.Types = SharedTestTypes()}).CompileInstrumentation();
+    counters.Kernel = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileInstrumentation();
     auto observe = [&](THashTable& table) {
         counters.ObserveHash(&table, 0, false, kernels.StringMetadataBuffers);
     };
@@ -1409,7 +1409,7 @@ TEST_F(AggregateTable, DISABLED_LayoutMicrobenchmark) {
                 };
                 auto runTask = [&](const TTask& task, const TAggregateTablePlan& plan) {
                     TOperatorInstrumentation counters;
-                    static const auto measure = TKernelCompiler({.Types = SharedTestTypes()}).CompileInstrumentation();
+                    static const auto measure = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileInstrumentation();
                     counters.Kernel = measure;
                     TAggregateProcessor processor(kernels, plan);
                     processor.SetInstrumentation(&counters);

@@ -47,7 +47,7 @@ std::unique_ptr<TTestRuntime> Plan(
     auto parsed = parser.Parse(ts);
     if (!parsed) throw std::runtime_error(parsed.error().ToString());
     auto root = NQumir::StaticPointerCast<IOperator>(*parsed);
-    AnnotateTypes(TestTypes(), root);
+    AnnotateTypes(TestTypes(), root, TestAnnotation());
     ApplyColumnPruning(TestTypes(), root);
     return RunPlan(root, schedulerSettings);
 }

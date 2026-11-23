@@ -140,7 +140,7 @@ bool IsRealArgument(NQumir::NAst::TTypeFactory& types, const NAst::TExprPtr& arg
     NAst::TTypePtr type = nullptr;
     if (schema && !schema->Fields.empty()) {
         try {
-            type = NKernel::AnnotateExprType(types, arg, *schema, &context);
+            type = NKernel::AnnotateExprType(types, arg, *schema, context);
         } catch (const TError&) {
             return false; // the aggregate reports its argument's typing error itself
         }
@@ -728,7 +728,7 @@ std::expected<NAst::TTypePtr, TError> TAggCollector::StddevArgType(
 
     NAst::TTypePtr type = nullptr;
     try {
-        type = NKernel::AnnotateExprType(types, agg.Arg, *InputSchema_, &Context_);
+        type = NKernel::AnnotateExprType(types, agg.Arg, *InputSchema_, Context_);
     } catch (const TError& error) {
         return std::unexpected(error);
     }
@@ -806,7 +806,7 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::EmitBoolAggregate(
     if (InputSchema_ && !InputSchema_->Fields.empty()) {
         NAst::TTypePtr type = nullptr;
         try {
-            type = NKernel::AnnotateExprType(types, agg.Arg, *InputSchema_, &Context_);
+            type = NKernel::AnnotateExprType(types, agg.Arg, *InputSchema_, Context_);
         } catch (const TError& error) {
             return std::unexpected(error);
         }
@@ -863,7 +863,7 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(NQumir::NAst::TTypeFac
     // PostgreSQL has no sum or avg of a DATE; avg would report the sum it is lowered to.
     if (arg && (agg.Func == "sum" || agg.Func == "avg") && InputSchema_ && !InputSchema_->Fields.empty()) {
         try {
-            if (IsDateType(NKernel::AnnotateExprType(types, arg, *InputSchema_, &Context_))) {
+            if (IsDateType(NKernel::AnnotateExprType(types, arg, *InputSchema_, Context_))) {
                 return std::unexpected(TError(loc, "function " + agg.Func + "(DATE) does not exist"));
             }
         } catch (const TError& error) {
@@ -913,7 +913,7 @@ TAggCollector::SlotTypes(NQumir::NAst::TTypeFactory& types) const
         NAst::TTypePtr argType = nullptr;
         if (spec.Arg && InputSchema_) {
             try {
-                argType = NKernel::AnnotateExprType(types, spec.Arg, *InputSchema_, &Context_);
+                argType = NKernel::AnnotateExprType(types, spec.Arg, *InputSchema_, Context_);
             } catch (const TError& error) {
                 return std::unexpected(error);
             }

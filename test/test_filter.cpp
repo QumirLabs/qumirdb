@@ -65,8 +65,8 @@ std::array<uint8_t, 4> RunStringLiteralFilter(
         (literalFirst ? binary->Left : binary->Right) = std::move(cast);
     }
 
-    auto dispatch = TKernelCompiler({.Types = SharedTestTypes()}).CompileFilter(
-        NKernel::BuildFilterKernelSpec(TestTypes(), inputType, predicate));
+    auto dispatch = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileFilter(
+        NKernel::BuildFilterKernelSpec(TestTypes(), TestAnnotation(), inputType, predicate));
     std::array<uint8_t, 4> selection{};
     TRowSet rowSet{
         .Columns = columns.data(),
@@ -96,8 +96,8 @@ std::array<uint8_t, 6> RunNullableIntegerFilter(
         {"left", MakeNullableType(TestTypes(), TestTypes().MakeInteger())},
         {"right", MakeNullableType(TestTypes(), TestTypes().MakeInteger())},
     });
-    auto dispatch = TKernelCompiler({.Types = SharedTestTypes()}).CompileFilter(
-        NKernel::BuildFilterKernelSpec(TestTypes(),
+    auto dispatch = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileFilter(
+        NKernel::BuildFilterKernelSpec(TestTypes(), TestAnnotation(),
             inputType, ParsePredicate(predicateSource)));
     std::array<uint8_t, 6> selection{};
     TRowSet rowSet{
@@ -132,8 +132,8 @@ protected:
             valueType = MakeNullableType(TestTypes(), valueType);
         }
         const auto& inputType = *TestTypes().MakeStruct({{"value", valueType}});
-        auto process = MakeFilterProcess({}, TKernelCompiler({.Types = SharedTestTypes()}).CompileFilter(
-            NKernel::BuildFilterKernelSpec(TestTypes(), inputType, ParsePredicate(predicate))));
+        auto process = MakeFilterProcess({}, TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileFilter(
+            NKernel::BuildFilterKernelSpec(TestTypes(), TestAnnotation(), inputType, ParsePredicate(predicate))));
         TRowSet rowSet{
             .Columns = &column,
             .ColumnCount = 1,
@@ -197,8 +197,8 @@ TEST(FilterKernel, ClearsOutputOfRejectedRows) {
     const auto& inputType = *TestTypes().MakeStruct({
         {"value", TestTypes().Make<TStringType>()},
     });
-    auto dispatch = TKernelCompiler({.Types = SharedTestTypes()}).CompileFilter(
-        NKernel::BuildFilterKernelSpec(TestTypes(),
+    auto dispatch = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileFilter(
+        NKernel::BuildFilterKernelSpec(TestTypes(), TestAnnotation(),
             inputType, ParsePredicate("(== value \"same\")")));
     const std::array<uint8_t, 4> inputSelection = {0, 1, 0xff, 0};
     std::array<uint8_t, 4> selection = {7, 7, 7, 7};
@@ -244,8 +244,8 @@ TEST(FilterKernel, ComparesStringColumnsWithoutMutatingLogicalPredicate) {
         auto predicate = ParsePredicate(
             "(" + std::string(op) + " left right)");
         const std::string logical = NCore::PrintAst(predicate);
-        auto dispatch = TKernelCompiler({.Types = SharedTestTypes()}).CompileFilter(
-            NKernel::BuildFilterKernelSpec(TestTypes(), inputType, predicate));
+        auto dispatch = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileFilter(
+            NKernel::BuildFilterKernelSpec(TestTypes(), TestAnnotation(), inputType, predicate));
         std::array<uint8_t, 4> selection{};
         TRowSet rowSet{
             .Columns = columns.data(),
@@ -304,9 +304,9 @@ TEST(FilterKernel, StringViewLiteralKeepsItsLength) {
     TMaybeNode<TStringLiteralExpr>(cast->Operand).Cast()->Value = literal;
 
     std::ostringstream diagnostics;
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Diagnostics = &diagnostics});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Diagnostics = &diagnostics});
     auto dispatch = compiler.CompileFilter(
-        NKernel::BuildFilterKernelSpec(TestTypes(), inputType, predicate));
+        NKernel::BuildFilterKernelSpec(TestTypes(), TestAnnotation(), inputType, predicate));
     std::array<uint8_t, 4> selection{};
     TRowSet rowSet{
         .Columns = columns.data(),
@@ -340,8 +340,8 @@ TEST(FilterKernel, PreservesInputSelectionAndPrecomputedHashes) {
     const auto& inputType = *TestTypes().MakeStruct({
         {"value", TestTypes().MakeInteger(TIntegerType::I64)},
     });
-    auto dispatch = TKernelCompiler({.Types = SharedTestTypes()}).CompileFilter(
-        NKernel::BuildFilterKernelSpec(TestTypes(), inputType, ParsePredicate("(> value 0)")));
+    auto dispatch = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileFilter(
+        NKernel::BuildFilterKernelSpec(TestTypes(), TestAnnotation(), inputType, ParsePredicate("(> value 0)")));
     auto process = MakeFilterProcess({}, std::move(dispatch));
     TRowSet rowSet{
         .Columns = &column,
@@ -395,9 +395,9 @@ TEST(FilterKernel, CompilesFromKernelSpec) {
     const auto& inputType = *TestTypes().MakeStruct({
         {"value", TestTypes().MakeInteger()},
     });
-    auto spec = NKernel::BuildFilterKernelSpec(TestTypes(),
+    auto spec = NKernel::BuildFilterKernelSpec(TestTypes(), TestAnnotation(),
         inputType, ParsePredicate("(> value 1)"));
-    auto dispatch = TKernelCompiler({.Types = SharedTestTypes()}).CompileFilter(spec);
+    auto dispatch = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileFilter(spec);
     std::array<uint8_t, 4> selection{};
     TRowSet rowSet{
         .Columns = columns.data(),
@@ -418,8 +418,8 @@ TEST(FilterKernel, SkipsThreeValuedLogicForNonNullablePredicate) {
         {"optional", MakeNullableType(TestTypes(), TestTypes().MakeInteger())},
     });
     std::ostringstream diagnostics;
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Diagnostics = &diagnostics});
-    auto dispatch = compiler.CompileFilter(NKernel::BuildFilterKernelSpec(TestTypes(),
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Diagnostics = &diagnostics});
+    auto dispatch = compiler.CompileFilter(NKernel::BuildFilterKernelSpec(TestTypes(), TestAnnotation(),
         inputType, ParsePredicate("(== plain 1)")));
     ASSERT_NE(dispatch.Slot, nullptr);
     EXPECT_EQ(diagnostics.str().find("qdb_sql_bool_"), std::string::npos);

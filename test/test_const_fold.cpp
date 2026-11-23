@@ -38,7 +38,7 @@ TExprPtr Parse(const std::string& src) {
 }
 
 TExprPtr Fold(TExprPtr expr) {
-    NQdb::TConstFolder folder(NQdb::TestTypes());
+    NQdb::TConstFolder folder(NQdb::TestTypes(), NQdb::TestAnnotation());
     return folder.Fold(std::move(expr));
 }
 
@@ -122,7 +122,7 @@ TEST(ConstFold, LeavesExpressionItCannotTypeUnfolded) {
 // Arithmetic over Qumir's own types compiles without the qumirdb module; the
 // fold must give what the module's compilation gives.
 TEST(ConstFold, BuiltinArithmeticFoldsAsWithTheModule) {
-    NQdb::NKernel::TQueryModules modules(NQdb::TestTypes());
+    NQdb::NKernel::TQueryModules modules(NQdb::TestTypes(), NQdb::TestModuleBase());
     NQdb::TVmFrontendContext module(modules, {NQdb::NUtils::ModuleFile("qumirdb.oz")});
     for (const char* src : {
         "(+ 1212 11)", "(// 7 2)", "(% -7 2)", "(* 9223372036854775807 2)",
@@ -130,7 +130,7 @@ TEST(ConstFold, BuiltinArithmeticFoldsAsWithTheModule) {
         "(+ (cast 9131 i32) (cast 90 i32))", "(/ 7 2)", "(+ 0.1 0.2)", "(< 3 4.5)"})
     {
         auto [expanded, type] = NQdb::NKernel::ExpandKernelExpr(
-            NQdb::TestTypes(), Parse(src), *NQdb::TestTypes().MakeStruct({}));
+            NQdb::TestTypes(), Parse(src), *NQdb::TestTypes().MakeStruct({}), NQdb::TestAnnotation());
         NQumir::TLocation loc{};
         auto compiled = NQdb::TVmFunction::Compile(module, {
             .NamePrefix = "__module_eval__",
@@ -180,7 +180,7 @@ TEST(ConstFold, KeepsRealResultAsRealLiteral) {
 // The estimates of a query read the same constants for every plan the join
 // order search considers; the query's folder folds each of them once.
 TEST(ConstFold, FoldsEachNumberOnce) {
-    NQdb::TConstFolder folder(NQdb::TestTypes());
+    NQdb::TConstFolder folder(NQdb::TestTypes(), NQdb::TestAnnotation());
     auto first = folder.FoldNumber(Parse("(+ 1212 11)"));
     ASSERT_TRUE(first);
     EXPECT_EQ(first->IntValue, 1223);
