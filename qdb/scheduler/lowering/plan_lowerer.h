@@ -2,6 +2,7 @@
 
 #include <qdb/io/io.h>
 #include <qdb/exec/plan.h>
+#include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/generated.h>
 #include <qdb/plan/ops/operator.h>
 #include <qdb/scheduler/connection.h>
@@ -17,10 +18,6 @@
 #include <vector>
 
 namespace NQdb {
-class TExternalCatalogSnapshot;
-namespace NKernel {
-struct TAnnotationContext;
-} // namespace NKernel
 struct TRuntimeContext;
 class TAggregateOperator;
 class IRuntimeFilterBindingFactory;
@@ -50,7 +47,8 @@ struct TLoweredPlan {
     std::vector<TTaskNode*> Producers;
     size_t Lanes = 0;
     std::vector<TGeneratedKernel> Kernels;
-    std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog;
+    // The query's context that typed the kernels; finalization composes them with its modules.
+    NKernel::TAnnotationContext Annotation;
     // Stable, exporter-neutral executable stages produced by the same lowering
     // that creates Graph. Debug labels are deliberately not identities.
     std::vector<TLoweredExecStage> ExecStages;
@@ -93,8 +91,8 @@ bool ShouldCascadeGlobalAggregate(
 
 // Lower a logical plan, whose types are of `types`, into a scheduler graph (no
 // terminal sink yet). Kernels are generated in `types` and typed with the query's
-// `annotation`, but not compiled. A custom filter factory replaces the local
-// runtime filters.
+// `annotation` (without one the lowering makes its own), but not compiled. A custom
+// filter factory replaces the local runtime filters.
 TLoweredPlan LowerPlanToGraph(
     const TOperatorPtr& root,
     std::shared_ptr<NQumir::NAst::TTypeFactory> types,

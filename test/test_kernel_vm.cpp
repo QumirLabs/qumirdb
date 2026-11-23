@@ -226,7 +226,8 @@ TEST(KernelVm, KernelProgramHasNoModuleConstructor) {
     TKernelCompiler compiler({.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
     compiler.CompileAggregate(NKernel::BuildAggregateKernelSpec(TestTypes(), KeyValueType(), {"k"}, {}));
     compiler.CompileFilter(NKernel::BuildFilterKernelSpec(TestTypes(), KeyValueType(), Parse("(> v 2)")));
-    FinalizeKernels(kernels, SharedTestTypes(), EKernelBackend::Vm);
+    FinalizeKernels(
+        kernels, SharedTestTypes(), NKernel::MakeAnnotationContext(TestTypes(), nullptr), EKernelBackend::Vm);
     ASSERT_TRUE(kernels.front().Slot->Vm);
     // Kernels hold no module state, so an instance needs no constructor run.
     EXPECT_EQ(kernels.front().Slot->Vm->Module.ModuleConstructorFunctionId, -1);
@@ -238,9 +239,10 @@ TEST(KernelVm, RefinalizingForAnotherBackendThrows) {
     std::vector<TGeneratedKernel> kernels;
     TKernelCompiler compiler({.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
     compiler.CompileFilter(NKernel::BuildFilterKernelSpec(TestTypes(), KeyValueType(), Parse("(> v 2)")));
-    FinalizeKernels(kernels, SharedTestTypes(), EKernelBackend::Vm);
-    EXPECT_NO_THROW(FinalizeKernels(kernels, SharedTestTypes(), EKernelBackend::Vm));
-    EXPECT_THROW(FinalizeKernels(kernels, SharedTestTypes(), EKernelBackend::Llvm), std::logic_error);
+    const auto annotation = NKernel::MakeAnnotationContext(TestTypes(), nullptr);
+    FinalizeKernels(kernels, SharedTestTypes(), annotation, EKernelBackend::Vm);
+    EXPECT_NO_THROW(FinalizeKernels(kernels, SharedTestTypes(), annotation, EKernelBackend::Vm));
+    EXPECT_THROW(FinalizeKernels(kernels, SharedTestTypes(), annotation, EKernelBackend::Llvm), std::logic_error);
 }
 
 int main(int argc, char** argv) {

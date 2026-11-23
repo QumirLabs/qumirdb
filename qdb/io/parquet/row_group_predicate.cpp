@@ -699,8 +699,8 @@ std::unique_ptr<TRowGroupPredicateEvaluator> TRowGroupPredicateEvaluator::Compil
     const TExprPtr& predicate,
     const TSchema& schema,
     std::string_view sourceAlias,
-    std::ostream* diagnostics,
-    const NKernel::TAnnotationContext* annotation)
+    const NKernel::TAnnotationContext& annotation,
+    std::ostream* diagnostics)
 {
     try {
         auto diagnostic = [&](const std::string& message) {
@@ -721,7 +721,7 @@ std::unique_ptr<TRowGroupPredicateEvaluator> TRowGroupPredicateEvaluator::Compil
             }
         }
         NKernel::AnnotateExprTreeTypes(
-            types, typedPredicate, *types.MakeStruct(std::move(fields)), annotation);
+            types, typedPredicate, *types.MakeStruct(std::move(fields)), &annotation);
         auto truth = lowerer.LowerTruth(typedPredicate);
         auto params = lowerer.Params();
 
@@ -733,7 +733,8 @@ std::unique_ptr<TRowGroupPredicateEvaluator> TRowGroupPredicateEvaluator::Compil
             diagnostic("compiled body " + NQumir::NAst::NCore::PrintAst(body));
         }
 
-        TVmFrontendContext frontend(types, {NUtils::ModuleFile("row_group_interval.oz")});
+        TVmFrontendContext frontend(
+            *annotation.Modules, {NUtils::ModuleFile("row_group_interval.oz")});
         auto compiled = TVmFunction::Compile(frontend, {
             .NamePrefix = EvalFn,
             .Params = std::move(params),

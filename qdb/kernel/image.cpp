@@ -2,6 +2,7 @@
 
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/finalize_fused.h>
+#include <qdb/kernel/query_modules.h>
 #include <qdb/modules/qumirdb.h>
 
 #include <qumir/codegen/llvm/llvm_runner.h>
@@ -87,7 +88,7 @@ std::string ReadFile(const std::string& path)
 
 TKernelImage CompileKernelImage(
     std::span<TGeneratedKernel> kernels,
-    NQumir::NAst::TTypeFactory& types,
+    NKernel::TQueryModules& modules,
     EKernelBackend backend,
     const std::string& cacheDir)
 {
@@ -108,19 +109,20 @@ TKernelImage CompileKernelImage(
         codegen = std::make_unique<NQumir::NCodeGen::TTpdeBackend>();
     }
 #endif
-    NQumir::TLLVMRunner runner(std::move(options), std::move(codegen), &types);
+    NQumir::TLLVMRunner runner(std::move(options), std::move(codegen), &modules.Types());
     std::string error;
     TKernelImage image;
     // The object cache is built on the partitioned LLVM codegen.
     if (cacheDir.empty() || backend != EKernelBackend::Llvm) {
-        auto object = CompileKernelAstToObject(runner, fused.Program, fused.Entrypoints, &error);
+        auto object = CompileKernelAstToObject(
+            runner, modules, {.Ast = fused.Program}, fused.Entrypoints, &error);
         if (!object) {
             throw std::runtime_error("kernel image compilation failed: " + error);
         }
         image.Object = std::move(*object);
     } else {
         auto compiled = CompileKernelAstToObjectsCached(
-            runner, fused.Program, fused.Entrypoints, cacheDir, &error);
+            runner, modules, fused.Program, fused.Entrypoints, cacheDir, &error);
         if (!compiled) {
             throw std::runtime_error("kernel image compilation failed: " + error);
         }

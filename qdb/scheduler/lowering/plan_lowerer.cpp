@@ -286,7 +286,6 @@ public:
         , Diagnostics_(diagnostics)
         , KernelSink_(kernelSink)
         , Annotation_(annotation)
-        , ExternalCatalog_(annotation ? annotation->ExternalCatalog : nullptr)
         , RuntimeFilterBindings_(std::move(filterBindings))
         , RuntimeContext_(std::make_shared<TRuntimeContext>())
         , TaskContext_{.Runtime = RuntimeContext_}
@@ -871,11 +870,11 @@ private:
             *Types_,
             src.RowGroupPredicate(),
             src.GetAlias(),
+            *Annotation_,
             Settings_.Instrumentation.RowGroupPredicate
                 ? Settings_.Instrumentation.Output
                 : nullptr,
-            columns ? &*columns : nullptr,
-            Annotation_);
+            columns ? &*columns : nullptr);
         if (rowGroups.empty()) {
             TSourceSplits empty = std::vector<NScheduler::TScanSplit>{};
             ScanSplitCache_.emplace(&src, empty);
@@ -2800,7 +2799,6 @@ private:
     std::ostream* Diagnostics_;
     std::vector<TGeneratedKernel>* KernelSink_ = nullptr;
     const NKernel::TAnnotationContext* Annotation_ = nullptr;
-    std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog_;
     std::shared_ptr<IRuntimeFilterBindingFactory> RuntimeFilterBindings_;
     std::shared_ptr<TRuntimeContext> RuntimeContext_;
     // Slots follow KernelSink_; Tables reuses the plan's opened tables.
@@ -3040,10 +3038,11 @@ TLoweredPlan LowerPlanToGraph(
     std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings)
 {
     PlaceRuntimeFilterConsumers(root);
+    const auto context = NKernel::CompleteAnnotationContext(*types, annotation);
     auto graph = std::make_unique<TTaskGraph>();
     std::vector<TGeneratedKernel> kernels;
     TSchedulerGraphLowerer lowerer(
-        types, *graph, root, settings, diagnostics, &kernels, annotation,
+        types, *graph, root, settings, diagnostics, &kernels, &context,
         std::move(filterBindings));
     const size_t lanes = lowerer.OutputLanes(root);
     if (lanes == 0) {
@@ -3078,7 +3077,7 @@ TLoweredPlan LowerPlanToGraph(
         .Producers = std::move(out.Producers),
         .Lanes = lanes,
         .Kernels = std::move(kernels),
-        .ExternalCatalog = annotation ? annotation->ExternalCatalog : nullptr,
+        .Annotation = context,
         .ExecStages = std::move(lowerer.ExecStages()),
         .RuntimeFilters = std::move(lowerer.RuntimeFilters()),
         .NodeSpecs = std::move(nodeSpecs),
@@ -3405,7 +3404,7 @@ bool RunPlanIntoSink(
         EnableOperatorInstrumentation(lowered);
     }
     FinalizeKernels(
-        lowered.Kernels, lowered.Types, settings.Kernel.Backend, diagnostics, lowered.ExternalCatalog,
+        lowered.Kernels, lowered.Types, lowered.Annotation, settings.Kernel.Backend, diagnostics,
         settings.Jit.CacheDir);
     lowered.Graph->SetConnectionStatsEnabled(settings.Queue.EnableDebugCounters);
     if (diagnostics) {

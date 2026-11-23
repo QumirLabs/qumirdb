@@ -73,6 +73,7 @@ add_library(qumirdb
     plan/types/type_text.cpp
     plan/build.cpp
     plan/sql_lowering.cpp
+    kernel/query_modules.cpp
     kernel/vm_function.cpp
     kernel/vm_program.cpp
     kernel/column_value.cpp

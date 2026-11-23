@@ -1,7 +1,11 @@
 #include "mock_source.h"
 
 #include <qdb/compiler/query.h>
+#include <qdb/kernel/finalize.h>
+#include <qdb/kernel/query_modules.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/scheduler/lowering/plan_lowerer.h>
+#include <qdb/utils/module_path.h>
 
 #include <gtest/gtest.h>
 
@@ -89,6 +93,34 @@ TEST(QueryCompiler, DeclarationsAreAppliedBeforeQueries) {
             EXPECT_TRUE((**prepared).Annotation.ExternalCatalog->HasFunction("convert"));
         }
     }
+}
+
+// Typing, const folding, pruning and the kernels of a query share the query's one
+// TQueryModules, so qumirdb.oz is parsed once and its AST is never replaced.
+TEST(QueryCompiler, PreparedQueryParsesEachModuleOnce) {
+    TFixture fixture;
+    auto query = fixture.Parse("SELECT value + 1 FROM items WHERE value > 1 + 1;");
+    ASSERT_TRUE(query) << query.error().ToString();
+    auto prepared = fixture.Compiler.Prepare(query->Statements[0]);
+    ASSERT_TRUE(prepared) << prepared.error().ToString();
+    ASSERT_TRUE(*prepared);
+    auto& annotation = (**prepared).Annotation;
+    auto& modules = *annotation.Modules;
+    const auto file = NUtils::ModuleFile("qumirdb.oz");
+    NQumir::NFrontend::TSourceModuleLoader before(modules.Types());
+    ASSERT_TRUE(modules.Load(before, file));
+    const auto* ast = before.Find("qumirdb")->Ast.Get();
+
+    auto lowered = NScheduler::LowerPlanToGraph(
+        (**prepared).Plan, (**prepared).Types, {}, nullptr, &annotation);
+    EXPECT_EQ(lowered.Annotation.Modules, annotation.Modules);
+    FinalizeKernels(lowered.Kernels, lowered.Types, lowered.Annotation, EKernelBackend::Llvm);
+    EXPECT_FALSE(lowered.Kernels.empty());
+
+    EXPECT_EQ(modules.ParseCount(), 1);
+    NQumir::NFrontend::TSourceModuleLoader after(modules.Types());
+    ASSERT_TRUE(modules.Load(after, file));
+    EXPECT_EQ(after.Find("qumirdb")->Ast.Get(), ast);
 }
 
 TEST(QueryCompiler, SexprUsesSourceFactory) {

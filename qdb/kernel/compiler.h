@@ -3,6 +3,7 @@
 #include <qdb/exec/instrumentation/operator.h>
 #include <qdb/exec/plan_data.h>
 #include <qdb/io/io.h>
+#include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/backend.h>
 #include <qdb/kernel/generated.h>
 #include <qdb/kernel/spec.h>
@@ -29,7 +30,7 @@ namespace NQdb {
 class TExternalCatalogSnapshot;
 
 namespace NKernel {
-struct TAnnotationContext;
+class TQueryModules;
 } // namespace NKernel
 
 // Kernel generation appends TGeneratedKernels to Sink (when set); BindNow
@@ -44,7 +45,8 @@ struct TKernelCompilerOptions {
     TExecStageId ExecStageId = InvalidExecStageId;
     std::vector<TGeneratedKernel>* Sink = nullptr;
     bool BindNow = true;
-    // The query's typing context, with its external catalog; null without one.
+    // The query's typing context, with its external catalog and modules; without one
+    // the compiler makes its own.
     const NKernel::TAnnotationContext* Annotation = nullptr;
     std::shared_ptr<TRuntimeContext> RuntimeContext;
     // Persistent JIT cache used when BindNow finalizes; empty disables it.
@@ -58,18 +60,19 @@ NQumir::TLLVMRunnerOptions KernelRunnerOptions();
 // Kernel ASTs refer to the qumirdb module; prepends `use qumirdb` when absent.
 void EnsureQumirDbUse(const NQumir::NAst::TExprPtr& ast);
 
-// Native-JIT kernel compilation (prepends `use qumirdb`, links runtime
-// symbols); one function pointer per entry. The pointers live as long as
-// `runner`.
-std::unordered_map<std::string, void*> CompileKernelAst(
-    NQumir::TLLVMRunner& runner,
-    NQumir::NAst::TExprPtr ast,
-    const std::vector<std::string>& entryNames,
-    std::string* error);
+// Composes a kernel program, bare or already composed with the external modules it
+// calls, with qumirdb.oz of the query's `modules`, so the runner parses no module. The
+// composed modules' `use`s are dropped: the runner's search path would load them again.
+std::expected<NQumir::NFrontend::TComposeResult, NQumir::TError> ComposeKernelProgram(
+    NKernel::TQueryModules& modules,
+    NQumir::NFrontend::TComposeResult program);
 
+// Native-JIT kernel compilation (composes the program with `modules`, links runtime
+// symbols); one function pointer per entry. The pointers live as long as `runner`.
 std::unordered_map<std::string, void*> CompileKernelAst(
     NQumir::TLLVMRunner& runner,
-    NQumir::NFrontend::TComposeResult composed,
+    NKernel::TQueryModules& modules,
+    NQumir::NFrontend::TComposeResult program,
     const std::vector<std::string>& entryNames,
     std::string* error);
 
@@ -78,6 +81,7 @@ std::unordered_map<std::string, void*> CompileKernelAst(
 // Entries stay valid while the returned lifetime handle is held.
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
     NQumir::TLLVMRunner& runner,
+    NKernel::TQueryModules& modules,
     NQumir::NAst::TExprPtr ast,
     const std::vector<std::string>& entryNames,
     const std::string& cacheDir,
@@ -87,13 +91,8 @@ NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
 // runner.Options.TargetTriple) instead of JIT. Returns object bytes.
 std::optional<std::string> CompileKernelAstToObject(
     NQumir::TLLVMRunner& runner,
-    NQumir::NAst::TExprPtr ast,
-    const std::vector<std::string>& entryNames,
-    std::string* error);
-
-std::optional<std::string> CompileKernelAstToObject(
-    NQumir::TLLVMRunner& runner,
-    NQumir::NFrontend::TComposeResult composed,
+    NKernel::TQueryModules& modules,
+    NQumir::NFrontend::TComposeResult program,
     const std::vector<std::string>& entryNames,
     std::string* error);
 
@@ -102,6 +101,7 @@ std::optional<std::string> CompileKernelAstToObject(
 std::optional<NQumir::TLLVMRunner::TCachedObjectModule>
 CompileKernelAstToObjectsCached(
     NQumir::TLLVMRunner& runner,
+    NKernel::TQueryModules& modules,
     NQumir::NAst::TExprPtr ast,
     const std::vector<std::string>& entryNames,
     const std::string& cacheDir,
@@ -440,7 +440,7 @@ public:
         , BindNow_(options.BindNow)
         , JitCacheDir_(std::move(options.JitCacheDir))
         , Backend_(options.Backend)
-        , Annotation_(options.Annotation)
+        , Annotation_(NKernel::CompleteAnnotationContext(*Types_, options.Annotation))
         , RuntimeContext_(std::move(options.RuntimeContext))
     {
         Opts_ = KernelRunnerOptions();
@@ -677,7 +677,7 @@ private:
     bool BindNow_ = true;
     std::string JitCacheDir_;
     EKernelBackend Backend_ = EKernelBackend::Llvm;
-    const NKernel::TAnnotationContext* Annotation_ = nullptr;
+    NKernel::TAnnotationContext Annotation_;
     std::shared_ptr<TRuntimeContext> RuntimeContext_;
     NQumir::TLLVMRunnerOptions Opts_;
 };

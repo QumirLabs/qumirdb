@@ -1436,7 +1436,7 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize, const TRegTestOptio
     // Lowering, JIT compilation and the run itself.
     const auto runError = CaptureError([&] {
         auto runtime = RunPlan(
-            plan, settings, parsed->Annotation.ExternalCatalog, nullptr, timing ? &runTimings : nullptr, types);
+            plan, settings, &parsed->Annotation, nullptr, timing ? &runTimings : nullptr, types);
         mark();
         actual = Result(*types, *runtime);
     });

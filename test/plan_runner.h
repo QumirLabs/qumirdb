@@ -79,20 +79,19 @@ struct TPlanRunTimings {
     double ExecuteMs = 0;
 };
 
-// `types` is the factory the plan is built in.
+// `types` is the factory the plan is built in, `annotation` the context it was planned with.
 inline std::unique_ptr<TTestRuntime> RunPlan(
     const TOperatorPtr& root,
     NScheduler::TSettings settings = {},
-    std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog = nullptr,
+    const NKernel::TAnnotationContext* annotation = nullptr,
     std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings = nullptr,
     TPlanRunTimings* timings = nullptr,
     std::shared_ptr<NQumir::NAst::TTypeFactory> types = SharedTestTypes())
 {
     using TClock = std::chrono::steady_clock;
     auto started = timings ? TClock::now() : TClock::time_point{};
-    const auto annotation = NKernel::MakeAnnotationContext(*types, std::move(externalCatalog));
     auto lowered = NScheduler::LowerPlanToGraph(
-        root, types, settings, nullptr, &annotation, std::move(filterBindings));
+        root, types, settings, nullptr, annotation, std::move(filterBindings));
     auto outputType = lowered.OutputType;
 
     if (timings) {
@@ -100,7 +99,7 @@ inline std::unique_ptr<TTestRuntime> RunPlan(
         timings->LowerMs = std::chrono::duration<double, std::milli>(now - started).count();
         started = now;
         FinalizeKernels(
-            lowered.Kernels, lowered.Types, settings.Kernel.Backend, nullptr, lowered.ExternalCatalog,
+            lowered.Kernels, lowered.Types, lowered.Annotation, settings.Kernel.Backend, nullptr,
             settings.Jit.CacheDir);
         now = TClock::now();
         timings->JitMs = std::chrono::duration<double, std::milli>(now - started).count();

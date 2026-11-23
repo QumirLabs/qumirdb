@@ -41,8 +41,8 @@ public:
         const NQumir::NAst::TExprPtr& predicate,
         const TSchema& schema,
         std::string_view sourceAlias,
-        std::ostream* diagnostics = nullptr,
-        const NKernel::TAnnotationContext* annotation = nullptr);
+        const NKernel::TAnnotationContext& annotation,
+        std::ostream* diagnostics = nullptr);
 
     ~TRowGroupPredicateEvaluator();
 

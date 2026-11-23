@@ -16,13 +16,16 @@ class TExternalCatalogSnapshot;
 
 namespace NQdb::NKernel {
 
+class TQueryModules;
+
 // Planner return types of qumirdb.oz functions and of external catalog functions.
-// Nothing is built until the first lookup, which composes qumirdb.oz (with the
-// catalog's declarations) in `types`, the query's factory.
+// Nothing is built until the first lookup, which composes qumirdb.oz of the query's
+// `modules` (with the catalog's declarations) in `types`, the query's factory.
 class TExternalTypingResolver {
 public:
     TExternalTypingResolver(
         NQumir::NAst::TTypeFactory& types,
+        std::shared_ptr<TQueryModules> modules,
         std::shared_ptr<const TExternalCatalogSnapshot> catalog);
     ~TExternalTypingResolver();
 
@@ -38,16 +41,22 @@ private:
     std::shared_ptr<TImpl> Impl_;
 };
 
-// The typing state of one query. Copies share the resolver, so a query composes
-// qumirdb.oz for typing at most once.
+// The typing and module state of one query. Copies share the resolver and the
+// modules, so a query parses each module and composes qumirdb.oz for typing at most once.
 struct TAnnotationContext {
     std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog;
     std::shared_ptr<TExternalTypingResolver> Resolver;
+    std::shared_ptr<TQueryModules> Modules;
 };
 
 TAnnotationContext MakeAnnotationContext(
     NQumir::NAst::TTypeFactory& types,
     std::shared_ptr<const TExternalCatalogSnapshot> catalog);
+
+// `context` when MakeAnnotationContext made it, else a new context with its catalog.
+TAnnotationContext CompleteAnnotationContext(
+    NQumir::NAst::TTypeFactory& types,
+    const TAnnotationContext* context);
 
 // Kernels read a DATE as its storage integer, as qumirdb.oz declares DATE columns, so a
 // plan AST is erased before Qumir compiles it: every kernel and planning-time function.

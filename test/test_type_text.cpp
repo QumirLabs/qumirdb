@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <qdb/kernel/query_modules.h>
 #include <qdb/kernel/vm_function.h>
 #include <qdb/modules/qumirdb.h>
 #include <qdb/plan/types/date.h>
@@ -177,7 +178,8 @@ TEST(TypeText, QumirDbTypesAreTheOnesQumirdbOzDeclares) {
     };
     const auto before = build();
 
-    TVmFrontendContext frontend(types, {NUtils::ModuleFile("qumirdb.oz")});
+    NKernel::TQueryModules modules(types);
+    TVmFrontendContext frontend(modules, {NUtils::ModuleFile("qumirdb.oz")});
     std::vector<TParam> params;
     for (const auto& type : before) {
         params.push_back(NQumir::MakeIntrusive<TVarStmt>(

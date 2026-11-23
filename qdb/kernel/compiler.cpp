@@ -13,6 +13,7 @@
 #include <qdb/kernel/join_gen.h>
 #include <qdb/kernel/join_key.h>
 #include <qdb/kernel/lib.h>
+#include <qdb/kernel/query_modules.h>
 #include <qdb/kernel/spec.h>
 #include <qdb/exec/runtime_context.h>
 #include <qdb/exec/runtime_filter.h>
@@ -147,26 +148,65 @@ void EnsureQumirDbUse(const NQumir::NAst::TExprPtr& ast) {
         NQumir::MakeIntrusive<TUseExpr>(NQumir::TLocation{}, "qumirdb"));
 }
 
-std::unordered_map<std::string, void*> CompileKernelAst(
-    NQumir::TLLVMRunner& runner,
-    NQumir::NAst::TExprPtr ast,
-    const std::vector<std::string>& entryNames,
-    std::string* error)
+std::expected<NQumir::NFrontend::TComposeResult, NQumir::TError> ComposeKernelProgram(
+    NKernel::TQueryModules& modules,
+    NQumir::NFrontend::TComposeResult program)
 {
-    NQumir::NRegistry::EnsureQumirDbRuntimeSymbolsLinked();
-    EnsureQumirDbUse(ast);
-    return runner.CompileKernelAst(std::move(ast), entryNames, error);
+    using namespace NQumir::NAst;
+    EnsureQumirDbUse(program.Ast);
+    NQumir::NFrontend::TSourceModuleLoader loader(modules.Types());
+    if (auto loaded = modules.Load(loader, NUtils::ModuleFile("qumirdb.oz")); !loaded) {
+        return std::unexpected(loaded.error());
+    }
+    auto composed = NQumir::NFrontend::LoadAndCompose(
+        loader, program.Ast, program.Pragmas, /*cloneSourceModules*/ true);
+    if (!composed) {
+        return std::unexpected(composed.error());
+    }
+    std::erase_if(TMaybeNode<TBlockExpr>(composed->Ast).Cast()->Stmts, [](const TExprPtr& stmt) {
+        auto use = TMaybeNode<TUseExpr>(stmt);
+        return use && use.Cast()->Resolved;
+    });
+    composed->LlvmBitcode.insert(
+        composed->LlvmBitcode.end(), program.LlvmBitcode.begin(), program.LlvmBitcode.end());
+    return composed;
 }
+
+namespace {
+
+// Composes the program with qumirdb.oz and hands it to `compile`; on a compose error sets
+// *error and returns an empty result.
+template <class TResult, class TCompile>
+TResult CompileComposed(
+    NKernel::TQueryModules& modules,
+    NQumir::NFrontend::TComposeResult program,
+    std::string* error,
+    TCompile&& compile)
+{
+    auto composed = ComposeKernelProgram(modules, std::move(program));
+    if (!composed) {
+        if (error) {
+            *error = composed.error().ToString();
+        }
+        return {};
+    }
+    return compile(std::move(*composed));
+}
+
+} // namespace
 
 std::unordered_map<std::string, void*> CompileKernelAst(
     NQumir::TLLVMRunner& runner,
-    NQumir::NFrontend::TComposeResult composed,
+    NKernel::TQueryModules& modules,
+    NQumir::NFrontend::TComposeResult program,
     const std::vector<std::string>& entryNames,
     std::string* error)
 {
     NQumir::NRegistry::EnsureQumirDbRuntimeSymbolsLinked();
-    EnsureQumirDbUse(composed.Ast);
-    return runner.CompileKernelAst(std::move(composed), entryNames, error);
+    return CompileComposed<std::unordered_map<std::string, void*>>(
+        modules, std::move(program), error, [&](NQumir::NFrontend::TComposeResult composed) {
+            return runner.CompileKernelAst(std::move(composed), entryNames, error);
+        });
 }
 
 namespace {
@@ -194,15 +234,23 @@ constexpr const char* KernelLibVersion = "69";
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
     NQumir::TLLVMRunner& runner,
+    NKernel::TQueryModules& modules,
     NQumir::NAst::TExprPtr ast,
     const std::vector<std::string>& entryNames,
     const std::string& cacheDir,
     std::string* error)
 {
     NQumir::NRegistry::EnsureQumirDbRuntimeSymbolsLinked();
-    EnsureQumirDbUse(ast);
-    return runner.CompileFusedKernelsCached(
-        std::move(ast), entryNames, cacheDir, CacheSchemaVersion, KernelLibVersion, error);
+    return CompileComposed<NQumir::NCodeGen::TLlvmRunner::TLinkedModule>(
+        modules, {.Ast = std::move(ast)}, error, [&](NQumir::NFrontend::TComposeResult composed) {
+            return runner.CompileFusedKernelsCached(
+                std::move(composed.Ast),
+                entryNames,
+                cacheDir,
+                CacheSchemaVersion,
+                KernelLibVersion,
+                error);
+        });
 }
 
 std::shared_ptr<TKernelSlot> TKernelCompiler::CompileInstrumentation() {
@@ -250,8 +298,7 @@ TGeneratedKernel TKernelCompiler::EmitKernel(
     }
     if (BindNow_) {
         FinalizeKernels(
-            std::span(&kernel, 1), Types_, Backend_, Diagnostics_,
-            Annotation_ ? Annotation_->ExternalCatalog : nullptr, JitCacheDir_);
+            std::span(&kernel, 1), Types_, Annotation_, Backend_, Diagnostics_, JitCacheDir_);
     }
     return kernel;
 }
@@ -270,41 +317,36 @@ NQumir::TLLVMRunnerOptions KernelRunnerOptions() {
 
 std::optional<std::string> CompileKernelAstToObject(
     NQumir::TLLVMRunner& runner,
-    NQumir::NAst::TExprPtr ast,
+    NKernel::TQueryModules& modules,
+    NQumir::NFrontend::TComposeResult program,
     const std::vector<std::string>& entryNames,
     std::string* error)
 {
-    EnsureQumirDbUse(ast);
-    return runner.CompileKernelAstToObject(std::move(ast), entryNames, error);
-}
-
-std::optional<std::string> CompileKernelAstToObject(
-    NQumir::TLLVMRunner& runner,
-    NQumir::NFrontend::TComposeResult composed,
-    const std::vector<std::string>& entryNames,
-    std::string* error)
-{
-    EnsureQumirDbUse(composed.Ast);
-    return runner.CompileKernelAstToObject(
-        std::move(composed), entryNames, error);
+    return CompileComposed<std::optional<std::string>>(
+        modules, std::move(program), error, [&](NQumir::NFrontend::TComposeResult composed) {
+            return runner.CompileKernelAstToObject(std::move(composed), entryNames, error);
+        });
 }
 
 std::optional<NQumir::TLLVMRunner::TCachedObjectModule>
 CompileKernelAstToObjectsCached(
     NQumir::TLLVMRunner& runner,
+    NKernel::TQueryModules& modules,
     NQumir::NAst::TExprPtr ast,
     const std::vector<std::string>& entryNames,
     const std::string& cacheDir,
     std::string* error)
 {
-    EnsureQumirDbUse(ast);
-    return runner.CompileFusedKernelsToObjectsCached(
-        std::move(ast),
-        entryNames,
-        cacheDir,
-        CacheSchemaVersion,
-        KernelLibVersion,
-        error);
+    return CompileComposed<std::optional<NQumir::TLLVMRunner::TCachedObjectModule>>(
+        modules, {.Ast = std::move(ast)}, error, [&](NQumir::NFrontend::TComposeResult composed) {
+            return runner.CompileFusedKernelsToObjectsCached(
+                std::move(composed.Ast),
+                entryNames,
+                cacheDir,
+                CacheSchemaVersion,
+                KernelLibVersion,
+                error);
+        });
 }
 
 namespace {
@@ -2350,7 +2392,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
         throw NQumir::TError(
             "CompileJoin: residual filter is not yet supported for this join type");
     }
-    const auto residual = PrepareJoinResidual(types, spec, Annotation_, "CompileJoin");
+    const auto residual = PrepareJoinResidual(types, spec, &Annotation_, "CompileJoin");
 
     if (Diagnostics_) {
         *Diagnostics_ << "\n========== KERNEL SPEC ==========\n";
@@ -2395,7 +2437,7 @@ TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
     auto pairBufferType = QumirDbNamedType(types, "PairBuffer");
     auto stringViewType = QumirDbNamedType(types, "StringView");
     const auto residual = PrepareJoinResidual(
-        types, spec, Annotation_, "CompileCrossJoin");
+        types, spec, &Annotation_, "CompileCrossJoin");
     const bool includeRight =
         spec.JoinType != EJoinType::LeftSemi && spec.JoinType != EJoinType::LeftAnti;
 

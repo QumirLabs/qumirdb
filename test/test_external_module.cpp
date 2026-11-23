@@ -233,7 +233,7 @@ TEST(ExternalModuleCatalog, RustFunctionRunsThroughSqlPlan) {
     EXPECT_EQ(outputType->Fields[2].first, "vector_y");
     EXPECT_EQ(outputType->Fields[3].first, "vector_z");
     EXPECT_EQ(outputType->Fields[4].first, "col4");
-    auto runtime = RunPlan(*plan, {}, snapshot);
+    auto runtime = RunPlan(*plan, {}, &annotation);
 
     TRowSet output{};
     ASSERT_TRUE(runtime->Next(output));
@@ -304,7 +304,7 @@ TEST(ExternalModuleCatalog, DerivedTableQualifiesStructAliasGroup) {
             .EnableCbo = false,
             .Annotation = annotation,
         });
-        auto runtime = RunPlan(*plan, {}, snapshot);
+        auto runtime = RunPlan(*plan, {}, &annotation);
         TRowSet output{};
         while (runtime->Next(output)) {
             for (int64_t row = 0; row < output.RowCount; ++row) {
@@ -376,7 +376,7 @@ TEST(ExternalModuleCatalog, KumirFunctionsAreExportedAndRunWithoutCreateFunction
         .EnableCbo = false,
         .Annotation = annotation,
     });
-    auto runtime = RunPlan(*plan, {}, snapshot);
+    auto runtime = RunPlan(*plan, {}, &annotation);
 
     TRowSet output{};
     ASSERT_TRUE(runtime->Next(output));
@@ -426,7 +426,7 @@ TEST(ExternalModuleCatalog, OzlangFunctionsAreExportedAndRunWithoutCreateFunctio
         .EnableCbo = false,
         .Annotation = annotation,
     });
-    auto runtime = RunPlan(*plan, {}, snapshot);
+    auto runtime = RunPlan(*plan, {}, &annotation);
 
     TRowSet output{};
     ASSERT_TRUE(runtime->Next(output));
@@ -478,7 +478,7 @@ TEST(ExternalModuleCatalog, VmBackendRejectsExternalModules) {
     NScheduler::TSettings settings;
     settings.Kernel.Backend = EKernelBackend::Vm;
     try {
-        RunPlan(*plan, settings, snapshot);
+        RunPlan(*plan, settings, &annotation);
         FAIL() << "the vm backend ran an external module";
     } catch (const std::runtime_error& error) {
         EXPECT_NE(std::string(error.what()).find("does not run external modules"),
@@ -532,7 +532,7 @@ TEST(ExternalModuleCatalog, StddevArgumentTypesExternalFunctions) {
         .EnableCbo = false,
         .Annotation = annotation,
     });
-    auto runtime = RunPlan(*plan, {}, snapshot);
+    auto runtime = RunPlan(*plan, {}, &annotation);
 
     TRowSet output{};
     ASSERT_TRUE(runtime->Next(output));
@@ -622,12 +622,12 @@ TEST(ExternalModuleCatalog, RustFunctionRunsInFilter) {
     });
     ASSERT_TRUE(plan) << plan.error().ToString();
 
-    auto snapshot = catalog.Snapshot(SharedTestTypes());
+    const auto annotation = NKernel::MakeAnnotationContext(TestTypes(), catalog.Snapshot(SharedTestTypes()));
     ApplyPlanPasses(TestTypes(), *plan, {
         .EnableCbo = false,
-        .Annotation = NKernel::MakeAnnotationContext(TestTypes(), snapshot),
+        .Annotation = annotation,
     });
-    auto runtime = RunPlan(*plan, {}, snapshot);
+    auto runtime = RunPlan(*plan, {}, &annotation);
 
     std::vector<double> selected;
     TRowSet output{};

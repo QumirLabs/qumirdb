@@ -2,6 +2,7 @@
 
 #include <qdb/catalog/external_module.h>
 #include <qdb/kernel/annotate_type.h>
+#include <qdb/kernel/query_modules.h>
 #include <qdb/utils/module_path.h>
 
 #include <qumir/frontend/compose.h>
@@ -18,7 +19,6 @@
 
 #include <bit>
 #include <exception>
-#include <mutex>
 #include <sstream>
 #include <utility>
 
@@ -43,17 +43,21 @@ struct TVmFrontendContext::TImpl {
     NQumir::NFrontend::TSourceModuleLoader Loader{Types};
     std::optional<std::string> LoadError;
     uint64_t Counter = 0;
-    std::mutex Mutex;
 };
 
-TVmFrontendContext::TVmFrontendContext(
-    TTypeFactory& types,
-    std::vector<std::string> moduleFiles)
+TVmFrontendContext::TVmFrontendContext(TTypeFactory& types)
     : Impl_(std::make_unique<TImpl>(types))
 {
+}
+
+TVmFrontendContext::TVmFrontendContext(
+    NKernel::TQueryModules& modules,
+    const std::vector<std::string>& moduleFiles)
+    : Impl_(std::make_unique<TImpl>(modules.Types()))
+{
     for (const auto& path : moduleFiles) {
-        if (auto error = RegisterSourceModule(path)) {
-            Impl_->LoadError = std::move(*error);
+        if (auto loaded = modules.Load(Impl_->Loader, path); !loaded) {
+            Impl_->LoadError = loaded.error().ToString();
             break;
         }
     }
@@ -65,21 +69,9 @@ TTypeFactory& TVmFrontendContext::Types() {
     return Impl_->Types;
 }
 
-std::optional<std::string> TVmFrontendContext::RegisterSourceModule(
-    const std::string& path)
-{
-    std::lock_guard lock(Impl_->Mutex);
-    auto registered = Impl_->Loader.RegisterSourceModule(path);
-    if (!registered) {
-        return registered.error().ToString();
-    }
-    return std::nullopt;
-}
-
 std::optional<std::string> TVmFrontendContext::RegisterExternalDeclarations(
     const TExternalCatalogSnapshot& catalog)
 {
-    std::lock_guard lock(Impl_->Mutex);
     auto registered = catalog.RegisterDeclarations(Impl_->Loader);
     if (!registered) {
         return registered.error().ToString();
@@ -88,23 +80,14 @@ std::optional<std::string> TVmFrontendContext::RegisterExternalDeclarations(
 }
 
 std::string TVmFrontendContext::UniqueName(std::string_view prefix) {
-    std::lock_guard lock(Impl_->Mutex);
     return std::string(prefix) + std::to_string(Impl_->Counter++) + "__";
 }
 
-std::expected<TExprPtr, std::string> TVmFrontendContext::Compose(
-    TExprPtr module)
-{
-    std::lock_guard lock(Impl_->Mutex);
+std::vector<const NQumir::NFrontend::TSourceModule*> TVmFrontendContext::SourceModules() {
     if (Impl_->LoadError) {
-        return std::unexpected(*Impl_->LoadError);
+        return {};
     }
-    auto composed = NQumir::NFrontend::LoadAndCompose(
-        Impl_->Loader, module, Impl_->Pragmas, /*cloneSourceModules*/ true);
-    if (!composed) {
-        return std::unexpected(composed.error().ToString());
-    }
-    return std::move(composed->Ast);
+    return Impl_->Loader.TopologicalOrder();
 }
 
 namespace {
@@ -137,7 +120,7 @@ std::expected<TExprPtr, std::string> TransformWithResolver(
 
 } // namespace
 
-std::expected<TExprPtr, std::string> TVmFrontendContext::TransformLocked(
+std::expected<TExprPtr, std::string> TVmFrontendContext::Transform(
     TExprPtr module)
 {
     if (Impl_->LoadError) {
@@ -152,18 +135,10 @@ std::expected<TExprPtr, std::string> TVmFrontendContext::TransformLocked(
         Impl_->Loader, Impl_->Pragmas, resolver, std::move(module));
 }
 
-std::expected<TExprPtr, std::string> TVmFrontendContext::Transform(
-    TExprPtr module)
-{
-    std::lock_guard lock(Impl_->Mutex);
-    return TransformLocked(std::move(module));
-}
-
 std::expected<void, std::string> TVmFrontendContext::Lower(
     TExprPtr module,
     NQumir::NIR::TModule& output)
 {
-    std::lock_guard lock(Impl_->Mutex);
     if (Impl_->LoadError) {
         return std::unexpected(*Impl_->LoadError);
     }

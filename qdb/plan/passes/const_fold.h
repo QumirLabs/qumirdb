@@ -1,5 +1,7 @@
 #pragma once
 
+#include <qdb/kernel/annotate_type.h>
+
 #include <qumir/parser/ast.h>
 
 #include <memory>
@@ -11,18 +13,14 @@ namespace NQdb {
 
 class TVmFrontendContext;
 
-namespace NKernel {
-struct TAnnotationContext;
-} // namespace NKernel
-
 // Constant folding for the planning of one query. A closed expression is
 // evaluated in the Qumir VM, as the kernels compute it. The folder owns the VM
 // frontends it compiles in, each created on its first use, so the frontends
 // and their compiler state are never shared between queries.
 class TConstFolder {
 public:
-    // Folds in the query's `types`; `annotation` types the folded expressions,
-    // without one each fold builds its own.
+    // Folds in the query's `types` with the query's `annotation`, which types the
+    // folded expressions and holds the modules; without one the folder makes its own.
     explicit TConstFolder(
         NQumir::NAst::TTypeFactory& types,
         const NKernel::TAnnotationContext* annotation = nullptr);
@@ -52,7 +50,7 @@ private:
     // Without source modules: an expression over Qumir's own types compiles
     // here in about 0.05 ms.
     NQumir::NAst::TTypeFactory& Types_;
-    const NKernel::TAnnotationContext* Annotation_ = nullptr;
+    NKernel::TAnnotationContext Annotation_;
     std::unique_ptr<TVmFrontendContext> Builtin_;
     // With the qumirdb module, for an expression with a qdb type, function or
     // operator. Each compilation composes the whole module, about 8 ms. Once
