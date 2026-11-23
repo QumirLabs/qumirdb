@@ -35,6 +35,7 @@
 #include <qdb/kernel/finalize_fused.h>
 #include <qdb/kernel/join_key.h>
 #include <qdb/kernel/annotate_type.h>
+#include <qdb/kernel/query_modules.h>
 #include <qdb/scheduler/lowering/plan_lowerer.h>
 #include <qdb/scheduler/lowering/scan_split.h>
 #include <qdb/sexp/printer.h>
@@ -1009,7 +1010,7 @@ std::expected<TExportRequest, std::string> ParseRequest(std::string_view text) {
     }
 
     try {
-        auto types = std::make_shared<NQumir::NAst::TTypeFactory>();
+        auto types = NQdb::NKernel::MakeQueryTypes();
         auto catalog = ParseCatalog(*types, *root);
         return TExportRequest{
             .Types = std::move(types),

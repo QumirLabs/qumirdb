@@ -1,5 +1,6 @@
 #include "query.h"
 
+#include <qdb/kernel/query_modules.h>
 #include <qdb/plan/ops/cte_consumer.h>
 #include <qdb/plan/plan_print.h>
 #include <qdb/sexp/parser.h>
@@ -118,7 +119,7 @@ TQueryCompiler::TQueryCompiler(
     TExternalModuleCatalog& catalog,
     TTableSourceFactory sources,
     TPlanPassOptions options)
-    : Types_(std::make_shared<NQumir::NAst::TTypeFactory>())
+    : Types_(NKernel::MakeQueryTypes())
     , Catalog_(catalog)
     , Sources_(std::move(sources))
     , Options_(std::move(options))

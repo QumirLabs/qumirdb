@@ -163,7 +163,8 @@ TEST(TypeText, RejectsBadInput) {
 // MakeNamed makes a second object when the module is composed and the type splits in two.
 // DECIMAL and DATE[i32] are plan types: kernels see them erased to BinInt and i32.
 TEST(TypeText, QumirDbTypesAreTheOnesQumirdbOzDeclares) {
-    TTypeFactory types;
+    const auto queryTypes = NKernel::MakeQueryTypes();
+    auto& types = *queryTypes;
     auto build = [&] {
         std::vector<TTypePtr> built;
         for (const auto& type : NQumir::NRegistry::QumirDbExternalTypes(types)) {

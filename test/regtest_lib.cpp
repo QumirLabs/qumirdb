@@ -5,6 +5,7 @@
 
 #include <qdb/catalog/external_module.h>
 #include <qdb/io/parquet/source.h>
+#include <qdb/kernel/query_modules.h>
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/pipeline.h>
@@ -1364,7 +1365,7 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize, const TRegTestOptio
     variant.Kernel.Backend = *ParseKernelBackend(test.Backend);
     ApplyEngineConfig(options.Engine, engine);
     // The query's type factory: its plan, kernels and result schema are its types.
-    const auto types = std::make_shared<TTypeFactory>();
+    const auto types = NKernel::MakeQueryTypes();
     std::optional<TParsedQuery> parsed;
     TOperatorPtr plan;
     // Parsing, binding and optimization are the planning stage: its error is the

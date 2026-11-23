@@ -3,13 +3,17 @@
 #include <qdb/compiler/query.h>
 #include <qdb/kernel/finalize.h>
 #include <qdb/kernel/query_modules.h>
+#include <qdb/modules/qumirdb.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/scheduler/lowering/plan_lowerer.h>
 #include <qdb/utils/module_path.h>
 
+#include <qumir/parser/core/printer.h>
+
 #include <gtest/gtest.h>
 
 #include <sstream>
+#include <vector>
 
 using namespace NQdb;
 using namespace NQdb::NCompiler;
@@ -95,32 +99,34 @@ TEST(QueryCompiler, DeclarationsAreAppliedBeforeQueries) {
     }
 }
 
-// Typing, const folding, pruning and the kernels of a query share the query's one
-// TQueryModules, so qumirdb.oz is parsed once and its AST is never replaced.
-TEST(QueryCompiler, PreparedQueryParsesEachModuleOnce) {
-    TFixture fixture;
-    auto query = fixture.Parse("SELECT value + 1 FROM items WHERE value > 1 + 1;");
-    ASSERT_TRUE(query) << query.error().ToString();
-    auto prepared = fixture.Compiler.Prepare(query->Statements[0]);
-    ASSERT_TRUE(prepared) << prepared.error().ToString();
-    ASSERT_TRUE(*prepared);
-    auto& annotation = (**prepared).Annotation;
-    auto& modules = *annotation.Modules;
+// Every query loads qumirdb.oz from the process's frozen module base: queries share its
+// AST, which compiling a query leaves as it is, and a base type is one object in all.
+TEST(QueryCompiler, QueriesShareTheModuleBase) {
     const auto file = NUtils::ModuleFile("qumirdb.oz");
-    NQumir::NFrontend::TSourceModuleLoader before(modules.Types());
-    ASSERT_TRUE(modules.Load(before, file));
-    const auto* ast = before.Find("qumirdb")->Ast.Get();
+    const auto& base = **NKernel::TModuleBase::Get().Find(file);
+    const auto text = NQumir::NAst::NCore::PrintAst(base.Ast);
+    std::vector<NQumir::NAst::TTypePtr> rowSets;
+    for (int i = 0; i < 2; ++i) {
+        TFixture fixture;
+        auto query = fixture.Parse("SELECT value + 1 FROM items WHERE value > 1 + 1;");
+        ASSERT_TRUE(query) << query.error().ToString();
+        auto prepared = fixture.Compiler.Prepare(query->Statements[0]);
+        ASSERT_TRUE(prepared) << prepared.error().ToString();
+        ASSERT_TRUE(*prepared);
+        auto& annotation = (**prepared).Annotation;
+        NQumir::NFrontend::TSourceModuleLoader loader(annotation.Modules->Types());
+        ASSERT_TRUE(annotation.Modules->Load(loader, file));
+        EXPECT_EQ(loader.Find("qumirdb")->Ast.Get(), base.Ast.Get());
 
-    auto lowered = NScheduler::LowerPlanToGraph(
-        (**prepared).Plan, (**prepared).Types, {}, nullptr, &annotation);
-    EXPECT_EQ(lowered.Annotation.Modules, annotation.Modules);
-    FinalizeKernels(lowered.Kernels, lowered.Types, lowered.Annotation, EKernelBackend::Llvm);
-    EXPECT_FALSE(lowered.Kernels.empty());
-
-    EXPECT_EQ(modules.ParseCount(), 1);
-    NQumir::NFrontend::TSourceModuleLoader after(modules.Types());
-    ASSERT_TRUE(modules.Load(after, file));
-    EXPECT_EQ(after.Find("qumirdb")->Ast.Get(), ast);
+        auto lowered = NScheduler::LowerPlanToGraph(
+            (**prepared).Plan, (**prepared).Types, {}, nullptr, &annotation);
+        EXPECT_EQ(lowered.Annotation.Modules, annotation.Modules);
+        FinalizeKernels(lowered.Kernels, lowered.Types, lowered.Annotation, EKernelBackend::Llvm);
+        EXPECT_FALSE(lowered.Kernels.empty());
+        rowSets.push_back(NQumir::NRegistry::QumirDbNamedType(*(**prepared).Types, "TRowSet"));
+    }
+    EXPECT_EQ(rowSets[0], rowSets[1]);
+    EXPECT_EQ(NQumir::NAst::NCore::PrintAst(base.Ast), text);
 }
 
 TEST(QueryCompiler, SexprUsesSourceFactory) {
