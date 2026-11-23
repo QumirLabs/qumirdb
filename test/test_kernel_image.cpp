@@ -14,6 +14,7 @@
 #include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/image.h>
+#include <qdb/kernel/query_modules.h>
 #include <qdb/kernel/spec.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/window.h>
@@ -178,7 +179,8 @@ std::string CompileAggregateImage()
     std::vector<TGeneratedKernel> kernels;
     TKernelCompiler compiler({.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
     compiler.CompileAggregate(AggregateSpec());
-    return SerializeKernelImage(CompileKernelImage(kernels, TestTypes()));
+    NKernel::TQueryModules modules(TestTypes());
+    return SerializeKernelImage(CompileKernelImage(kernels, TestTypes(), modules));
 }
 
 // Regenerates the aggregate kernels unbound and loads the image into their slots.
@@ -264,7 +266,8 @@ const std::vector<std::pair<int64_t, int64_t>> ExpectedJoinPairs =
 
 std::vector<std::shared_ptr<TKernelSlot>> LoadImageSlots(std::vector<TGeneratedKernel>& kernels)
 {
-    const auto bytes = SerializeKernelImage(CompileKernelImage(kernels, TestTypes()));
+    NKernel::TQueryModules modules(TestTypes());
+    const auto bytes = SerializeKernelImage(CompileKernelImage(kernels, TestTypes(), modules));
     std::vector<std::shared_ptr<TKernelSlot>> slots;
     for (const auto& kernel : kernels) {
         slots.push_back(kernel.Slot);
@@ -437,7 +440,8 @@ TEST(KernelImage, FilterRoundTrip)
     std::vector<TGeneratedKernel> kernels;
     TKernelCompiler compiler({.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
     auto dispatch = compiler.CompileFilter(FilterSpec());
-    const auto bytes = SerializeKernelImage(CompileKernelImage(kernels, TestTypes()));
+    NKernel::TQueryModules modules(TestTypes());
+    const auto bytes = SerializeKernelImage(CompileKernelImage(kernels, TestTypes(), modules));
     ASSERT_EQ(kernels.size(), 1u);
     EXPECT_EQ(kernels[dispatch.Kernel].Slot, dispatch.Slot);
     // Load through the recorded kernel index, as a deserialized graph would.
@@ -483,7 +487,8 @@ TEST(KernelImage, ProjectAndAggregateHashBindFromImageSlots)
     EXPECT_EQ(kernels[project.Kernel].Slot, project.Slot);
     EXPECT_EQ(kernels[hash.Kernel].Slot, hash.Slot);
 
-    const auto bytes = SerializeKernelImage(CompileKernelImage(kernels, TestTypes()));
+    NKernel::TQueryModules modules(TestTypes());
+    const auto bytes = SerializeKernelImage(CompileKernelImage(kernels, TestTypes(), modules));
     std::vector<std::shared_ptr<TKernelSlot>> slots;
     for (const auto& kernel : kernels) {
         slots.push_back(kernel.Slot);
@@ -518,7 +523,8 @@ TEST(KernelImage, AggregateBindsFromImageSlot)
     EXPECT_EQ(aggregate.Kernel, 1u);
     EXPECT_EQ(kernels[aggregate.Kernel].Slot, aggregate.Slot);
 
-    const auto bytes = SerializeKernelImage(CompileKernelImage(kernels, TestTypes()));
+    NKernel::TQueryModules modules(TestTypes());
+    const auto bytes = SerializeKernelImage(CompileKernelImage(kernels, TestTypes(), modules));
     std::vector<std::shared_ptr<TKernelSlot>> slots;
     for (const auto& kernel : kernels) {
         slots.push_back(kernel.Slot);

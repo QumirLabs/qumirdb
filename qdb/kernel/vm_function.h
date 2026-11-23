@@ -12,6 +12,7 @@
 
 namespace NQumir::NFrontend {
 class TSourceModuleLoader;
+struct TSourceModule;
 }
 
 namespace NQumir::NIR {
@@ -22,6 +23,10 @@ namespace NQdb {
 
 class TExternalCatalogSnapshot;
 
+namespace NKernel {
+class TQueryModules;
+}
+
 struct TVmFunctionSpec {
     std::string NamePrefix;
     std::vector<NQumir::NAst::TParam> Params;
@@ -30,13 +35,19 @@ struct TVmFunctionSpec {
     std::vector<std::string> Imports;
 };
 
-// The frontend state of one query: source modules are registered and parsed once,
-// in the query's type factory, which must outlive the context. Each independent
-// transform/lowering gets a fresh resolver so semantic mutations cannot leak between
-// compilations. Loader access is serialized because its parsed-module cache is stateful.
+// A frontend in the query's type factory, which must outlive the context. Its source
+// modules come parsed from the query's modules, and every composition clones them. Each
+// independent transform/lowering gets a fresh resolver so semantic mutations cannot leak
+// between compilations. Loader access is serialized because the loader is stateful.
 class TVmFrontendContext {
 public:
-    TVmFrontendContext(NQumir::NAst::TTypeFactory& types, std::vector<std::string> moduleFiles = {});
+    // Without source modules.
+    explicit TVmFrontendContext(NQumir::NAst::TTypeFactory& types);
+    // With the modules of `moduleFiles` (NUtils::ModuleFile paths).
+    TVmFrontendContext(
+        NQumir::NAst::TTypeFactory& types,
+        NKernel::TQueryModules& modules,
+        const std::vector<std::string>& moduleFiles);
     ~TVmFrontendContext();
 
     TVmFrontendContext(const TVmFrontendContext&) = delete;
@@ -44,13 +55,12 @@ public:
 
     NQumir::NAst::TTypeFactory& Types();
 
-    std::optional<std::string> RegisterSourceModule(const std::string& path);
     std::optional<std::string> RegisterExternalDeclarations(
         const TExternalCatalogSnapshot& catalog);
 
     std::string UniqueName(std::string_view prefix);
-    std::expected<NQumir::NAst::TExprPtr, std::string> Compose(
-        NQumir::NAst::TExprPtr module);
+    // The loaded modules as parsed, to read only: compositions clone them.
+    std::vector<const NQumir::NFrontend::TSourceModule*> SourceModules();
     std::expected<NQumir::NAst::TExprPtr, std::string> Transform(
         NQumir::NAst::TExprPtr module);
     // Lowers engine-generated code, kernels and planning-time functions, without

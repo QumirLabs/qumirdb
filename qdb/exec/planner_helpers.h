@@ -136,7 +136,7 @@ TProjectColumnPlan BuildProjectColumnPlan(
     NQumir::NAst::TTypeFactory& types,
     TProjectOperator& project,
     const NQumir::NAst::TStructType& inputStruct,
-    const NKernel::TAnnotationContext* annotation = nullptr);
+    const NKernel::TAnnotationContext* annotation);
 
 // Print a human-readable runtime-plan tree for diagnostics (--verbose).
 void PrintRuntimePlan(

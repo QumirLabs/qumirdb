@@ -621,6 +621,7 @@ TExternalCatalogSnapshot::TExternalCatalogSnapshot(
             throw parsed.error();
         }
         functions = std::move(parsed->Functions);
+        Sources_.emplace(name, TParsedSource{std::move(parsed->Ast), std::move(parsed->Pragmas)});
     }
 }
 
@@ -794,16 +795,9 @@ TExternalCatalogSnapshot::ComposeReferenced(
                 {std::move(*bitcode)},
                 {TPragma{"language", {"overloads"}, {}}});
         } else if (module->Language == "kumir" || module->Language == "ozlang") {
-            auto parsed = ParseSourceModule(
-                types, module->Name, module->Source, module->Language);
-            if (!parsed) {
-                return std::unexpected(parsed.error());
-            }
-            loaded = loader.LoadAst(
-                module->Name,
-                std::move(parsed->Ast),
-                {},
-                std::move(parsed->Pragmas));
+            // The resolver and the transforms change the composed module, so it is a clone.
+            const auto& source = Sources_.at(module->Name);
+            loaded = loader.LoadAst(module->Name, DeepCloneExpr(source.Ast), {}, source.Pragmas);
         }
         if (!loaded) {
             return std::unexpected(loaded.error());

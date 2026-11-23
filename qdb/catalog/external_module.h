@@ -62,6 +62,11 @@ public:
 private:
     struct TResolvedTypes;
     using TFunctions = std::map<std::string, NQumir::TIntrusivePtr<NQumir::NAst::TFunDecl>>;
+    // A parsed Kumir or oz-lang module; compositions clone it.
+    struct TParsedSource {
+        NQumir::NAst::TExprPtr Ast;
+        std::vector<NQumir::NAst::TPragma> Pragmas;
+    };
 
     TExternalCatalogSnapshot(
         std::shared_ptr<const TState> state,
@@ -76,6 +81,8 @@ private:
     std::shared_ptr<NQumir::NAst::TTypeFactory> Types_;
     // By module name, then by function key.
     std::map<std::string, TFunctions> Functions_;
+    // By module name; Functions_ points into them.
+    std::map<std::string, TParsedSource> Sources_;
     std::shared_ptr<TResolvedTypes> ResolvedTypes_;
 
     friend class TExternalModuleCatalog;

@@ -1542,7 +1542,8 @@ TLoweredFragment LowerFragment(const std::string& sql)
     const auto in = std::get<TSinkWriterNode>(writer.Body).In;
     writer.Body = TRemoteSinkNode{.In = in};
     spec->Externals.push_back({.Id = 1, .Node = static_cast<uint32_t>(spec->Nodes.size() - 1)});
-    return {std::move(*spec), SerializeKernelImage(CompileKernelImage(lowered.Kernels, TestTypes()))};
+    return {std::move(*spec), SerializeKernelImage(
+        CompileKernelImage(lowered.Kernels, TestTypes(), *lowered.Annotation.Modules))};
 }
 
 // Plays the query actor: counts what the compute actor reports.
@@ -3216,7 +3217,7 @@ TEST(DistributedScheduler, SplitsALoweredPlanIntoFragmentSpecs) {
     const auto fragments = ExtractFragmentSpecs(lowered);
     ASSERT_EQ(fragments.size(), 3u);
     ASSERT_EQ(split.Graphs().size(), 3u);
-    auto image = CompileKernelImage(lowered.Kernels, TestTypes());
+    auto image = CompileKernelImage(lowered.Kernels, TestTypes(), *lowered.Annotation.Modules);
     std::vector<std::shared_ptr<TKernelSlot>> slots;
     for (size_t i = 0; i < image.Entrypoints.size(); ++i) {
         slots.push_back(std::make_shared<TKernelSlot>());
@@ -3391,7 +3392,7 @@ std::string RunLocally(const std::string& sql, const NQdb::NScheduler::TSettings
     TDecimalsCompiler compiler;
     const auto prepared = PlanQuery(compiler, sql);
     auto lowered = LowerPlanToGraph(prepared.Plan, prepared.Types, settings, nullptr);
-    FinalizeKernels(lowered.Kernels, prepared.Types, settings.Kernel.Backend);
+    FinalizeKernels(lowered.Kernels, prepared.Types, lowered.Annotation, settings.Kernel.Backend);
     std::vector<TColumnSchema> columns;
     for (const auto& [name, type] : static_cast<const NQumir::NAst::TStructType&>(*lowered.OutputType).Fields) {
         columns.push_back({.Name = name, .Type = type});
@@ -3536,7 +3537,7 @@ TEST(DistributedScheduler, SplitsRuntimeFiltersSoEveryProbeMergesEveryBuildLane)
     }
 
     // The fragments build, with the placeholders of each cut on their ends.
-    auto image = CompileKernelImage(lowered.Kernels, TestTypes());
+    auto image = CompileKernelImage(lowered.Kernels, TestTypes(), *lowered.Annotation.Modules);
     std::vector<std::shared_ptr<TKernelSlot>> slots;
     for (size_t i = 0; i < image.Entrypoints.size(); ++i) {
         slots.push_back(std::make_shared<TKernelSlot>());
@@ -3668,7 +3669,7 @@ TEST(DistributedScheduler, SplitsACteIntoSegmentAndSpoolCuts) {
     }));
 
     // The fragments build, with the placeholders of each cut on their ends.
-    auto image = CompileKernelImage(lowered.Kernels, TestTypes());
+    auto image = CompileKernelImage(lowered.Kernels, TestTypes(), *lowered.Annotation.Modules);
     std::vector<std::shared_ptr<TKernelSlot>> slots;
     for (size_t i = 0; i < image.Entrypoints.size(); ++i) {
         slots.push_back(std::make_shared<TKernelSlot>());

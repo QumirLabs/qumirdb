@@ -273,9 +273,9 @@ public:
         NQumir::NAst::TTypeFactory&,
         const NQumir::NAst::TExprPtr&,
         std::string_view,
+        const NQdb::NKernel::TAnnotationContext&,
         std::ostream*,
-        const std::unordered_set<std::string>*,
-        const NQdb::NKernel::TAnnotationContext*) const override
+        const std::unordered_set<std::string>*) const override
     {
         if (Stats_.Rows <= 0 || Stats_.RowGroups == 0) {
             return {};
@@ -650,9 +650,10 @@ std::expected<TCompiledWasm64Module, std::string> CompileKernelAstToWasm(
     int64_t globalBase,
     const std::vector<std::string>& entryNames,
     const std::string& cacheDir,
-    const std::shared_ptr<const NQdb::TExternalCatalogSnapshot>& externalCatalog,
+    const NQdb::NKernel::TAnnotationContext& annotation,
     int wasmBits)
 {
+    const auto& externalCatalog = annotation.ExternalCatalog;
     const std::string targetTriple =
         wasmBits == 32 ? "wasm32-unknown-unknown" : "wasm64-unknown-unknown";
     auto opts = NQdb::KernelRunnerOptions();
@@ -676,9 +677,10 @@ std::expected<TCompiledWasm64Module, std::string> CompileKernelAstToWasm(
         }
         externalProgram = std::move(*composed);
     }
+    auto& modules = *annotation.Modules;
     if (externalProgram) {
         auto object = NQdb::CompileKernelAstToObject(
-            runner, std::move(*externalProgram), entryNames, &err);
+            runner, modules, std::move(*externalProgram), entryNames, &err);
         if (!object) {
             return std::unexpected(
                 err.empty() ? "wasm kernel compilation failed" : err);
@@ -686,7 +688,7 @@ std::expected<TCompiledWasm64Module, std::string> CompileKernelAstToWasm(
         objectBlobs.push_back(std::move(*object));
     } else if (cacheDir.empty()) {
         auto object = NQdb::CompileKernelAstToObject(
-            runner, std::move(ast), entryNames, &err);
+            runner, modules, {.Ast = std::move(ast)}, entryNames, &err);
         if (!object) {
             return std::unexpected(
                 err.empty() ? "wasm kernel compilation failed" : err);
@@ -694,7 +696,7 @@ std::expected<TCompiledWasm64Module, std::string> CompileKernelAstToWasm(
         objectBlobs.push_back(std::move(*object));
     } else {
         auto compiled = NQdb::CompileKernelAstToObjectsCached(
-            runner, std::move(ast), entryNames, cacheDir, &err);
+            runner, modules, std::move(ast), entryNames, cacheDir, &err);
         if (!compiled) {
             return std::unexpected(
                 err.empty() ? "cached wasm kernel compilation failed" : err);
@@ -1731,7 +1733,7 @@ TWasmFinalizeResult WasmFinalizeKernels(
     llvm::json::Array& diagnostics,
     bool embedWasm,
     const std::string& cacheDir,
-    const std::shared_ptr<const NQdb::TExternalCatalogSnapshot>& externalCatalog,
+    const NQdb::NKernel::TAnnotationContext& annotation,
     int wasmBits)
 {
     TWasmFinalizeResult out;
@@ -1780,7 +1782,7 @@ TWasmFinalizeResult WasmFinalizeKernels(
 
     auto fused = NQdb::BuildFusedProgram(unique);
     auto wasm = CompileKernelAstToWasm(
-        types, fused.Program, WasmSlot0, fused.Entrypoints, cacheDir, externalCatalog, wasmBits);
+        types, fused.Program, WasmSlot0, fused.Entrypoints, cacheDir, annotation, wasmBits);
     if (!wasm) {
         out.ErrorStage = "wasm-fusion";
         out.Error = wasm.error();
@@ -2286,6 +2288,7 @@ std::optional<llvm::json::Object> BuildWindowStageJson(
 
 struct TExecPlanCodec {
     NQumir::NAst::TTypeFactory& Types;
+    const NQdb::NKernel::TAnnotationContext& Annotation;
     const NQdb::TExecPlan& Plan;
     const TKernelIndex& Kernels;
     bool EmbedWasm = false;
@@ -2398,7 +2401,7 @@ struct TExecPlanCodec {
                     static_cast<const NQdb::TProjectOperator*>(node.Operator));
                 auto* input = static_cast<const TStructType*>(
                     Input(node, 0).OutputType);
-                auto columnPlan = BuildProjectColumnPlan(Types, *project, *input);
+                auto columnPlan = BuildProjectColumnPlan(Types, *project, *input, &Annotation);
                 llvm::json::Object entrypoints;
                 if (!columnPlan.ComputedExprs.empty()) {
                     const auto* ref = FindKernel(
@@ -2780,6 +2783,7 @@ struct TExecPlanCodec {
 
 llvm::json::Object EncodeExecPlan(
     NQumir::NAst::TTypeFactory& types,
+    const NQdb::NKernel::TAnnotationContext& annotation,
     const NQdb::TExecPlan* plan,
     std::span<const NQdb::TGeneratedKernel> kernels,
     std::span<const TKernelArtifacts> artifacts,
@@ -2798,6 +2802,7 @@ llvm::json::Object EncodeExecPlan(
         });
         return TExecPlanCodec{
             .Types = types,
+            .Annotation = annotation,
             .Plan = *plan,
             .Kernels = kernelIndex,
             .EmbedWasm = embedWasm,
@@ -2819,7 +2824,6 @@ llvm::json::Object BuildBundle(
         return ErrorObject("parse", plan.error().ToString());
     }
     auto annotation = std::move(plan->Annotation);
-    auto externalCatalog = annotation.ExternalCatalog;
     auto logicalPlan = std::move(plan->Plan);
 
     NQdb::TPlanPassDiagnostics planDiagnostics;
@@ -2920,7 +2924,7 @@ llvm::json::Object BuildBundle(
             diagnostics,
             request.EmbedWasm,
             cacheDir,
-            externalCatalog,
+            annotation,
             request.WasmBits);
         loweredKernels = std::move(lowered.Kernels);
 
@@ -2953,6 +2957,7 @@ llvm::json::Object BuildBundle(
     } else if (typedExecPlan) {
         execPlan = EncodeExecPlan(
             *request.Types,
+            annotation,
             &*typedExecPlan,
             loweredKernels,
             wasmFinalized.Kernels,

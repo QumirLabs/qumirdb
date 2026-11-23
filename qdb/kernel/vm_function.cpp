@@ -2,6 +2,7 @@
 
 #include <qdb/catalog/external_module.h>
 #include <qdb/kernel/annotate_type.h>
+#include <qdb/kernel/query_modules.h>
 #include <qdb/utils/module_path.h>
 
 #include <qumir/frontend/compose.h>
@@ -46,14 +47,20 @@ struct TVmFrontendContext::TImpl {
     std::mutex Mutex;
 };
 
+TVmFrontendContext::TVmFrontendContext(TTypeFactory& types)
+    : Impl_(std::make_unique<TImpl>(types))
+{
+}
+
 TVmFrontendContext::TVmFrontendContext(
     TTypeFactory& types,
-    std::vector<std::string> moduleFiles)
+    NKernel::TQueryModules& modules,
+    const std::vector<std::string>& moduleFiles)
     : Impl_(std::make_unique<TImpl>(types))
 {
     for (const auto& path : moduleFiles) {
-        if (auto error = RegisterSourceModule(path)) {
-            Impl_->LoadError = std::move(*error);
+        if (auto loaded = modules.Load(Impl_->Loader, path); !loaded) {
+            Impl_->LoadError = loaded.error().ToString();
             break;
         }
     }
@@ -63,17 +70,6 @@ TVmFrontendContext::~TVmFrontendContext() = default;
 
 TTypeFactory& TVmFrontendContext::Types() {
     return Impl_->Types;
-}
-
-std::optional<std::string> TVmFrontendContext::RegisterSourceModule(
-    const std::string& path)
-{
-    std::lock_guard lock(Impl_->Mutex);
-    auto registered = Impl_->Loader.RegisterSourceModule(path);
-    if (!registered) {
-        return registered.error().ToString();
-    }
-    return std::nullopt;
 }
 
 std::optional<std::string> TVmFrontendContext::RegisterExternalDeclarations(
@@ -92,19 +88,12 @@ std::string TVmFrontendContext::UniqueName(std::string_view prefix) {
     return std::string(prefix) + std::to_string(Impl_->Counter++) + "__";
 }
 
-std::expected<TExprPtr, std::string> TVmFrontendContext::Compose(
-    TExprPtr module)
-{
+std::vector<const NQumir::NFrontend::TSourceModule*> TVmFrontendContext::SourceModules() {
     std::lock_guard lock(Impl_->Mutex);
     if (Impl_->LoadError) {
-        return std::unexpected(*Impl_->LoadError);
+        return {};
     }
-    auto composed = NQumir::NFrontend::LoadAndCompose(
-        Impl_->Loader, module, Impl_->Pragmas, /*cloneSourceModules*/ true);
-    if (!composed) {
-        return std::unexpected(composed.error().ToString());
-    }
-    return std::move(composed->Ast);
+    return Impl_->Loader.TopologicalOrder();
 }
 
 namespace {

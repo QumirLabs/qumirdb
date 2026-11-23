@@ -3,6 +3,7 @@
 #include <qdb/exec/join_exec.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/lib.h>
+#include <qdb/kernel/query_modules.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
@@ -71,7 +72,8 @@ CompileRowIdSort(const std::vector<NQdb::TSortRadixKeyInput>& keys) {
     auto program = NQumir::MakeIntrusive<NQumir::NAst::TBlockExpr>(
         NQumir::TLocation{}, std::move(statements));
     std::string error;
-    auto entries = NQdb::CompileKernelAst(*runner, std::move(program),
+    NQdb::NKernel::TQueryModules modules(NQdb::TestTypes());
+    auto entries = NQdb::CompileKernelAst(*runner, modules, {.Ast = std::move(program)},
                                           {"test_sort_row_ids"}, &error);
     auto entry = entries.find("test_sort_row_ids");
     if (entry == entries.end() || !entry->second) {

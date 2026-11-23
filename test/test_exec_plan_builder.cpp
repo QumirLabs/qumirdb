@@ -48,9 +48,9 @@ public:
         NQumir::NAst::TTypeFactory&,
         const NQumir::NAst::TExprPtr&,
         std::string_view,
+        const NQdb::NKernel::TAnnotationContext&,
         std::ostream*,
-        const std::unordered_set<std::string>*,
-        const NQdb::NKernel::TAnnotationContext*) const override {
+        const std::unordered_set<std::string>*) const override {
         return {
             {.RowGroup = 0, .RowCount = 100, .ByteSize = 800},
             {.RowGroup = 1, .RowCount = 100, .ByteSize = 800},
@@ -80,9 +80,9 @@ public:
         NQumir::NAst::TTypeFactory&,
         const NQumir::NAst::TExprPtr&,
         std::string_view,
+        const NQdb::NKernel::TAnnotationContext&,
         std::ostream*,
-        const std::unordered_set<std::string>*,
-        const NQdb::NKernel::TAnnotationContext*) const override {
+        const std::unordered_set<std::string>*) const override {
         return {
             {.RowGroup = 0, .RowCount = 25'000'000, .ByteSize = 200'000'000},
             {.RowGroup = 1, .RowCount = 25'000'000, .ByteSize = 200'000'000},
@@ -506,7 +506,7 @@ TEST(ExecPlanBuilder, RuntimeFiltersShareTheQueryJit) {
     EXPECT_NE(filter->RuntimeContext, secondFilter->RuntimeContext);
     EXPECT_FALSE(filter->Slot->Runner);
 
-    FinalizeKernels(first.Kernels, SharedTestTypes(), EKernelBackend::Llvm);
+    FinalizeKernels(first.Kernels, SharedTestTypes(), first.Annotation, EKernelBackend::Llvm);
     ASSERT_TRUE(filter->Slot->Runner);
     for (const auto& kernel : first.Kernels) {
         EXPECT_EQ(kernel.Slot->Runner, filter->Slot->Runner);
@@ -703,7 +703,7 @@ std::vector<std::string> ExpectQueryFromSpec(
     const auto decoded = NScheduler::DeserializeGraphSpec(bytes);
     EXPECT_EQ(NScheduler::SerializeGraphSpec(decoded), bytes);
 
-    FinalizeKernels(lowered->Kernels, SharedTestTypes(), settings.Kernel.Backend);
+    FinalizeKernels(lowered->Kernels, SharedTestTypes(), lowered->Annotation, settings.Kernel.Backend);
     std::vector<std::shared_ptr<TKernelSlot>> slots;
     for (const auto& kernel : lowered->Kernels) {
         slots.push_back(kernel.Slot);

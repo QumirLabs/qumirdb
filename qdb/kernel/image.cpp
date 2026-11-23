@@ -88,6 +88,7 @@ std::string ReadFile(const std::string& path)
 TKernelImage CompileKernelImage(
     std::span<TGeneratedKernel> kernels,
     NQumir::NAst::TTypeFactory& types,
+    NKernel::TQueryModules& modules,
     EKernelBackend backend,
     const std::string& cacheDir)
 {
@@ -113,14 +114,15 @@ TKernelImage CompileKernelImage(
     TKernelImage image;
     // The object cache is built on the partitioned LLVM codegen.
     if (cacheDir.empty() || backend != EKernelBackend::Llvm) {
-        auto object = CompileKernelAstToObject(runner, fused.Program, fused.Entrypoints, &error);
+        auto object = CompileKernelAstToObject(
+            runner, modules, {.Ast = fused.Program}, fused.Entrypoints, &error);
         if (!object) {
             throw std::runtime_error("kernel image compilation failed: " + error);
         }
         image.Object = std::move(*object);
     } else {
         auto compiled = CompileKernelAstToObjectsCached(
-            runner, fused.Program, fused.Entrypoints, cacheDir, &error);
+            runner, modules, fused.Program, fused.Entrypoints, cacheDir, &error);
         if (!compiled) {
             throw std::runtime_error("kernel image compilation failed: " + error);
         }

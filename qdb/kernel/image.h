@@ -11,6 +11,10 @@
 
 namespace NQdb {
 
+namespace NKernel {
+class TQueryModules;
+} // namespace NKernel
+
 // Compiled native code of kernels that another process loads without compiling.
 // Object is one relocatable PIC object; runtime helpers stay undefined symbols
 // that the loader binds by name.
@@ -26,10 +30,11 @@ struct TKernelImage {
 // With the llvm backend a non-empty cacheDir persists the library objects there (created if missing)
 // and the image carries them in Dependencies; tpde has no cache, vm throws (an image is native code).
 // Fusion rewrites the ASTs, so the kernels cannot be finalized afterwards. The kernels
-// are built in `types`.
+// are built in `types` and composed with the query's `modules`.
 TKernelImage CompileKernelImage(
     std::span<TGeneratedKernel> kernels,
     NQumir::NAst::TTypeFactory& types,
+    NKernel::TQueryModules& modules,
     EKernelBackend backend = EKernelBackend::Llvm,
     const std::string& cacheDir = {});
 

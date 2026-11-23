@@ -1,5 +1,6 @@
 #include <qdb/plan/passes/const_fold.h>
 #include <qdb/kernel/annotate_type.h>
+#include <qdb/kernel/query_modules.h>
 #include <qdb/kernel/vm_function.h>
 #include <qdb/modules/qumirdb.h>
 #include <qdb/plan/types/decimal.h>
@@ -121,7 +122,8 @@ TEST(ConstFold, LeavesExpressionItCannotTypeUnfolded) {
 // Arithmetic over Qumir's own types compiles without the qumirdb module; the
 // fold must give what the module's compilation gives.
 TEST(ConstFold, BuiltinArithmeticFoldsAsWithTheModule) {
-    NQdb::TVmFrontendContext module(NQdb::TestTypes(), {NQdb::NUtils::ModuleFile("qumirdb.oz")});
+    NQdb::NKernel::TQueryModules modules(NQdb::TestTypes());
+    NQdb::TVmFrontendContext module(NQdb::TestTypes(), modules, {NQdb::NUtils::ModuleFile("qumirdb.oz")});
     for (const char* src : {
         "(+ 1212 11)", "(// 7 2)", "(% -7 2)", "(* 9223372036854775807 2)",
         "(cast -3.7 i32)", "(- (cast 5 u8) (cast 6 u8))", "(cast (cast 300 i32) i8)",

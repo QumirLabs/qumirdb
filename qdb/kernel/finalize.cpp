@@ -1,6 +1,7 @@
 #include <qdb/kernel/finalize.h>
 
 #include <qdb/catalog/external_module.h>
+#include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/finalize_fused.h>
 #include <qdb/kernel/vm_program.h>
@@ -35,11 +36,12 @@ struct TFusedKernelStorage {
 void FinalizeKernels(
     std::span<TGeneratedKernel> kernels,
     std::shared_ptr<NQumir::NAst::TTypeFactory> types,
+    const NKernel::TAnnotationContext& annotation,
     EKernelBackend backend,
     std::ostream* diagnostics,
-    std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog,
     const std::string& cacheDir)
 {
+    const auto& externalCatalog = annotation.ExternalCatalog;
     auto [unique, bindings] = DeduplicateKernels(kernels, [&](const TGeneratedKernel& kernel) {
         if (kernel.Slot->Runner || kernel.Slot->Vm) {
             if ((kernel.Slot->Vm != nullptr) != (backend == EKernelBackend::Vm)) {
@@ -84,7 +86,7 @@ void FinalizeKernels(
             throw std::runtime_error(
                 "the vm kernel backend does not run external modules; use --kernel:backend=llvm");
         }
-        auto program = PrepareVmProgram(*types, storage->Program, fused.Entrypoints);
+        auto program = PrepareVmProgram(*types, *annotation.Modules, storage->Program, fused.Entrypoints);
         if (diagnostics) {
             *diagnostics << "========== END RUNTIME FUSED FINALIZE ==========\n";
         }
@@ -125,19 +127,21 @@ void FinalizeKernels(
         }
         externalProgram = std::move(*composed);
     }
+    auto& modules = *annotation.Modules;
     if (externalProgram) {
         if (diagnostics && !cacheDir.empty()) {
             *diagnostics << "[external-modules] persistent JIT cache bypassed\n";
         }
         fns = CompileKernelAst(
-            *runner, std::move(*externalProgram), fused.Entrypoints, &error);
+            *runner, modules, std::move(*externalProgram), fused.Entrypoints, &error);
     } else if (useCache) {
         auto linked = CompileKernelAstCached(
-            *runner, storage->Program, fused.Entrypoints, cacheDir, &error);
+            *runner, modules, storage->Program, fused.Entrypoints, cacheDir, &error);
         fns = std::move(linked.Entries);
         jitLifetime = std::move(linked.Lifetime);
     } else {
-        fns = CompileKernelAst(*runner, storage->Program, fused.Entrypoints, &error);
+        fns = CompileKernelAst(
+            *runner, modules, {.Ast = storage->Program}, fused.Entrypoints, &error);
     }
     if (diagnostics) {
         *diagnostics << "========== END RUNTIME FUSED FINALIZE ==========\n";

@@ -1,7 +1,9 @@
 #include "mock_source.h"
 
 #include <qdb/compiler/query.h>
+#include <qdb/kernel/query_modules.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/utils/module_path.h>
 
 #include <gtest/gtest.h>
 
@@ -89,6 +91,23 @@ TEST(QueryCompiler, DeclarationsAreAppliedBeforeQueries) {
             EXPECT_TRUE((**prepared).Annotation.ExternalCatalog->HasFunction("convert"));
         }
     }
+}
+
+// Typing, pruning and the kernels of a query load its modules from one parse.
+TEST(QueryCompiler, PreparedQueryParsesEachModuleOnce) {
+    TFixture fixture;
+    auto query = fixture.Parse("SELECT value FROM items;");
+    ASSERT_TRUE(query) << query.error().ToString();
+    auto prepared = fixture.Compiler.Prepare(query->Statements[0]);
+    ASSERT_TRUE(prepared) << prepared.error().ToString();
+    ASSERT_TRUE(*prepared);
+    auto& modules = *(**prepared).Annotation.Modules;
+    const auto file = NUtils::ModuleFile("qumirdb.oz");
+    NQumir::NFrontend::TSourceModuleLoader first(modules.Types());
+    NQumir::NFrontend::TSourceModuleLoader second(modules.Types());
+    ASSERT_TRUE(modules.Load(first, file));
+    ASSERT_TRUE(modules.Load(second, file));
+    EXPECT_EQ(first.Find("qumirdb")->Ast.Get(), second.Find("qumirdb")->Ast.Get());
 }
 
 TEST(QueryCompiler, SexprUsesSourceFactory) {

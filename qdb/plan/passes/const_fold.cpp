@@ -97,7 +97,7 @@ TConstFolder::TConstFolder(
     NQumir::NAst::TTypeFactory& types,
     const NKernel::TAnnotationContext* annotation)
     : Types_(types)
-    , Annotation_(annotation)
+    , Annotation_(NKernel::CompleteAnnotationContext(types, annotation))
 {}
 
 TConstFolder::~TConstFolder() = default;
@@ -118,7 +118,7 @@ TExprPtr TConstFolder::Eval(const TExprPtr& expr, const TTypePtr& type) {
     }
     if (!Qumirdb_) {
         Qumirdb_ = std::make_unique<TVmFrontendContext>(
-            types, std::vector<std::string>{NUtils::ModuleFile("qumirdb.oz")});
+            types, *Annotation_.Modules, std::vector<std::string>{NUtils::ModuleFile("qumirdb.oz")});
     }
     return EvalClosed(types, *Qumirdb_, {"qumirdb"}, expr, type);
 }
@@ -136,7 +136,7 @@ TExprPtr TConstFolder::Fold(TExprPtr expr) {
     TTypePtr rewrittenType = nullptr;
     try {
         std::tie(rewritten, rewrittenType) =
-            NKernel::ExpandKernelExpr(types, CloneExpr(expr), *types.MakeStruct({}), Annotation_);
+            NKernel::ExpandKernelExpr(types, CloneExpr(expr), *types.MakeStruct({}), &Annotation_);
     } catch (const NQumir::TError&) {
         return expr;
     }

@@ -217,7 +217,7 @@ int ExecutePlan(
     const auto backend = config.Engine.Scheduler.Kernel.Backend;
     auto llvmStart = std::chrono::steady_clock::now();
     NQdb::FinalizeKernels(
-        lowered.Kernels, lowered.Types, backend, diagnostics, annotation.ExternalCatalog,
+        lowered.Kernels, lowered.Types, lowered.Annotation, backend, diagnostics,
         config.Engine.Scheduler.Jit.CacheDir);
     auto llvmElapsed = std::chrono::steady_clock::now() - llvmStart;
 

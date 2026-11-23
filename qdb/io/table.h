@@ -36,9 +36,9 @@ struct ITable {
         NQumir::NAst::TTypeFactory& types,
         const NQumir::NAst::TExprPtr& predicate,
         std::string_view sourceAlias,
+        const NKernel::TAnnotationContext& annotation,
         std::ostream* diagnostics = nullptr,
-        const std::unordered_set<std::string>* columnNames = nullptr,
-        const NKernel::TAnnotationContext* annotation = nullptr) const = 0;
+        const std::unordered_set<std::string>* columnNames = nullptr) const = 0;
 };
 
 } // namespace NQdb
