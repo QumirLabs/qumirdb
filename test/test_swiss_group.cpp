@@ -20,7 +20,7 @@ class SwissGroup : public testing::Test {
 protected:
     void SetUp() override {
         auto library = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
-            NQdb::NKernel::ReadAggregationKernel("swiss_group.oz"));
+            NQdb::NKernel::ReadKernel("aggregation", "swiss_group.oz"));
         ASSERT_TRUE(library) << library.error().ToString();
         NQumir::TLLVMRunnerOptions options;
         options.CoreInput = true;

@@ -65,7 +65,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileKeyOperation(
             TLocation{}, key.StoredType));
     }
     auto stringOps = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
-        NQdb::NKernel::ReadAggregationKernel("string_ops.oz"));
+        NQdb::NKernel::ReadKernel("aggregation", "string_ops.oz"));
     if (!stringOps) {
         ADD_FAILURE() << stringOps.error().ToString();
         return {};
@@ -139,7 +139,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileCloneEntry(
             TLocation{}, key.StoredType));
     }
     auto stringOps = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
-        NQdb::NKernel::ReadAggregationKernel("string_ops.oz"));
+        NQdb::NKernel::ReadKernel("aggregation", "string_ops.oz"));
     if (!stringOps) {
         ADD_FAILURE() << stringOps.error().ToString();
         return {};

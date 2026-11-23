@@ -145,18 +145,22 @@ protected:
     void SetUp() override {
         std::vector<TExprPtr> functions;
         auto add = [&](const std::string& source, const std::string& name) {
-            auto library = NKernel::ParseFunctionLibrary(TestTypes(), source, {"aht_update"});
+            auto library = NKernel::ParseFunctionLibrary(TestTypes(), source);
             ASSERT_TRUE(library) << name << ": " << library.error().ToString();
+            std::erase_if(*library, [](const auto& stmt) {
+                auto fun = NQumir::NAst::TMaybeNode<NQumir::NAst::TFunDecl>(stmt);
+                return fun && fun.Cast()->Name == "aht_update";
+            });
             functions.insert(functions.end(), library->begin(), library->end());
         };
         for (const char* name : {
                  "key_ops_i64.oz", "swiss_group.oz", "robin_hood_rehash_generic.oz",
                  "owned_arena_lifecycle.oz", "aggregation_hashtable_generic.oz",
                  "owned_blocks.oz", "robin_hood_dual_key.oz"}) {
-            add(NKernel::ReadAggregationKernel(name), name);
+            add(NKernel::ReadKernel("aggregation", name), name);
         }
-        add(NKernel::ReadRowTableKernel(), "row_table.oz");
-        add(NKernel::ReadAggregationKernel("aggregation_rows.oz"), "aggregation_rows.oz");
+        add(NKernel::ReadKernel(".", "row_table.oz"), "row_table.oz");
+        add(NKernel::ReadKernel("aggregation", "aggregation_rows.oz"), "aggregation_rows.oz");
         add(RowEntries, "entries");
 
         auto options = KernelRunnerOptions();
@@ -901,7 +905,8 @@ std::set<std::string> ProgramFunctions(
     const auto layout = NKernel::BuildAggReducerLayout(
         {"count", "sum"}, {NKernel::TAggArg{}, NKernel::TAggArg{.ColumnIndex = 1}});
     auto named = [](const char* name) { return TestTypes().MakeNamed(name, nullptr); };
-    auto program = NKernel::BuildGenericAggregateFusedProgramAst(TestTypes(),
+    NKernel::TQueryModules modules(TestTypes(), TestModuleBase());
+    auto program = NKernel::BuildGenericAggregateFusedProgramAst(modules,
         input, key, layout, named("TColumn"), named("TRowSet"), named("HashTable"),
         false, {}, rows);
     EXPECT_TRUE(program) << program.error().ToString();

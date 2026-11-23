@@ -130,7 +130,7 @@ struct THeapFunctions {
 THeapFunctions CompileHeapFunctions() {
     std::vector<NQumir::NAst::TExprPtr> programStmts;
     auto library = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
-        NQdb::NKernel::ReadSortKernel("heap.oz"));
+        NQdb::NKernel::ReadKernel("sort", "heap.oz"));
     if (!library) {
         ADD_FAILURE() << library.error().ToString();
         return {};

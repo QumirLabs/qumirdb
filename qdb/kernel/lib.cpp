@@ -1,6 +1,7 @@
 #include <qdb/kernel/lib.h>
 
 #include <qdb/kernel/gen.h>
+#include <qdb/kernel/query_modules.h>
 #include <qdb/plan/types/date.h>
 #include <qdb/utils/module_path.h>
 
@@ -16,38 +17,15 @@
 namespace NQdb {
 namespace NKernel {
 
-namespace {
-
-std::string ReadKernel(
-    const char* kind, const std::string& name, const char* what)
-{
+std::string ReadKernel(const std::string& kind, const std::string& name) {
     auto path = NUtils::KernelFile(kind, name);
     std::ifstream input(path);
     if (!input) {
-        throw std::runtime_error(
-            std::string("cannot open ") + what + " kernel: " + path);
+        throw std::runtime_error("cannot open kernel library: " + path);
     }
     std::ostringstream source;
     source << input.rdbuf();
     return source.str();
-}
-
-} // namespace
-
-std::string ReadAggregationKernel(const std::string& name) {
-    return ReadKernel("aggregation", name, "aggregation");
-}
-
-std::string ReadJoinKernel(const std::string& name) {
-    return ReadKernel("join", name, "join");
-}
-
-std::string ReadSortKernel(const std::string& name) {
-    return ReadKernel("sort", name, "sort");
-}
-
-std::string ReadRowTableKernel() {
-    return ReadKernel(".", "row_table.oz", "row table");
 }
 
 namespace {
@@ -58,12 +36,13 @@ bool HasStringReducer(const TAggReducerLayout& layout) {
 }
 
 std::optional<NQumir::TError> AddParsedKernel(
-    NQumir::NAst::TTypeFactory& types,
+    TQueryModules& modules,
     std::vector<NQumir::NAst::TExprPtr>& library,
-    const std::string& source,
+    const std::string& kind,
+    const std::string& name,
     const std::unordered_set<std::string>& exclude = {})
 {
-    auto parsed = ParseFunctionLibrary(types, source, exclude);
+    auto parsed = modules.KernelLibrary(kind, name, exclude);
     if (!parsed) {
         return parsed.error();
     }
@@ -76,52 +55,48 @@ std::optional<NQumir::TError> AddParsedKernel(
 // The row table (kernel/row_table.oz) and the row layout of the aggregate table
 // over it, for an aggregate program with a row layout.
 std::optional<NQumir::TError> AddRowLayoutLibrary(
-    NQumir::NAst::TTypeFactory& types,
+    TQueryModules& modules,
     std::vector<NQumir::NAst::TExprPtr>& library)
 {
-    if (auto error = AddParsedKernel(types, library, ReadRowTableKernel())) {
+    if (auto error = AddParsedKernel(modules, library, ".", "row_table.oz")) {
         return error;
     }
-    return AddParsedKernel(types, library, ReadAggregationKernel("aggregation_rows.oz"));
+    return AddParsedKernel(modules, library, "aggregation", "aggregation_rows.oz");
 }
 
 std::optional<NQumir::TError> AddStringReducerLibrary(
-    NQumir::NAst::TTypeFactory& types,
+    TQueryModules& modules,
     std::vector<NQumir::NAst::TExprPtr>& library,
     const TAggReducerLayout& layout)
 {
     if (!HasStringReducer(layout)) {
         return std::nullopt;
     }
-    return AddParsedKernel(
-        types, library, ReadAggregationKernel("aggregation_string_reducer.oz"));
+    return AddParsedKernel(modules, library, "aggregation", "aggregation_string_reducer.oz");
 }
 
 // Shared join helpers. Teardown belongs to the allocation domain; only
 // working allocation/growth helpers are needed in these programs.
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
-BuildJoinLibraryBase(NQumir::NAst::TTypeFactory& types) {
+BuildJoinLibraryBase(TQueryModules& modules) {
     std::vector<NQumir::NAst::TExprPtr> library;
-    if (auto e = AddParsedKernel(types, library,
-            ReadAggregationKernel("swiss_group.oz"))) {
+    if (auto e = AddParsedKernel(modules, library, "aggregation", "swiss_group.oz")) {
         return std::unexpected(*e);
     }
-    if (auto e = AddParsedKernel(types, library, ReadAggregationKernel("key_ops_i64.oz"))) {
+    if (auto e = AddParsedKernel(modules, library, "aggregation", "key_ops_i64.oz")) {
         return std::unexpected(*e);
     }
-    if (auto e = AddParsedKernel(types, library,
-            ReadAggregationKernel("robin_hood_rehash_generic.oz"))) {
+    if (auto e = AddParsedKernel(modules, library, "aggregation", "robin_hood_rehash_generic.oz")) {
         return std::unexpected(*e);
     }
-    if (auto e = AddParsedKernel(types, library,
-            ReadAggregationKernel("aggregation_hashtable_generic.oz"),
+    if (auto e = AddParsedKernel(modules, library, "aggregation", "aggregation_hashtable_generic.oz",
             {"aht_update", "aht_destroy", "aht_destroy_slots"})) {
         return std::unexpected(*e);
     }
-    if (auto e = AddParsedKernel(types, library, ReadJoinKernel("join_table.oz"))) {
+    if (auto e = AddParsedKernel(modules, library, "join", "join_table.oz")) {
         return std::unexpected(*e);
     }
-    if (auto e = AddParsedKernel(types, library, ReadJoinKernel("materialize.oz"))) {
+    if (auto e = AddParsedKernel(modules, library, "join", "materialize.oz")) {
         return std::unexpected(*e);
     }
     return library;
@@ -130,8 +105,8 @@ BuildJoinLibraryBase(NQumir::NAst::TTypeFactory& types) {
 } // namespace
 
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
-BuildJoinKernelLibrary(NQumir::NAst::TTypeFactory& types) {
-    auto library = BuildJoinLibraryBase(types);
+BuildJoinKernelLibrary(TQueryModules& modules) {
+    auto library = BuildJoinLibraryBase(modules);
     if (!library) {
         return library;
     }
@@ -139,59 +114,59 @@ BuildJoinKernelLibrary(NQumir::NAst::TTypeFactory& types) {
     // join_semi_anti.oz, whose probe helpers call jt_residual_filter.
     // CompileJoin replaces this with a generated predicate when the query has
     // a residual filter.
-    if (auto e = AddParsedKernel(types, *library, ReadJoinKernel("join_residual_default.oz"))) {
+    if (auto e = AddParsedKernel(modules, *library, "join", "join_residual_default.oz")) {
         return std::unexpected(*e);
     }
-    if (auto e = AddParsedKernel(types, *library, ReadJoinKernel("join_update.oz"))) {
+    if (auto e = AddParsedKernel(modules, *library, "join", "join_update.oz")) {
         return std::unexpected(*e);
     }
-    if (auto e = AddParsedKernel(types, *library, ReadJoinKernel("join_semi_anti.oz"))) {
+    if (auto e = AddParsedKernel(modules, *library, "join", "join_semi_anti.oz")) {
         return std::unexpected(*e);
     }
-    if (auto e = AddParsedKernel(types, *library, ReadJoinKernel("join_mark.oz"))) {
+    if (auto e = AddParsedKernel(modules, *library, "join", "join_mark.oz")) {
         return std::unexpected(*e);
     }
     return library;
 }
 
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
-BuildCrossJoinKernelLibrary(NQumir::NAst::TTypeFactory& types) {
-    auto library = BuildJoinLibraryBase(types);
+BuildCrossJoinKernelLibrary(TQueryModules& modules) {
+    auto library = BuildJoinLibraryBase(modules);
     if (!library) {
         return library;
     }
     // Default always-true residual filter, called by join_cross.oz. Inner
     // keeps it (its residual filters the product downstream); CompileCrossJoin
     // replaces it with the residual that decides matches of the other types.
-    if (auto e = AddParsedKernel(types, *library, ReadJoinKernel("join_residual_default.oz"))) {
+    if (auto e = AddParsedKernel(modules, *library, "join", "join_residual_default.oz")) {
         return std::unexpected(*e);
     }
-    if (auto e = AddParsedKernel(types, *library, ReadJoinKernel("join_cross.oz"))) {
+    if (auto e = AddParsedKernel(modules, *library, "join", "join_cross.oz")) {
         return std::unexpected(*e);
     }
     return library;
 }
 
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
-BuildRowJoinKernelLibrary(NQumir::NAst::TTypeFactory& types) {
-    auto library = BuildJoinLibraryBase(types);
+BuildRowJoinKernelLibrary(TQueryModules& modules) {
+    auto library = BuildJoinLibraryBase(modules);
     if (!library) {
         return library;
     }
-    if (auto e = AddParsedKernel(types, *library, ReadRowTableKernel(), {"ra_destroy", "rt_destroy"})) {
+    if (auto e = AddParsedKernel(modules, *library, ".", "row_table.oz", {"ra_destroy", "rt_destroy"})) {
         return std::unexpected(*e);
     }
-    if (auto e = AddParsedKernel(types, *library, ReadJoinKernel("join_rows.oz"))) {
+    if (auto e = AddParsedKernel(modules, *library, "join", "join_rows.oz")) {
         return std::unexpected(*e);
     }
     return library;
 }
 
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
-BuildJoinDualKeyLibrary(NQumir::NAst::TTypeFactory& types) {
+BuildJoinDualKeyLibrary(TQueryModules& modules) {
     std::vector<NQumir::NAst::TExprPtr> library;
     for (const char* name : {"owned_blocks.oz", "robin_hood_dual_key.oz"}) {
-        auto parsed = ParseFunctionLibrary(types, ReadAggregationKernel(name));
+        auto parsed = modules.KernelLibrary("aggregation", name);
         if (!parsed) {
             return std::unexpected(NQumir::TError(
                 std::string(name) + ": " + parsed.error().ToString()));
@@ -206,8 +181,7 @@ BuildJoinDualKeyLibrary(NQumir::NAst::TTypeFactory& types) {
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
 ParseFunctionLibrary(
     NQumir::NAst::TTypeFactory& types,
-    const std::string& source,
-    const std::unordered_set<std::string>& exclude)
+    const std::string& source)
 {
     using namespace NQumir;
     using namespace NQumir::NAst;
@@ -234,9 +208,6 @@ ParseFunctionLibrary(
     for (auto& stmt : block.Cast()->Stmts) {
         auto fun = TMaybeNode<TFunDecl>(stmt);
         if (fun) {
-            if (exclude.contains(fun.Cast()->Name)) {
-                continue;
-            }
             // Library functions are stable across compilations, so cache them
             // (generics are already content-addressed by their instance name).
             if (fun.Cast()->GenericParams.empty() && !KeepBare.contains(fun.Cast()->Name)) {
@@ -297,7 +268,7 @@ BuildFilterProgramAst(
 
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
 BuildGenericAggregateProgramAst(
-    NQumir::NAst::TTypeFactory& types,
+    TQueryModules& modules,
     const NQumir::NAst::TStructType& inputType,
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
@@ -305,6 +276,7 @@ BuildGenericAggregateProgramAst(
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType)
 {
+    auto& types = modules.Types();
     std::vector<NQumir::NAst::TExprPtr> stmts;
     if (!key.LookupTypeName.empty()) {
         stmts.push_back(NQumir::MakeIntrusive<NQumir::NAst::TTypeDeclStmt>(
@@ -319,8 +291,7 @@ BuildGenericAggregateProgramAst(
     }
 
     if (key.HasDistinctLookupType()) {
-        auto stringOperations = ParseFunctionLibrary(
-            types, ReadAggregationKernel("string_ops.oz"));
+        auto stringOperations = modules.KernelLibrary("aggregation", "string_ops.oz");
         if (!stringOperations) {
             return std::unexpected(NQumir::TError(
                 "string_ops.oz: " + stringOperations.error().ToString()));
@@ -328,7 +299,7 @@ BuildGenericAggregateProgramAst(
         stmts.insert(
             stmts.end(), stringOperations->begin(), stringOperations->end());
     }
-    if (auto error = AddStringReducerLibrary(types, stmts, layout)) {
+    if (auto error = AddStringReducerLibrary(modules, stmts, layout)) {
         return std::unexpected(*error);
     }
     auto keyOperations = GenKeyOperationFunDecls(types, key);
@@ -339,16 +310,14 @@ BuildGenericAggregateProgramAst(
     stmts.insert(stmts.end(), reducerDecls.begin(), reducerDecls.end());
     stmts.push_back(GenApplyReducersFunDecl(types, layout));
 
-    auto swissGroup = ParseFunctionLibrary(
-        types, ReadAggregationKernel("swiss_group.oz"));
+    auto swissGroup = modules.KernelLibrary("aggregation", "swiss_group.oz");
     if (!swissGroup) {
         return std::unexpected(NQumir::TError(
             "swiss_group.oz: " + swissGroup.error().ToString()));
     }
     stmts.insert(stmts.end(), swissGroup->begin(), swissGroup->end());
 
-    auto arenaLifecycle = ParseFunctionLibrary(
-        types, ReadAggregationKernel("owned_arena_lifecycle.oz"));
+    auto arenaLifecycle = modules.KernelLibrary("aggregation", "owned_arena_lifecycle.oz");
     if (!arenaLifecycle) {
         return std::unexpected(NQumir::TError(
             "owned_arena_lifecycle.oz: " +
@@ -356,8 +325,8 @@ BuildGenericAggregateProgramAst(
     }
     stmts.insert(stmts.end(), arenaLifecycle->begin(), arenaLifecycle->end());
 
-    auto lifecycle = ParseFunctionLibrary(
-        types, ReadAggregationKernel("aggregation_hashtable_generic.oz"),
+    auto lifecycle = modules.KernelLibrary(
+        "aggregation", "aggregation_hashtable_generic.oz",
         {"rh_lookup_slot", "rh_insert_displace", "aht_rehash", "aht_update"});
     if (!lifecycle) {
         return std::unexpected(NQumir::TError(
@@ -367,7 +336,7 @@ BuildGenericAggregateProgramAst(
     stmts.insert(stmts.end(), lifecycle->begin(), lifecycle->end());
 
     for (const char* name : {"owned_blocks.oz", "robin_hood_dual_key.oz"}) {
-        auto parsed = ParseFunctionLibrary(types, ReadAggregationKernel(name));
+        auto parsed = modules.KernelLibrary("aggregation", name);
         if (!parsed) {
             return std::unexpected(NQumir::TError(
                 std::string(name) + ": " + parsed.error().ToString()));
@@ -390,21 +359,20 @@ BuildGenericAggregateProgramAst(
 
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
 BuildGenericAggregateFinalizeProgramAst(
-    NQumir::NAst::TTypeFactory& types,
+    TQueryModules& modules,
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr hashTableType,
     NQumir::NAst::TTypePtr columnType)
 {
-    auto parsed = ParseFunctionLibrary(
-        types, ReadAggregationKernel("aggregation_finalize_states.oz"));
+    auto& types = modules.Types();
+    auto parsed = modules.KernelLibrary("aggregation", "aggregation_finalize_states.oz");
     if (!parsed) {
         return std::unexpected(NQumir::TError(
             "aggregation_finalize_states.oz: " + parsed.error().ToString()));
     }
     if (key.HasDistinctLookupType()) {
-        auto stringOperations = ParseFunctionLibrary(
-            types, ReadAggregationKernel("string_ops.oz"));
+        auto stringOperations = modules.KernelLibrary("aggregation", "string_ops.oz");
         if (!stringOperations) {
             return std::unexpected(NQumir::TError(
                 "string_ops.oz: " + stringOperations.error().ToString()));
@@ -412,7 +380,7 @@ BuildGenericAggregateFinalizeProgramAst(
         parsed->insert(parsed->end(),
             stringOperations->begin(), stringOperations->end());
     }
-    if (auto error = AddStringReducerLibrary(types, *parsed, layout)) {
+    if (auto error = AddStringReducerLibrary(modules, *parsed, layout)) {
         return std::unexpected(*error);
     }
     auto entry = GenGenericAggregateFinalizeAst(
@@ -435,7 +403,7 @@ BuildGenericAggregateFinalizeProgramAst(
 
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
 BuildGenericAggregateFusedProgramAst(
-    NQumir::NAst::TTypeFactory& types,
+    TQueryModules& modules,
     const NQumir::NAst::TStructType& inputType,
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
@@ -447,6 +415,7 @@ BuildGenericAggregateFusedProgramAst(
     const std::optional<TAggRowLayout>& rows)
 {
     using namespace NQumir::NAst;
+    auto& types = modules.Types();
 
     std::vector<TExprPtr> stmts;
     if (!key.LookupTypeName.empty()) {
@@ -462,8 +431,7 @@ BuildGenericAggregateFusedProgramAst(
     }
 
     if (key.HasDistinctLookupType()) {
-        auto stringOperations = ParseFunctionLibrary(
-            types, ReadAggregationKernel("string_ops.oz"));
+        auto stringOperations = modules.KernelLibrary("aggregation", "string_ops.oz");
         if (!stringOperations) {
             return std::unexpected(NQumir::TError(
                 "string_ops.oz: " + stringOperations.error().ToString()));
@@ -471,7 +439,7 @@ BuildGenericAggregateFusedProgramAst(
         stmts.insert(
             stmts.end(), stringOperations->begin(), stringOperations->end());
     }
-    if (auto error = AddStringReducerLibrary(types, stmts, layout)) {
+    if (auto error = AddStringReducerLibrary(modules, stmts, layout)) {
         return std::unexpected(*error);
     }
     auto keyOperations = GenKeyOperationFunDecls(types, key);
@@ -482,16 +450,14 @@ BuildGenericAggregateFusedProgramAst(
     stmts.insert(stmts.end(), reducerDecls.begin(), reducerDecls.end());
     stmts.push_back(GenApplyReducersFunDecl(types, layout));
 
-    auto swissGroup = ParseFunctionLibrary(
-        types, ReadAggregationKernel("swiss_group.oz"));
+    auto swissGroup = modules.KernelLibrary("aggregation", "swiss_group.oz");
     if (!swissGroup) {
         return std::unexpected(NQumir::TError(
             "swiss_group.oz: " + swissGroup.error().ToString()));
     }
     stmts.insert(stmts.end(), swissGroup->begin(), swissGroup->end());
 
-    auto arenaLifecycle = ParseFunctionLibrary(
-        types, ReadAggregationKernel("owned_arena_lifecycle.oz"));
+    auto arenaLifecycle = modules.KernelLibrary("aggregation", "owned_arena_lifecycle.oz");
     if (!arenaLifecycle) {
         return std::unexpected(NQumir::TError(
             "owned_arena_lifecycle.oz: " +
@@ -499,8 +465,8 @@ BuildGenericAggregateFusedProgramAst(
     }
     stmts.insert(stmts.end(), arenaLifecycle->begin(), arenaLifecycle->end());
 
-    auto lifecycle = ParseFunctionLibrary(
-        types, ReadAggregationKernel("aggregation_hashtable_generic.oz"),
+    auto lifecycle = modules.KernelLibrary(
+        "aggregation", "aggregation_hashtable_generic.oz",
         {"rh_lookup_slot", "rh_insert_displace", "aht_rehash", "aht_update"});
     if (!lifecycle) {
         return std::unexpected(NQumir::TError(
@@ -512,7 +478,7 @@ BuildGenericAggregateFusedProgramAst(
     for (const char* name :
          {"owned_blocks.oz", "robin_hood_dual_key.oz",
           "aggregation_finalize_states.oz"}) {
-        auto parsed = ParseFunctionLibrary(types, ReadAggregationKernel(name));
+        auto parsed = modules.KernelLibrary("aggregation", name);
         if (!parsed) {
             return std::unexpected(NQumir::TError(
                 std::string(name) + ": " + parsed.error().ToString()));
@@ -520,7 +486,7 @@ BuildGenericAggregateFusedProgramAst(
         stmts.insert(stmts.end(), parsed->begin(), parsed->end());
     }
     if (rows) {
-        if (auto error = AddRowLayoutLibrary(types, stmts)) {
+        if (auto error = AddRowLayoutLibrary(modules, stmts)) {
             return std::unexpected(*error);
         }
     }
@@ -574,13 +540,14 @@ BuildGenericAggregateFusedProgramAst(
 
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
 BuildGenericAggregateMeasureProgramAst(
-    NQumir::NAst::TTypeFactory& types,
+    TQueryModules& modules,
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr hashTableType)
 {
+    auto& types = modules.Types();
     std::vector<NQumir::NAst::TExprPtr> stmts;
-    if (auto error = AddStringReducerLibrary(types, stmts, layout)) {
+    if (auto error = AddStringReducerLibrary(modules, stmts, layout)) {
         return std::unexpected(*error);
     }
     if (!key.StoredTypeName.empty() ||

@@ -347,7 +347,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileRadixOperation(
     std::vector<NQumir::NAst::TExprPtr> programStmts;
     auto addLibrary = [&](const std::string& name, bool skipUse) -> bool {
         auto library = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
-            NQdb::NKernel::ReadSortKernel(name));
+            NQdb::NKernel::ReadKernel("sort", name));
         if (!library) {
             ADD_FAILURE() << library.error().ToString();
             return false;
@@ -392,7 +392,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileTopSortOperation(
 {
     std::vector<NQumir::NAst::TExprPtr> programStmts;
     auto library = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
-        NQdb::NKernel::ReadSortKernel("top_sort.oz"));
+        NQdb::NKernel::ReadKernel("sort", "top_sort.oz"));
     if (!library) {
         ADD_FAILURE() << library.error().ToString();
         return {};
@@ -911,7 +911,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileSortStringsOperation(
 {
     std::vector<NQumir::NAst::TExprPtr> programStmts;
     auto library = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
-        NQdb::NKernel::ReadSortKernel("sort_strings.oz"));
+        NQdb::NKernel::ReadKernel("sort", "sort_strings.oz"));
     if (!library) {
         ADD_FAILURE() << library.error().ToString();
         return {};

@@ -125,7 +125,7 @@ NQumir::NAst::TExprPtr BuildSortRowIdLessAst(
 // ids in SQL sort order and returns their count. The tail holds unspecified
 // values, not the remaining row ids.
 NQumir::NAst::TExprPtr BuildHeapTopKProgramAst(
-    NQumir::NAst::TTypeFactory& types,
+    NKernel::TQueryModules& modules,
     const std::vector<TSortRadixKeyInput>& keys);
 
 // Radix composite sort program. With a materialize schema it exports one
@@ -133,13 +133,13 @@ NQumir::NAst::TExprPtr BuildHeapTopKProgramAst(
 // in-place, then materializes a requested slice into a kernel-owned TRowSet.
 // Throws on an unsupported key/output type.
 NQumir::NAst::TExprPtr BuildRadixSortProgramAst(
-    NQumir::NAst::TTypeFactory& types,
+    NKernel::TQueryModules& modules,
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType* materializeType = nullptr);
 
 // Nullable-key variant of qdb_sort_run.
 NQumir::NAst::TExprPtr BuildRadixSortNullableProgramAst(
-    NQumir::NAst::TTypeFactory& types,
+    NKernel::TQueryModules& modules,
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType* materializeType = nullptr);
 
@@ -149,7 +149,7 @@ NQumir::NAst::TExprPtr BuildRadixSortNullableProgramAst(
 // state into a kernel-owned TRowSet. pick_src/pick_idx are scratch buffers, not
 // host output.
 NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
-    NQumir::NAst::TTypeFactory& types,
+    NKernel::TQueryModules& modules,
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType* materializeType = nullptr);
 
@@ -170,7 +170,7 @@ struct TWindowFuncInput {
 // limit) slice into a kernel-owned TRowSet whose columns are the input columns
 // (in sorted order) followed by one computed column per window function.
 NQumir::NAst::TExprPtr BuildWindowProgramAst(
-    NQumir::NAst::TTypeFactory& types,
+    NKernel::TQueryModules& modules,
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType& inputType,
     const std::vector<TSortRadixKeyInput>& partitionKeys,
