@@ -323,11 +323,9 @@ public:
     }
 
 private:
-    // Snapshot every function's (planner) return type by name from the parsed modules,
-    // read without a composition. Extern decls carry an empty `(block)` body (not nullptr),
-    // so we walk the module ASTs rather than TNameResolver::GetExternalFunctions (which
-    // filters on a null body). We only ever look names up, so collecting non-extern fns
-    // too is benign.
+    // Snapshots every function's return type by name from the parsed modules, without a
+    // composition. Extern decls have an empty `(block)` body, not nullptr, so the module ASTs
+    // are walked instead of TNameResolver::GetExternalFunctions.
     void EnsureExterns() {
         if (ExternsBuilt_ || LoadError_) {
             return;
@@ -974,13 +972,19 @@ TTypePtr DecimalBinaryValueType(NQumir::NAst::TTypeFactory& types, TOperator op,
     ThrowDecimalUnsupported(op, "operator is not implemented for decimal values");
 }
 
-TTypePtr InferType(NQumir::NAst::TTypeFactory& types, const TAnnotationContext& context,
-    const TExprPtr& e, const TStructType& schema);
+TTypePtr InferType(
+    NQumir::NAst::TTypeFactory& types,
+    const TAnnotationContext& context,
+    const TExprPtr& e,
+    const TStructType& schema);
 
 // Arithmetic of fractional literals, integers and decimals: PostgreSQL types it NUMERIC, qdb
 // DOUBLE. A REAL or DOUBLE operand makes it a float in both, so it is not NUMERIC.
-bool IsNumericArithmetic(NQumir::NAst::TTypeFactory& types, const TAnnotationContext& context,
-    const TExprPtr& e, const TStructType& schema)
+bool IsNumericArithmetic(
+    NQumir::NAst::TTypeFactory& types,
+    const TAnnotationContext& context,
+    const TExprPtr& e,
+    const TStructType& schema)
 {
     if (IsFloatLiteral(e)) {
         return true;
@@ -1002,8 +1006,11 @@ bool IsNumericArithmetic(NQumir::NAst::TTypeFactory& types, const TAnnotationCon
 // a NULL, an integer, a decimal, a REAL, a fractional literal or arithmetic of
 // them (qdb types it DOUBLE, PostgreSQL NUMERIC), or a CASE of such values. Without the
 // schema only literals are told.
-bool AbsorbedByReal(NQumir::NAst::TTypeFactory& types, const TAnnotationContext& context,
-    const TExprPtr& e, const TStructType* schema)
+bool AbsorbedByReal(
+    NQumir::NAst::TTypeFactory& types,
+    const TAnnotationContext& context,
+    const TExprPtr& e,
+    const TStructType* schema)
 {
     if (!e || IsNullLiteral(e) || IsFloatLiteral(e)) {
         return true;
@@ -1024,8 +1031,11 @@ bool AbsorbedByReal(NQumir::NAst::TTypeFactory& types, const TAnnotationContext&
 }
 
 // PostgreSQL's common type of REAL with values it converts to REAL is REAL.
-bool IsRealCommonType(NQumir::NAst::TTypeFactory& types, const TAnnotationContext& context,
-    const std::vector<TTypePtr>& argTypes, const std::vector<TExprPtr>& exprs,
+bool IsRealCommonType(
+    NQumir::NAst::TTypeFactory& types,
+    const TAnnotationContext& context,
+    const std::vector<TTypePtr>& argTypes,
+    const std::vector<TExprPtr>& exprs,
     const TStructType* schema)
 {
     bool real = false;
@@ -1049,9 +1059,13 @@ bool IsRealCommonType(NQumir::NAst::TTypeFactory& types, const TAnnotationContex
 // (i32 then, i64 else -> i64), otherwise assume the branches already agree. The branch
 // expressions, when given, tell an integer literal beside a decimal (IntegerDecimalSpec)
 // and a value REAL absorbs (AbsorbedByReal, which sees CASE chains with the schema).
-TTypePtr UnifyBranchTypes(NQumir::NAst::TTypeFactory& types, const TAnnotationContext& context,
-    const TTypePtr& a, const TTypePtr& b,
-    const TExprPtr& ea = nullptr, const TExprPtr& eb = nullptr,
+TTypePtr UnifyBranchTypes(
+    NQumir::NAst::TTypeFactory& types,
+    const TAnnotationContext& context,
+    const TTypePtr& a,
+    const TTypePtr& b,
+    const TExprPtr& ea = nullptr,
+    const TExprPtr& eb = nullptr,
     const TStructType* schema = nullptr)
 {
     if (!a) return b ? UnwrapNullableType(b) : nullptr;
@@ -1104,9 +1118,12 @@ TTypePtr UnifyBranchTypes(NQumir::NAst::TTypeFactory& types, const TAnnotationCo
 // COALESCE result: value type (unified over non-NULL args) and whether every arg is
 // nullable (a bare NULL arg is ignored). Non-nullable arg => the whole COALESCE is
 // non-nullable (it is guaranteed to return that arg's value at worst).
-std::pair<TTypePtr, bool> CoalesceValueType(NQumir::NAst::TTypeFactory& types, const TAnnotationContext& context,
+std::pair<TTypePtr, bool> CoalesceValueType(
+    NQumir::NAst::TTypeFactory& types,
+    const TAnnotationContext& context,
     const std::vector<TTypePtr>& argTypes,
-    const std::vector<TExprPtr>& args, const TStructType* schema = nullptr)
+    const std::vector<TExprPtr>& args,
+    const TStructType* schema = nullptr)
 {
     if (IsRealCommonType(types, context, argTypes, args, schema)) {
         bool allNullable = true;
@@ -1243,8 +1260,11 @@ bool MayBeZero(const TExprPtr& divisor) {
 // Lightweight, rule-based SQL type inference - no AST rewrite and no per-node qumirdb.oz
 // compose. Types operators/calls "as if" ExpandNullable had run: a nullable operand makes
 // the result Nullable[R]. Extern-call returns come from the resolver (ExternReturnType).
-TTypePtr InferType(NQumir::NAst::TTypeFactory& types, const TAnnotationContext& context,
-    const TExprPtr& e, const TStructType& schema)
+TTypePtr InferType(
+    NQumir::NAst::TTypeFactory& types,
+    const TAnnotationContext& context,
+    const TExprPtr& e,
+    const TStructType& schema)
 {
     if (!e || IsNullLiteral(e)) {
         return nullptr; // bare/typed NULL - the enclosing node supplies the value type
@@ -1556,8 +1576,12 @@ TExprPtr CoerceBranch(NQumir::NAst::TTypeFactory& types, const TExprPtr& branch,
         }, value, counter, loc);
 }
 
-TTypePtr Expand(NQumir::NAst::TTypeFactory& types, const TAnnotationContext& context,
-    TExprPtr& e, const TStructType& inputType, uint64_t& counter);
+TTypePtr Expand(
+    NQumir::NAst::TTypeFactory& types,
+    const TAnnotationContext& context,
+    TExprPtr& e,
+    const TStructType& inputType,
+    uint64_t& counter);
 
 // An IN list with this many constants is one lookup in a sorted table: LLVM compiles a
 // comparison per item in time superlinear in their number, and from 16 constants on the
@@ -1825,9 +1849,12 @@ private:
 // qdb_in_list(lhs, item...) preserves the SQL IN boundary until operand types are
 // known. Hoist lhs validity once, compare its plain value to every item, and only
 // retain per-item 3VL when an item itself can be NULL.
-std::pair<TExprPtr, TTypePtr> ExpandInList(NQumir::NAst::TTypeFactory& types, const TAnnotationContext& context,
+std::pair<TExprPtr, TTypePtr> ExpandInList(
+    NQumir::NAst::TTypeFactory& types,
+    const TAnnotationContext& context,
     const TCallExpr& node,
-    const TStructType& inputType, uint64_t& counter)
+    const TStructType& inputType,
+    uint64_t& counter)
 {
     const TLocation loc = node.Location;
     auto boolType = types.Make<TBoolType>();
@@ -1950,9 +1977,12 @@ size_t TreeDepth(const TExprPtr& e)
 // non-nullable arg is reached it is returned directly (result becomes non-nullable).
 // Bare-NULL args are dropped. Args are bound to temps (referenced for both `.Valid` and
 // value). Returns {rewritten expr, planner type}.
-std::pair<TExprPtr, TTypePtr> ExpandCoalesce(NQumir::NAst::TTypeFactory& types, const TAnnotationContext& context,
+std::pair<TExprPtr, TTypePtr> ExpandCoalesce(
+    NQumir::NAst::TTypeFactory& types,
+    const TAnnotationContext& context,
     const TCallExpr& node,
-    const TStructType& inputType, uint64_t& counter)
+    const TStructType& inputType,
+    uint64_t& counter)
 {
     const TLocation loc = node.Location;
     std::vector<std::pair<TExprPtr, TTypePtr>> args; // (expr, type); bare NULLs dropped
@@ -2057,8 +2087,12 @@ std::optional<TLikeFastPath> ClassifyLikePattern(const std::string& pattern) {
 
 // Bottom-up rewrite. Mutates `e` in place, returns its planner type (Nullable-aware),
 // or nullptr for a bare NULL leaf (the enclosing `if`/op supplies the type).
-TTypePtr Expand(NQumir::NAst::TTypeFactory& types, const TAnnotationContext& context,
-    TExprPtr& e, const TStructType& inputType, uint64_t& counter)
+TTypePtr Expand(
+    NQumir::NAst::TTypeFactory& types,
+    const TAnnotationContext& context,
+    TExprPtr& e,
+    const TStructType& inputType,
+    uint64_t& counter)
 {
     if (IsNullLiteral(e)) {
         return nullptr;
@@ -2440,11 +2474,19 @@ TExprPtr DecimalValueAsDouble(NQumir::NAst::TTypeFactory& types, TExprPtr expr, 
     return DecimalValueAsFloat(types, std::move(expr), type, types.MakeFloat(), loc);
 }
 
-TTypePtr ExpandDecimalNode(NQumir::NAst::TTypeFactory& types, const TAnnotationContext& context,
-    TExprPtr& e, const TStructType& inputType, TTypeEnv& env);
+TTypePtr ExpandDecimalNode(
+    NQumir::NAst::TTypeFactory& types,
+    const TAnnotationContext& context,
+    TExprPtr& e,
+    const TStructType& inputType,
+    TTypeEnv& env);
 
-TTypePtr ExpandDecimalBlock(NQumir::NAst::TTypeFactory& types, const TAnnotationContext& context,
-    TBlockExpr& node, const TStructType& inputType, TTypeEnv& env)
+TTypePtr ExpandDecimalBlock(
+    NQumir::NAst::TTypeFactory& types,
+    const TAnnotationContext& context,
+    TBlockExpr& node,
+    const TStructType& inputType,
+    TTypeEnv& env)
 {
     TTypePtr last = nullptr;
     TTypeEnv local = env;
@@ -2478,8 +2520,12 @@ TExprPtr DecimalConstant(NQumir::NAst::TTypeFactory& types, const TDecimalLitera
     return Int64(types, loc, lit.Unscaled);
 }
 
-TTypePtr ExpandDecimalNode(NQumir::NAst::TTypeFactory& types, const TAnnotationContext& context,
-    TExprPtr& e, const TStructType& inputType, TTypeEnv& env)
+TTypePtr ExpandDecimalNode(
+    NQumir::NAst::TTypeFactory& types,
+    const TAnnotationContext& context,
+    TExprPtr& e,
+    const TStructType& inputType,
+    TTypeEnv& env)
 {
     if (!e || IsNullLiteral(e)) {
         return nullptr;
@@ -2791,7 +2837,9 @@ TTypePtr ExpandDecimalNode(NQumir::NAst::TTypeFactory& types, const TAnnotationC
     return InferType(types, context, e, inputType);
 }
 
-std::pair<TExprPtr, TTypePtr> ExpandDecimal(NQumir::NAst::TTypeFactory& types, const TAnnotationContext& context,
+std::pair<TExprPtr, TTypePtr> ExpandDecimal(
+    NQumir::NAst::TTypeFactory& types,
+    const TAnnotationContext& context,
     const TExprPtr& expr,
     const TStructType& inputType)
 {
@@ -2923,8 +2971,11 @@ bool ContainsNull(const TExprPtr& e) {
 // VARCHAR, VARCHAR -> DATE), a cast to VARCHAR -> its StringView spelling, and a `%` or
 // decimal `/` by what may be zero -> a NULLIF guard. Float division keeps the fast path:
 // it has no such rewrite.
-bool ContainsMustExpandCall(NQumir::NAst::TTypeFactory& types, const TAnnotationContext& context,
-    const TExprPtr& e, const TStructType& inputType)
+bool ContainsMustExpandCall(
+    NQumir::NAst::TTypeFactory& types,
+    const TAnnotationContext& context,
+    const TExprPtr& e,
+    const TStructType& inputType)
 {
     if (!e) return false;
     if (auto call = TMaybeNode<TCallExpr>(e)) {
@@ -3029,8 +3080,11 @@ TExprPtr CastTo(NQumir::NAst::TTypeFactory& types, TExprPtr e, TFloatType::EKind
 // planner types REAL as PostgreSQL does. Writes the casts that make the kernel compute the
 // planner's types: a REAL operand beside another number is widened (BinaryValueType), and a
 // CASE branch, a COALESCE argument or an IN-list constant that REAL absorbs is narrowed.
-void CoerceRealOperands(NQumir::NAst::TTypeFactory& types, const TAnnotationContext& context,
-    TExprPtr& e, const TStructType& inputType)
+void CoerceRealOperands(
+    NQumir::NAst::TTypeFactory& types,
+    const TAnnotationContext& context,
+    TExprPtr& e,
+    const TStructType& inputType)
 {
     for (auto* child : e->MutableChildren()) {
         if (*child) {
