@@ -138,7 +138,9 @@ std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError> TQueryModules
     auto key = std::pair(kind, name);
     auto it = KernelLibraries_.find(key);
     if (it == KernelLibraries_.end()) {
-        it = KernelLibraries_.emplace(std::move(key), ParseFunctionLibrary(Types_, ReadKernel(kind, name))).first;
+        it = KernelLibraries_
+            .emplace(std::move(key), ParseFunctionLibrary(Types_, ReadKernel(kind, name)))
+            .first;
     }
     if (!it->second) {
         return std::unexpected(it->second.error());
