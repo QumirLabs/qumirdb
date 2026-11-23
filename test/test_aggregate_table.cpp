@@ -153,10 +153,10 @@ protected:
                  "key_ops_i64.oz", "swiss_group.oz", "robin_hood_rehash_generic.oz",
                  "owned_arena_lifecycle.oz", "aggregation_hashtable_generic.oz",
                  "owned_blocks.oz", "robin_hood_dual_key.oz"}) {
-            add(NKernel::ReadAggregationKernel(name), name);
+            add(NKernel::ReadKernel("aggregation", name), name);
         }
-        add(NKernel::ReadRowTableKernel(), "row_table.oz");
-        add(NKernel::ReadAggregationKernel("aggregation_rows.oz"), "aggregation_rows.oz");
+        add(NKernel::ReadKernel(".", "row_table.oz"), "row_table.oz");
+        add(NKernel::ReadKernel("aggregation", "aggregation_rows.oz"), "aggregation_rows.oz");
         add(RowEntries, "entries");
 
         auto options = KernelRunnerOptions();

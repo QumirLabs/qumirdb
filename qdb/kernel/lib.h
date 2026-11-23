@@ -21,19 +21,6 @@ class TQueryModules;
 // Reads the kernel source file qdb/kernel/<kind>/<name> (NUtils::KernelFile).
 std::string ReadKernel(const std::string& kind, const std::string& name);
 
-// Reads an aggregation kernel source file (qdb/kernel/aggregation/<name>),
-// resolved relative to this source file's location so it works regardless
-// of the caller's current working directory.
-std::string ReadAggregationKernel(const std::string& name);
-
-// Reads a sort kernel source file (qdb/kernel/sort/<name>), resolved relative
-// to this source file's location.
-std::string ReadSortKernel(const std::string& name);
-
-// Reads the row table kernel source (qdb/kernel/row_table.oz), shared by the
-// row join and the row layout of the aggregate table.
-std::string ReadRowTableKernel();
-
 // Assembles the keyed-join kernel library: generic Robin Hood helpers, the
 // reused aggregation HashTable lifecycle, pair buffers, the dual-key-generic
 // join update/probe helpers (join_update.oz templates over LookupKey /

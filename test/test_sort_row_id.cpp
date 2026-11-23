@@ -46,7 +46,7 @@ TCompiledRowIdSort
 CompileRowIdSort(const std::vector<NQdb::TSortRadixKeyInput>& keys) {
     std::vector<NQumir::NAst::TExprPtr> statements;
     auto heap = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
-        NQdb::NKernel::ReadSortKernel("heap.oz"));
+        NQdb::NKernel::ReadKernel("sort", "heap.oz"));
     if (!heap) {
         ADD_FAILURE() << heap.error().ToString();
         return {};

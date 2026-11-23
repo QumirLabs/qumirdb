@@ -25,7 +25,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileStringOperation(
     void*& entry)
 {
     auto library = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
-        NQdb::NKernel::ReadAggregationKernel("string_ops.oz"));
+        NQdb::NKernel::ReadKernel("aggregation", "string_ops.oz"));
     if (!library) {
         ADD_FAILURE() << library.error().ToString();
         return {};

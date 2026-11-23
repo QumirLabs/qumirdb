@@ -76,7 +76,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileOwnedBlocks(
     for (const char* name : {
              "owned_arena_lifecycle.oz", "owned_blocks.oz"}) {
         auto library = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
-            NQdb::NKernel::ReadAggregationKernel(name));
+            NQdb::NKernel::ReadKernel("aggregation", name));
         if (!library) {
             ADD_FAILURE() << name << ": " << library.error().ToString();
             return {};

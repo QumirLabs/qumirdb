@@ -916,7 +916,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileGenericJoin(
     }
     if (keyDesc.HasDistinctLookupType()) {
         auto stringOps =
-            NKernel::ParseFunctionLibrary(TestTypes(), NKernel::ReadAggregationKernel("string_ops.oz"));
+            NKernel::ParseFunctionLibrary(TestTypes(), NKernel::ReadKernel("aggregation", "string_ops.oz"));
         if (!stringOps) {
             ADD_FAILURE() << stringOps.error().ToString();
             return {};

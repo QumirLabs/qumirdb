@@ -96,7 +96,7 @@ protected:
                  "aggregation_hashtable_generic.oz", "owned_blocks.oz",
                  "robin_hood_dual_key.oz"}) {
             auto library = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
-                NQdb::NKernel::ReadAggregationKernel(name), {"aht_update"});
+                NQdb::NKernel::ReadKernel("aggregation", name), {"aht_update"});
             ASSERT_TRUE(library) << name << ": " << library.error().ToString();
             functions.insert(functions.end(), library->begin(), library->end());
         }

@@ -28,18 +28,6 @@ std::string ReadKernel(const std::string& kind, const std::string& name) {
     return source.str();
 }
 
-std::string ReadAggregationKernel(const std::string& name) {
-    return ReadKernel("aggregation", name);
-}
-
-std::string ReadSortKernel(const std::string& name) {
-    return ReadKernel("sort", name);
-}
-
-std::string ReadRowTableKernel() {
-    return ReadKernel(".", "row_table.oz");
-}
-
 namespace {
 
 bool HasStringReducer(const TAggReducerLayout& layout) {
