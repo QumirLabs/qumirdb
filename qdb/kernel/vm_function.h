@@ -38,7 +38,7 @@ struct TVmFunctionSpec {
 // A frontend in the query's type factory, which must outlive the context. Its source
 // modules come parsed from the query's modules, and every composition clones them. Each
 // independent transform/lowering gets a fresh resolver so semantic mutations cannot leak
-// between compilations. Loader access is serialized because the loader is stateful.
+// between compilations. Used only from the compiling thread.
 class TVmFrontendContext {
 public:
     // Without source modules.
@@ -72,8 +72,6 @@ public:
 
 private:
     struct TImpl;
-    std::expected<NQumir::NAst::TExprPtr, std::string> TransformLocked(
-        NQumir::NAst::TExprPtr module);
     std::unique_ptr<TImpl> Impl_;
 };
 

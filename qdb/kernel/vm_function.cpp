@@ -19,7 +19,6 @@
 
 #include <bit>
 #include <exception>
-#include <mutex>
 #include <sstream>
 #include <utility>
 
@@ -44,7 +43,6 @@ struct TVmFrontendContext::TImpl {
     NQumir::NFrontend::TSourceModuleLoader Loader{Types};
     std::optional<std::string> LoadError;
     uint64_t Counter = 0;
-    std::mutex Mutex;
 };
 
 TVmFrontendContext::TVmFrontendContext(TTypeFactory& types)
@@ -75,7 +73,6 @@ TTypeFactory& TVmFrontendContext::Types() {
 std::optional<std::string> TVmFrontendContext::RegisterExternalDeclarations(
     const TExternalCatalogSnapshot& catalog)
 {
-    std::lock_guard lock(Impl_->Mutex);
     auto registered = catalog.RegisterDeclarations(Impl_->Loader);
     if (!registered) {
         return registered.error().ToString();
@@ -84,12 +81,10 @@ std::optional<std::string> TVmFrontendContext::RegisterExternalDeclarations(
 }
 
 std::string TVmFrontendContext::UniqueName(std::string_view prefix) {
-    std::lock_guard lock(Impl_->Mutex);
     return std::string(prefix) + std::to_string(Impl_->Counter++) + "__";
 }
 
 std::vector<const NQumir::NFrontend::TSourceModule*> TVmFrontendContext::SourceModules() {
-    std::lock_guard lock(Impl_->Mutex);
     if (Impl_->LoadError) {
         return {};
     }
@@ -126,7 +121,7 @@ std::expected<TExprPtr, std::string> TransformWithResolver(
 
 } // namespace
 
-std::expected<TExprPtr, std::string> TVmFrontendContext::TransformLocked(
+std::expected<TExprPtr, std::string> TVmFrontendContext::Transform(
     TExprPtr module)
 {
     if (Impl_->LoadError) {
@@ -141,18 +136,10 @@ std::expected<TExprPtr, std::string> TVmFrontendContext::TransformLocked(
         Impl_->Loader, Impl_->Pragmas, resolver, std::move(module));
 }
 
-std::expected<TExprPtr, std::string> TVmFrontendContext::Transform(
-    TExprPtr module)
-{
-    std::lock_guard lock(Impl_->Mutex);
-    return TransformLocked(std::move(module));
-}
-
 std::expected<void, std::string> TVmFrontendContext::Lower(
     TExprPtr module,
     NQumir::NIR::TModule& output)
 {
-    std::lock_guard lock(Impl_->Mutex);
     if (Impl_->LoadError) {
         return std::unexpected(*Impl_->LoadError);
     }
