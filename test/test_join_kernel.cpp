@@ -100,7 +100,8 @@ NQumir::NAst::TExprPtr ParseExpr(const std::string& src) {
 
 std::unique_ptr<NQumir::TLLVMRunner> CompileJoinEntry(const std::string& entryName, void*& entry) {
     using namespace NQumir::NAst;
-    auto lib = NKernel::BuildJoinKernelLibrary(TestTypes());
+    NKernel::TQueryModules modules(TestTypes(), TestModuleBase());
+    auto lib = NKernel::BuildJoinKernelLibrary(modules);
     if (!lib) {
         ADD_FAILURE() << lib.error().ToString();
         return {};
@@ -119,7 +120,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileJoinEntry(const std::string& entryNa
     for (auto& f : NKernel::GenJoinKeyOwnershipFunDecls(TestTypes(), keyDesc)) {
         stmts.push_back(std::move(f));
     }
-    auto dualLib = NKernel::BuildJoinDualKeyLibrary(TestTypes());
+    auto dualLib = NKernel::BuildJoinDualKeyLibrary(modules);
     if (!dualLib) {
         ADD_FAILURE() << dualLib.error().ToString();
         return {};
@@ -169,7 +170,8 @@ TEST_F(JoinKernel, PairBufferLayout) {
 }
 
 TEST_F(JoinKernel, MaterializeLibraryMarksPhysicalWorkersCacheable) {
-    auto library = NKernel::BuildJoinKernelLibrary(TestTypes());
+    NKernel::TQueryModules modules(TestTypes(), TestModuleBase());
+    auto library = NKernel::BuildJoinKernelLibrary(modules);
     ASSERT_TRUE(library) << library.error().ToString();
 
     std::unordered_map<std::string, NQumir::TIntrusivePtr<NQumir::NAst::TFunDecl>> functions;
@@ -198,11 +200,12 @@ TEST_F(JoinKernel, MaterializeLibraryMarksPhysicalWorkersCacheable) {
 }
 
 TEST_F(JoinKernel, LibrariesKeepGrowthWithoutTeardown) {
+    NKernel::TQueryModules modules(TestTypes(), TestModuleBase());
     for (const auto build : {
             NKernel::BuildJoinKernelLibrary,
             NKernel::BuildCrossJoinKernelLibrary,
             NKernel::BuildRowJoinKernelLibrary}) {
-        auto library = build(TestTypes());
+        auto library = build(modules);
         ASSERT_TRUE(library) << library.error().ToString();
         std::unordered_set<std::string> functions;
         for (const auto& stmt : *library) {
@@ -901,7 +904,8 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileGenericJoin(
             stringViewType = et.Type;
         }
     }
-    auto lib = NKernel::BuildJoinKernelLibrary(TestTypes());
+    NKernel::TQueryModules modules(TestTypes(), TestModuleBase());
+    auto lib = NKernel::BuildJoinKernelLibrary(modules);
     if (!lib) {
         ADD_FAILURE() << lib.error().ToString();
         return {};
@@ -927,7 +931,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileGenericJoin(
     for (auto& f : NKernel::GenJoinKeyOwnershipFunDecls(TestTypes(), keyDesc)) {
         program.push_back(std::move(f));
     }
-    auto dualLib = NKernel::BuildJoinDualKeyLibrary(TestTypes());
+    auto dualLib = NKernel::BuildJoinDualKeyLibrary(modules);
     if (!dualLib) {
         ADD_FAILURE() << dualLib.error().ToString();
         return {};

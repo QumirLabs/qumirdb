@@ -901,7 +901,8 @@ std::set<std::string> ProgramFunctions(
     const auto layout = NKernel::BuildAggReducerLayout(
         {"count", "sum"}, {NKernel::TAggArg{}, NKernel::TAggArg{.ColumnIndex = 1}});
     auto named = [](const char* name) { return TestTypes().MakeNamed(name, nullptr); };
-    auto program = NKernel::BuildGenericAggregateFusedProgramAst(TestTypes(),
+    NKernel::TQueryModules modules(TestTypes(), TestModuleBase());
+    auto program = NKernel::BuildGenericAggregateFusedProgramAst(modules,
         input, key, layout, named("TColumn"), named("TRowSet"), named("HashTable"),
         false, {}, rows);
     EXPECT_TRUE(program) << program.error().ToString();

@@ -211,6 +211,33 @@ TEST(QueryCompiler, QueriesShareTheModuleBase) {
     EXPECT_TRUE(NodeStates(base.Ast) == states);
 }
 
+// A query parses each kernel library once and gives every kernel a clone, so compiling the
+// kernels leaves the parse unresolved for the next one.
+TEST(QueryCompiler, KernelsCompileClonesOfTheLibraries) {
+    TFixture fixture;
+    auto query = fixture.Parse("SELECT value, count(*) FROM items GROUP BY value;");
+    ASSERT_TRUE(query) << query.error().ToString();
+    auto prepared = fixture.Compiler.Prepare(query->Statements[0]);
+    ASSERT_TRUE(prepared) << prepared.error().ToString();
+    ASSERT_TRUE(*prepared);
+    const auto& annotation = (**prepared).Annotation;
+    auto lowered = NScheduler::LowerPlanToGraph(
+        (**prepared).Plan, (**prepared).Types, {}, nullptr, annotation);
+    FinalizeKernels(lowered.Kernels, lowered.Types, lowered.Annotation, EKernelBackend::Llvm);
+
+    auto all = annotation.Modules->KernelLibrary("aggregation", "swiss_group.oz");
+    auto some = annotation.Modules->KernelLibrary("aggregation", "swiss_group.oz", {"swiss_group_width"});
+    ASSERT_TRUE(all) << all.error().ToString();
+    ASSERT_TRUE(some) << some.error().ToString();
+    ASSERT_EQ(some->size() + 1, all->size());
+    EXPECT_NE(all->front().Get(), some->front().Get());
+    for (const auto& stmt : *all) {
+        for (const auto& state : NodeStates(stmt)) {
+            EXPECT_EQ(state.Scope, -1);
+        }
+    }
+}
+
 TEST(QueryCompiler, ModuleOutsideTheBaseIsAnError) {
     auto found = TestModuleBase()->Find(NUtils::ModuleFile("other.oz"));
     ASSERT_FALSE(found);

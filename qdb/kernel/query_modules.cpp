@@ -1,5 +1,6 @@
 #include <qdb/kernel/query_modules.h>
 
+#include <qdb/kernel/lib.h>
 #include <qdb/modules/qumirdb.h>
 #include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
@@ -126,6 +127,30 @@ std::expected<std::monostate, NQumir::TError> TQueryModules::Load(
         return std::unexpected(loaded.error());
     }
     return std::monostate{};
+}
+
+std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError> TQueryModules::KernelLibrary(
+    const std::string& kind,
+    const std::string& name,
+    const std::unordered_set<std::string>& exclude)
+{
+    using namespace NQumir::NAst;
+    auto key = std::pair(kind, name);
+    auto it = KernelLibraries_.find(key);
+    if (it == KernelLibraries_.end()) {
+        it = KernelLibraries_.emplace(std::move(key), ParseFunctionLibrary(Types_, ReadKernel(kind, name))).first;
+    }
+    if (!it->second) {
+        return std::unexpected(it->second.error());
+    }
+    std::vector<TExprPtr> library;
+    for (const auto& stmt : *it->second) {
+        auto fun = TMaybeNode<TFunDecl>(stmt);
+        if (!fun || !exclude.contains(fun.Cast()->Name)) {
+            library.push_back(DeepCloneExpr(stmt));
+        }
+    }
+    return library;
 }
 
 } // namespace NQdb::NKernel

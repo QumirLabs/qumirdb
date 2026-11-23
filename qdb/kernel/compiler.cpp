@@ -26,8 +26,6 @@
 #include <qumir/parser/core/printer.h>
 
 #include <algorithm>
-#include <fstream>
-#include <sstream>
 #include <span>
 #include <stdexcept>
 #include <unordered_map>
@@ -259,15 +257,7 @@ std::shared_ptr<TKernelSlot> TKernelCompiler::CompileInstrumentation() {
 }
 
 TGeneratedKernel TKernelCompiler::EmitInstrumentation() {
-    auto& types = *Types_;
-    auto source = NUtils::KernelFile(".", "instrumentation.oz");
-    std::ifstream input(source);
-    if (!input) {
-        throw std::runtime_error("cannot open instrumentation kernel: " + source);
-    }
-    std::ostringstream text;
-    text << input.rdbuf();
-    auto library = NKernel::ParseFunctionLibrary(types, text.str());
+    auto library = Annotation_.Modules->KernelLibrary(".", "instrumentation.oz");
     if (!library) {
         throw library.error();
     }
@@ -1158,13 +1148,13 @@ NQumir::NAst::TExprPtr BuildSortRunWrapperAst(
 }
 
 void AddSortMaterializeLibrary(
-    NQumir::NAst::TTypeFactory& types,
+    NKernel::TQueryModules& modules,
     std::vector<NQumir::NAst::TExprPtr>& programStmts,
     const char* errorPrefix)
 {
     using namespace NQumir::NAst;
     for (const auto& name : {"materialize.oz"}) {
-        auto library = NKernel::ParseFunctionLibrary(types, NKernel::ReadSortKernel(name));
+        auto library = modules.KernelLibrary("sort", name);
         if (!library) {
             throw NQumir::TError(
                 std::string(errorPrefix) + ": " + library.error().ToString());
@@ -1176,8 +1166,7 @@ void AddSortMaterializeLibrary(
             programStmts.push_back(std::move(stmt));
         }
     }
-    auto stringOps = NKernel::ParseFunctionLibrary(
-        types, NKernel::ReadAggregationKernel("string_ops.oz"));
+    auto stringOps = modules.KernelLibrary("aggregation", "string_ops.oz");
     if (!stringOps) {
         throw NQumir::TError(
             std::string(errorPrefix) + ": string_ops.oz: " +
@@ -1552,7 +1541,7 @@ NKernel::TJoinKeyDescriptor JoinKeyDescriptorOf(
 // the key overloads call (when a key or the output has strings), then the
 // per-key overloads (rh_hash, rh_key_equal).
 void AppendJoinKeyDecls(
-    NQumir::NAst::TTypeFactory& types,
+    NKernel::TQueryModules& modules,
     std::vector<NQumir::NAst::TExprPtr>& program,
     const NKernel::TJoinKeyDescriptor& keyDesc,
     bool hasString,
@@ -1562,8 +1551,7 @@ void AppendJoinKeyDecls(
         program.push_back(std::move(f));
     }
     if (hasString || keyDesc.HasDistinctLookupType()) {
-        auto stringOps = NKernel::ParseFunctionLibrary(
-            types, NKernel::ReadAggregationKernel("string_ops.oz"));
+        auto stringOps = modules.KernelLibrary("aggregation", "string_ops.oz");
         if (!stringOps) {
             throw NQumir::TError(caller + ": string_ops.oz: " + stringOps.error().ToString());
         }
@@ -1571,7 +1559,7 @@ void AppendJoinKeyDecls(
             program.push_back(std::move(f));
         }
     }
-    for (auto& f : NKernel::GenJoinKeyOpsFunDecls(types, keyDesc)) {
+    for (auto& f : NKernel::GenJoinKeyOpsFunDecls(modules.Types(), keyDesc)) {
         program.push_back(std::move(f));
     }
 }
@@ -1631,17 +1619,17 @@ NQumir::NAst::TExprPtr BuildSortRowIdLessAst(
 }
 
 NQumir::NAst::TExprPtr BuildHeapTopKProgramAst(
-    NQumir::NAst::TTypeFactory& types,
+    NKernel::TQueryModules& modules,
     const std::vector<TSortRadixKeyInput>& keys)
 {
     using namespace NQumir::NAst;
+    auto& types = modules.Types();
 
     if (keys.empty()) {
         throw NQumir::TError("BuildHeapTopKProgramAst: empty key list");
     }
 
-    auto library = NKernel::ParseFunctionLibrary(
-        types, NKernel::ReadSortKernel("heap.oz"));
+    auto library = modules.KernelLibrary("sort", "heap.oz");
     if (!library) {
         throw NQumir::TError(
             "BuildHeapTopKProgramAst: " + library.error().ToString());
@@ -1658,7 +1646,7 @@ NQumir::NAst::TExprPtr BuildHeapTopKProgramAst(
 }
 
 NQumir::NAst::TExprPtr BuildWindowProgramAst(
-    NQumir::NAst::TTypeFactory& types,
+    NKernel::TQueryModules& modules,
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType& inputType,
     const std::vector<TSortRadixKeyInput>& partitionKeys,
@@ -1666,12 +1654,13 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
     const std::vector<TWindowFuncInput>& funcs)
 {
     using namespace NQumir::NAst;
+    auto& types = modules.Types();
     if (keys.empty()) {
         throw NQumir::TError("BuildWindowProgramAst: empty key list");
     }
     std::vector<TExprPtr> programStmts;
     auto addLibrary = [&](const std::string& name, bool skipUse) {
-        auto library = NKernel::ParseFunctionLibrary(types, NKernel::ReadSortKernel(name));
+        auto library = modules.KernelLibrary("sort", name);
         if (!library) {
             throw NQumir::TError("BuildWindowProgramAst: " + library.error().ToString());
         }
@@ -1684,7 +1673,7 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
     };
     addLibrary("radix.oz", false);
     addLibrary("sort_rowids.oz", true);
-    AddSortMaterializeLibrary(types, programStmts, "BuildWindowProgramAst");
+    AddSortMaterializeLibrary(modules, programStmts, "BuildWindowProgramAst");
     programStmts.push_back(BuildWindowKeyComparatorAst(
         types, "window_same_partition", partitionKeys));
     programStmts.push_back(BuildWindowKeyComparatorAst(
@@ -1703,17 +1692,18 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
 }
 
 NQumir::NAst::TExprPtr BuildRadixSortProgramAst(
-    NQumir::NAst::TTypeFactory& types,
+    NKernel::TQueryModules& modules,
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType* materializeType)
 {
     using namespace NQumir::NAst;
+    auto& types = modules.Types();
     if (keys.empty()) {
         throw NQumir::TError("BuildRadixSortProgramAst: empty key list");
     }
     std::vector<TExprPtr> programStmts;
     auto addLibrary = [&](const std::string& name, bool skipUse) {
-        auto library = NKernel::ParseFunctionLibrary(types, NKernel::ReadSortKernel(name));
+        auto library = modules.KernelLibrary("sort", name);
         if (!library) {
             throw NQumir::TError(
                 "BuildRadixSortProgramAst: " + library.error().ToString());
@@ -1729,7 +1719,7 @@ NQumir::NAst::TExprPtr BuildRadixSortProgramAst(
     addLibrary("sort_rowids.oz", true);
     programStmts.push_back(BuildRadixCompositeWrapperAst(types, keys, false));
     if (materializeType) {
-        AddSortMaterializeLibrary(types, programStmts, "BuildRadixSortProgramAst");
+        AddSortMaterializeLibrary(modules, programStmts, "BuildRadixSortProgramAst");
         programStmts.push_back(BuildSortMaterializeWrapperAst(types, *materializeType));
         programStmts.push_back(BuildSortRunWrapperAst(types, "qdb_sort_run", keys, false, "sort_materialize_row_ids"));
     }
@@ -1737,17 +1727,18 @@ NQumir::NAst::TExprPtr BuildRadixSortProgramAst(
 }
 
 NQumir::NAst::TExprPtr BuildRadixSortNullableProgramAst(
-    NQumir::NAst::TTypeFactory& types,
+    NKernel::TQueryModules& modules,
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType* materializeType)
 {
     using namespace NQumir::NAst;
+    auto& types = modules.Types();
     if (keys.empty()) {
         throw NQumir::TError("BuildRadixSortNullableProgramAst: empty key list");
     }
     std::vector<TExprPtr> programStmts;
     auto addLibrary = [&](const std::string& name, bool skipUse) {
-        auto library = NKernel::ParseFunctionLibrary(types, NKernel::ReadSortKernel(name));
+        auto library = modules.KernelLibrary("sort", name);
         if (!library) {
             throw NQumir::TError(
                 "BuildRadixSortNullableProgramAst: " + library.error().ToString());
@@ -1763,7 +1754,7 @@ NQumir::NAst::TExprPtr BuildRadixSortNullableProgramAst(
     addLibrary("sort_rowids.oz", true);
     programStmts.push_back(BuildRadixCompositeWrapperAst(types, keys, true));
     if (materializeType) {
-        AddSortMaterializeLibrary(types, programStmts, "BuildRadixSortNullableProgramAst");
+        AddSortMaterializeLibrary(modules, programStmts, "BuildRadixSortNullableProgramAst");
         programStmts.push_back(BuildSortMaterializeWrapperAst(types, *materializeType));
         programStmts.push_back(BuildSortRunWrapperAst(types, "qdb_sort_run", keys, true, "sort_materialize_row_ids"));
     }
@@ -1771,17 +1762,18 @@ NQumir::NAst::TExprPtr BuildRadixSortNullableProgramAst(
 }
 
 NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
-    NQumir::NAst::TTypeFactory& types,
+    NKernel::TQueryModules& modules,
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType* materializeType)
 {
     using namespace NQumir::NAst;
+    auto& types = modules.Types();
     if (keys.empty()) {
         throw NQumir::TError("BuildTopSortMergeProgramAst: empty key list");
     }
     std::vector<TExprPtr> programStmts;
     auto addLibrary = [&](const std::string& name, bool skipUse) {
-        auto library = NKernel::ParseFunctionLibrary(types, NKernel::ReadSortKernel(name));
+        auto library = modules.KernelLibrary("sort", name);
         if (!library) {
             throw NQumir::TError(
                 "BuildTopSortMergeProgramAst: " + library.error().ToString());
@@ -1796,7 +1788,7 @@ NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
     addLibrary("radix.oz", false);
     addLibrary("sort_rowids.oz", true);
     if (materializeType) {
-        AddSortMaterializeLibrary(types, programStmts, "BuildTopSortMergeProgramAst");
+        AddSortMaterializeLibrary(modules, programStmts, "BuildTopSortMergeProgramAst");
         programStmts.push_back(BuildSortMaterializeWrapperAst(types, *materializeType));
     }
     programStmts.push_back(BuildTopSortTempBeforeStateAst(types, keys));
@@ -1806,17 +1798,16 @@ NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
 }
 
 TRuntimeFilterKernel TKernelCompiler::CompileRuntimeFilter() {
-    auto& types = *Types_;
     using namespace NQumir::NAst;
     // Type declarations go first, as in a source file.
     std::vector<TExprPtr> programStmts;
     std::vector<TExprPtr> functions;
-    for (const auto& source : {
-        NKernel::ReadSortKernel("radix.oz"),
-        NKernel::ReadAggregationKernel("swiss_group.oz"),
-        NKernel::ReadJoinKernel("runtime_filter.oz")})
+    for (const auto& [kind, name] : {
+        std::pair{"sort", "radix.oz"},
+        std::pair{"aggregation", "swiss_group.oz"},
+        std::pair{"join", "runtime_filter.oz"}})
     {
-        auto library = NKernel::ParseFunctionLibrary(types, source);
+        auto library = Annotation_.Modules->KernelLibrary(kind, name);
         if (!library) {
             throw NQumir::TError("CompileRuntimeFilter: " + library.error().ToString());
         }
@@ -1977,7 +1968,6 @@ TKernelCompiler::TSortRadixCompositeDispatch TKernelCompiler::CompileRadixSortCo
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType* materializeType)
 {
-    auto& types = *Types_;
     using namespace NQumir::NAst;
 
     if (keys.empty()) {
@@ -1987,7 +1977,7 @@ TKernelCompiler::TSortRadixCompositeDispatch TKernelCompiler::CompileRadixSortCo
         throw NQumir::TError("CompileRadixSortComposite: materialize schema is required");
     }
 
-    auto program = BuildRadixSortProgramAst(types, keys, materializeType);
+    auto program = BuildRadixSortProgramAst(*Annotation_.Modules, keys, materializeType);
     PrintKernelAst(Diagnostics_, "sort.run.fused", program);
 
     auto kernel = EmitKernel(
@@ -2009,14 +1999,13 @@ TKernelCompiler::CompileWindow(
     const std::vector<TSortRadixKeyInput>& orderKeys,
     const std::vector<TWindowFuncInput>& funcs)
 {
-    auto& types = *Types_;
     using namespace NQumir::NAst;
     if (keys.empty()) {
         throw NQumir::TError("CompileWindow: empty key list");
     }
 
     auto program = BuildWindowProgramAst(
-        types, keys, inputType, partitionKeys, orderKeys, funcs);
+        *Annotation_.Modules, keys, inputType, partitionKeys, orderKeys, funcs);
     PrintKernelAst(Diagnostics_, "window.run.fused", program);
 
     auto kernel = EmitKernel(
@@ -2035,13 +2024,12 @@ TKernelCompiler::CompileRadixSortCompositeNullable(
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType* materializeType)
 {
-    auto& types = *Types_;
     using namespace NQumir::NAst;
     if (!materializeType) {
         throw NQumir::TError("CompileRadixSortCompositeNullable: materialize schema is required");
     }
 
-    auto program = BuildRadixSortNullableProgramAst(types, keys, materializeType);
+    auto program = BuildRadixSortNullableProgramAst(*Annotation_.Modules, keys, materializeType);
     PrintKernelAst(Diagnostics_, "sort.run.nullable.fused", program);
 
     auto kernel = EmitKernel(
@@ -2059,13 +2047,12 @@ TKernelCompiler::TTopSortDispatch TKernelCompiler::CompileTopSort(
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType* materializeType)
 {
-    auto& types = *Types_;
     using namespace NQumir::NAst;
 
     if (!materializeType) {
         throw NQumir::TError("CompileTopSort: materialize schema is required");
     }
-    auto program = BuildTopSortMergeProgramAst(types, keys, materializeType);
+    auto program = BuildTopSortMergeProgramAst(*Annotation_.Modules, keys, materializeType);
     PrintKernelAst(Diagnostics_, "top-sort.fused", program);
 
     auto kernel = EmitKernel(
@@ -2082,8 +2069,7 @@ TKernelCompiler::TTopSortDispatch TKernelCompiler::CompileTopSort(
 TKernelCompiler::THeapTopKDispatch TKernelCompiler::CompileHeapTopK(
     const std::vector<TSortRadixKeyInput>& keys)
 {
-    auto& types = *Types_;
-    auto program = BuildHeapTopKProgramAst(types, keys);
+    auto program = BuildHeapTopKProgramAst(*Annotation_.Modules, keys);
     PrintKernelAst(Diagnostics_, "top-k.heap", program);
 
     auto kernel = EmitKernel(
@@ -2291,7 +2277,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
         ? NKernel::BuildAggRowLayout(keyDescriptor, layout, !spec.EmptyInputGroups.empty())
         : std::nullopt;
     auto program = NKernel::BuildGenericAggregateFusedProgramAst(
-        types, inputType, keyDescriptor, layout,
+        *Annotation_.Modules, inputType, keyDescriptor, layout,
         columnType, rowSetType, hashTableType, spec.HasPrecomputedHash, spec.EmptyInputGroups,
         rows);
     if (!program) {
@@ -2442,7 +2428,7 @@ TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
         spec.JoinType != EJoinType::LeftSemi && spec.JoinType != EJoinType::LeftAnti;
 
     auto buildProgram = [&]() -> std::vector<TExprPtr> {
-        auto library = NKernel::BuildCrossJoinKernelLibrary(types);
+        auto library = NKernel::BuildCrossJoinKernelLibrary(*Annotation_.Modules);
         if (!library) {
             throw NQumir::TError(
                 "CompileCrossJoin: " + library.error().ToString());
@@ -2469,8 +2455,7 @@ TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
                     rightType.Cast()->Fields.begin(), rightType.Cast()->Fields.end(), isString);
         }();
         if (hasStringOutput) {
-            auto stringOps = NKernel::ParseFunctionLibrary(
-                types, NKernel::ReadAggregationKernel("string_ops.oz"));
+            auto stringOps = Annotation_.Modules->KernelLibrary("aggregation", "string_ops.oz");
             if (!stringOps) {
                 throw NQumir::TError(
                     "CompileCrossJoin: string_ops.oz: " +
@@ -2585,8 +2570,7 @@ TJoinHashKernels TKernelCompiler::CompileJoinHash(
         // String keys hash as StringView: the rh_hash overload calls
         // qdb_string_hash from string_ops.oz.
         if (keyDesc.HasDistinctLookupType()) {
-            auto stringOps = NKernel::ParseFunctionLibrary(
-                types, NKernel::ReadAggregationKernel("string_ops.oz"));
+            auto stringOps = Annotation_.Modules->KernelLibrary("aggregation", "string_ops.oz");
             if (!stringOps) {
                 throw NQumir::TError(
                     "CompileJoinHash: string_ops.oz: " + stringOps.error().ToString());
@@ -2665,8 +2649,7 @@ TKernelCompiler::TAggregateHashDispatch TKernelCompiler::CompileAggregateHash(
             program.push_back(std::move(f));
         }
         if (keyDesc.HasDistinctLookupType()) {
-            auto stringOps = NKernel::ParseFunctionLibrary(
-                types, NKernel::ReadAggregationKernel("string_ops.oz"));
+            auto stringOps = Annotation_.Modules->KernelLibrary("aggregation", "string_ops.oz");
             if (!stringOps) {
                 throw NQumir::TError(
                     "CompileAggregateHash: string_ops.oz: " + stringOps.error().ToString());
@@ -2771,7 +2754,7 @@ TRowJoinKernels TKernelCompiler::CompileRowJoin(
         .Scratch = QumirDbNamedType(types, "RowScratch"),
     };
     auto buildProgram = [&]() -> std::vector<TExprPtr> {
-        auto library = NKernel::BuildRowJoinKernelLibrary(types);
+        auto library = NKernel::BuildRowJoinKernelLibrary(*Annotation_.Modules);
         if (!library) {
             throw NQumir::TError("CompileRowJoin: " + library.error().ToString());
         }
@@ -2787,7 +2770,7 @@ TRowJoinKernels TKernelCompiler::CompileRowJoin(
         // Same order as CompileJoin: the key declarations, then the library
         // and the generated functions.
         std::vector<TExprPtr> program;
-        AppendJoinKeyDecls(types, program, keyDesc, hasString, "CompileRowJoin");
+        AppendJoinKeyDecls(*Annotation_.Modules, program, keyDesc, hasString, "CompileRowJoin");
         for (auto& f : *library) {
             program.push_back(std::move(f));
         }
@@ -2925,7 +2908,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
     // Fresh program per entry (CompileKernelAst consumes the AST): key type
     // decls + key-ops overloads + shared library + generated process functions.
     auto buildProgram = [&]() -> std::vector<TExprPtr> {
-        auto library = NKernel::BuildJoinKernelLibrary(types);
+        auto library = NKernel::BuildJoinKernelLibrary(*Annotation_.Modules);
         if (!library) {
             throw NQumir::TError("CompileJoin: " + library.error().ToString());
         }
@@ -2952,11 +2935,11 @@ TJoinKernels TKernelCompiler::CompileJoin(
         }();
 
         std::vector<TExprPtr> program;
-        AppendJoinKeyDecls(types, program, keyDesc, hasStringOutput, "CompileJoin");
+        AppendJoinKeyDecls(*Annotation_.Modules, program, keyDesc, hasStringOutput, "CompileJoin");
         for (auto& f : NKernel::GenJoinKeyOwnershipFunDecls(types, keyDesc)) {
             program.push_back(std::move(f));
         }
-        auto dualKeyLibrary = NKernel::BuildJoinDualKeyLibrary(types);
+        auto dualKeyLibrary = NKernel::BuildJoinDualKeyLibrary(*Annotation_.Modules);
         if (!dualKeyLibrary) {
             throw NQumir::TError("CompileJoin: " + dualKeyLibrary.error().ToString());
         }

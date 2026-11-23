@@ -2,13 +2,17 @@
 
 #include <qumir/error.h>
 #include <qumir/frontend/source_module_loader.h>
+#include <qumir/parser/ast.h>
 #include <qumir/parser/type_factory.h>
 
 #include <expected>
 #include <map>
 #include <memory>
 #include <string>
+#include <unordered_set>
+#include <utility>
 #include <variant>
+#include <vector>
 
 namespace NQdb::NKernel {
 
@@ -35,9 +39,9 @@ private:
 // A query's type factory: a child of `base`, so the base's types are its types.
 std::shared_ptr<NQumir::NAst::TTypeFactory> MakeQueryTypes(const TModuleBase& base);
 
-// The source modules of one query. Consumers compose clones of the base's parsed modules
-// (cloneSourceModules), so a module's AST never changes. `types` is the query's factory,
-// a child of `base`.
+// The source modules and kernel libraries of one query. Consumers compose clones of the base's
+// parsed modules (cloneSourceModules), so a module's AST never changes. `types` is the query's
+// factory, a child of `base`.
 class TQueryModules {
 public:
     TQueryModules(NQumir::NAst::TTypeFactory& types, std::shared_ptr<const TModuleBase> base);
@@ -49,9 +53,18 @@ public:
         NQumir::NFrontend::TSourceModuleLoader& loader,
         const std::string& file);
 
+    // The statements of kernel library `name` in qdb/kernel/`kind`, without the functions in
+    // `exclude`. A query parses each library once and gives every kernel a clone to rewrite.
+    std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError> KernelLibrary(
+        const std::string& kind,
+        const std::string& name,
+        const std::unordered_set<std::string>& exclude = {});
+
 private:
     NQumir::NAst::TTypeFactory& Types_;
     std::shared_ptr<const TModuleBase> Base_;
+    std::map<std::pair<std::string, std::string>, std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>>
+        KernelLibraries_;
 };
 
 } // namespace NQdb::NKernel
