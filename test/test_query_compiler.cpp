@@ -1,6 +1,7 @@
 #include "mock_source.h"
 
 #include <qdb/compiler/query.h>
+#include <qdb/io/parquet/row_group_predicate.h>
 #include <qdb/kernel/finalize.h>
 #include <qdb/kernel/query_modules.h>
 #include <qdb/modules/qumirdb.h>
@@ -12,6 +13,7 @@
 
 #include <gtest/gtest.h>
 
+#include <set>
 #include <sstream>
 #include <vector>
 
@@ -41,6 +43,54 @@ struct TFixture {
         return Compiler.Parse(input, syntax);
     }
 };
+
+using NQumir::NAst::TTypePtr;
+using NQumir::NAst::TNamedType;
+
+void CollectNamedTypes(TTypePtr type, std::set<const TNamedType*>& out) {
+    using namespace NQumir::NAst;
+    if (!type) {
+        return;
+    }
+    if (auto named = TMaybeType<TNamedType>(type)) {
+        if (!out.insert(named.Cast()).second) {
+            return;
+        }
+        CollectNamedTypes(named.Cast()->UnderlyingType(), out);
+        for (const auto& arg : named.Cast()->TypeArgs) {
+            CollectNamedTypes(arg.Type, out);
+        }
+    } else if (auto pointer = TMaybeType<TPointerType>(type)) {
+        CollectNamedTypes(pointer.Cast()->PointeeType, out);
+    } else if (auto reference = TMaybeType<TReferenceType>(type)) {
+        CollectNamedTypes(reference.Cast()->ReferencedType, out);
+    } else if (auto array = TMaybeType<TArrayType>(type)) {
+        CollectNamedTypes(array.Cast()->ElementType, out);
+    } else if (auto structure = TMaybeType<TStructType>(type)) {
+        for (const auto& [name, field] : structure.Cast()->Fields) {
+            CollectNamedTypes(field, out);
+        }
+    } else if (auto function = TMaybeType<TFunctionType>(type)) {
+        for (const auto& param : function.Cast()->ParamTypes) {
+            CollectNamedTypes(param, out);
+        }
+        CollectNamedTypes(function.Cast()->ReturnType, out);
+    }
+}
+
+// Every named type that the AST of `node` mentions.
+void CollectNamedTypes(const NQumir::NAst::TExprPtr& node, std::set<const TNamedType*>& out) {
+    if (!node) {
+        return;
+    }
+    CollectNamedTypes(node->Type, out);
+    if (auto fun = NQumir::NAst::TMaybeNode<NQumir::NAst::TFunDecl>(node)) {
+        CollectNamedTypes(fun.Cast()->RetType, out);
+    }
+    for (auto* child : node->MutableChildren()) {
+        CollectNamedTypes(*child, out);
+    }
+}
 
 } // namespace
 
@@ -127,6 +177,42 @@ TEST(QueryCompiler, QueriesShareTheModuleBase) {
     }
     EXPECT_EQ(rowSets[0], rowSets[1]);
     EXPECT_EQ(NQumir::NAst::NCore::PrintAst(base.Ast), text);
+}
+
+// Compiling kernels and row-group pruning resolves the base modules in a query's clone.
+// The query must find every named type the modules mention in the base, and never
+// make a copy of its own under the same key, which would split the type in two.
+TEST(QueryCompiler, QueriesMakeNoCopiesOfBaseTypes) {
+    TFixture fixture;
+    auto query = fixture.Parse("SELECT value + 1 FROM items WHERE value > 1 + 1;");
+    ASSERT_TRUE(query) << query.error().ToString();
+    auto prepared = fixture.Compiler.Prepare(query->Statements[0]);
+    ASSERT_TRUE(prepared) << prepared.error().ToString();
+    ASSERT_TRUE(*prepared);
+    auto& types = *(**prepared).Types;
+    const auto& annotation = (**prepared).Annotation;
+    auto lowered = NScheduler::LowerPlanToGraph(
+        (**prepared).Plan, (**prepared).Types, {}, nullptr, annotation);
+    FinalizeKernels(lowered.Kernels, lowered.Types, lowered.Annotation, EKernelBackend::Llvm);
+
+    const auto i64 = types.MakeInteger();
+    const TSchema schema{{{.Name = "value", .Type = i64}}};
+    NQumir::TLocation loc{};
+    auto column = NQumir::MakeIntrusive<NQumir::NAst::TIdentExpr>(loc, "value");
+    column->Type = i64;
+    auto predicate = NQumir::MakeIntrusive<NQumir::NAst::TBinaryExpr>(
+        loc, NQumir::NAst::TOperator(">"), column, NQumir::MakeIntrusive<NQumir::NAst::TNumberExpr>(loc, int64_t{10}, types));
+    predicate->Type = types.Make<NQumir::NAst::TBoolType>();
+    ASSERT_TRUE(TRowGroupPredicateEvaluator::Compile(types, predicate, schema, "", annotation));
+
+    std::set<const TNamedType*> named;
+    for (const auto* name : {"qumirdb.oz", "row_group_interval.oz"}) {
+        CollectNamedTypes((*TestModuleBase()->Find(NUtils::ModuleFile(name)))->Ast, named);
+    }
+    ASSERT_FALSE(named.empty());
+    for (const auto* type : named) {
+        EXPECT_EQ(types.MakeNamed(type->Name, nullptr, auto(type->TypeArgs)), type) << type->ToString();
+    }
 }
 
 TEST(QueryCompiler, SexprUsesSourceFactory) {

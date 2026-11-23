@@ -6,14 +6,20 @@
 #include <qdb/plan/types/nullable.h>
 #include <qdb/utils/module_path.h>
 
+#include <qumir/frontend/compose.h>
+#include <qumir/modules/builtins/builtins.h>
+#include <qumir/modules/system/system.h>
+#include <qumir/parser/ast.h>
+#include <qumir/semantics/name_resolution/name_resolver.h>
+
 #include <filesystem>
+#include <optional>
 
 namespace NQdb::NKernel {
 
 namespace {
 
-// QumirDB's own named types, so that queries share the base's objects. They come before
-// the modules, so the modules' Nullable[bool] and Nullable[i64] are complete base types.
+// QumirDB's own named types, so that queries share the base's objects instead of making them.
 void AddNamedTypes(NQumir::NAst::TTypeFactory& types) {
     using NQumir::NAst::TIntegerType;
     for (const auto& type : NQumir::NRegistry::QumirDbExternalTypes(types)) {
@@ -27,18 +33,53 @@ void AddNamedTypes(NQumir::NAst::TTypeFactory& types) {
     MakeNullableType(types, types.MakeInteger(TIntegerType::I64));
 }
 
+// Resolves the names of a clone of module `name` once in the base, as a query resolves its
+// own clone. The generic instances the module mentions (Nullable[T], RgRange[i64], ...) are
+// then complete base types, so a query never makes a copy of one.
+std::optional<NQumir::TError> ResolveInBase(
+    NQumir::NAst::TTypeFactory& types,
+    NQumir::NFrontend::TSourceModuleLoader& loader,
+    const std::string& name)
+{
+    using namespace NQumir::NAst;
+    const std::vector<TPragma> pragmas{TPragma{"language", {"overloads"}, {}}};
+    TExprPtr program = NQumir::MakeIntrusive<TBlockExpr>(
+        NQumir::TLocation{}, std::vector<TExprPtr>{NQumir::MakeIntrusive<TUseExpr>(NQumir::TLocation{}, name)});
+    auto composed = NQumir::NFrontend::LoadAndCompose(loader, program, pragmas, /*cloneSourceModules*/ true);
+    if (!composed) {
+        return composed.error();
+    }
+    NQumir::NRegistry::SystemModule system(types);
+    NQumir::NRegistry::BuiltinsModule builtins(types);
+    NQumir::NSemantics::TNameResolver resolver(types);
+    resolver.ApplyPragmas(pragmas);
+    resolver.RegisterModule(&system);
+    resolver.RegisterModule(&builtins);
+    (void)resolver.ImportModule(builtins.Name());
+    resolver.ApplyPragmas(composed->Pragmas);
+    resolver.GetOrCreateRootScope()->RootLevel = false;
+    return resolver.Resolve(composed->Ast);
+}
+
 } // namespace
 
 TModuleBase::TModuleBase() {
     AddNamedTypes(*Types_);
-    for (const auto* name : {"qumirdb.oz", "row_group_interval.oz"}) {
-        auto file = NUtils::ModuleFile(name);
+    for (const auto* fileName : {"qumirdb.oz", "row_group_interval.oz"}) {
+        auto file = NUtils::ModuleFile(fileName);
         auto& loader = Loaders_.try_emplace(file, *Types_).first->second;
         if (auto registered = loader.RegisterSourceModule(file); !registered) {
             Modules_.emplace(file, std::unexpected(registered.error()));
             continue;
         }
-        Modules_.emplace(file, loader.Load(std::filesystem::path(file).stem().string()));
+        const auto name = std::filesystem::path(file).stem().string();
+        auto module = loader.Load(name);
+        if (module) {
+            if (auto error = ResolveInBase(*Types_, loader, name)) {
+                module = std::unexpected(*error);
+            }
+        }
+        Modules_.emplace(file, std::move(module));
     }
     Types_->Freeze();
 }
