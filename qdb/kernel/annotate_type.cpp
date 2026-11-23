@@ -2521,6 +2521,9 @@ TTypePtr ExpandDecimalNode(
     if (!e || IsNullLiteral(e)) {
         return nullptr;
     }
+    // A rewrite replaces `e` and may still read the node through its TMaybeNode view, so
+    // the node stays owned here until the rewrite returns.
+    const TExprPtr owner = e;
     if (TMaybeNode<TStringLiteralExpr>(e)) {
         return types.Make<TStringType>();
     }
