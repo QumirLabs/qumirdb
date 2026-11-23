@@ -233,7 +233,7 @@ public:
         NQumir::NAst::TTypeFactory& types,
         TQueryModules& modules,
         std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog)
-        : Frontend_(types, modules, {NUtils::ModuleFile("qumirdb.oz")})
+        : Frontend_(modules, {NUtils::ModuleFile("qumirdb.oz")})
         , ExternalCatalog_(std::move(externalCatalog))
     {
         if (ExternalCatalog_) {

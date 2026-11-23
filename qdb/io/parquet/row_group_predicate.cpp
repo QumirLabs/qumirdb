@@ -734,7 +734,7 @@ std::unique_ptr<TRowGroupPredicateEvaluator> TRowGroupPredicateEvaluator::Compil
         }
 
         TVmFrontendContext frontend(
-            types, *annotation.Modules, {NUtils::ModuleFile("row_group_interval.oz")});
+            *annotation.Modules, {NUtils::ModuleFile("row_group_interval.oz")});
         auto compiled = TVmFunction::Compile(frontend, {
             .NamePrefix = EvalFn,
             .Params = std::move(params),

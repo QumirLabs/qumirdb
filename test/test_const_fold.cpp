@@ -123,7 +123,7 @@ TEST(ConstFold, LeavesExpressionItCannotTypeUnfolded) {
 // fold must give what the module's compilation gives.
 TEST(ConstFold, BuiltinArithmeticFoldsAsWithTheModule) {
     NQdb::NKernel::TQueryModules modules(NQdb::TestTypes());
-    NQdb::TVmFrontendContext module(NQdb::TestTypes(), modules, {NQdb::NUtils::ModuleFile("qumirdb.oz")});
+    NQdb::TVmFrontendContext module(modules, {NQdb::NUtils::ModuleFile("qumirdb.oz")});
     for (const char* src : {
         "(+ 1212 11)", "(// 7 2)", "(% -7 2)", "(* 9223372036854775807 2)",
         "(cast -3.7 i32)", "(- (cast 5 u8) (cast 6 u8))", "(cast (cast 300 i32) i8)",

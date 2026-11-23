@@ -99,7 +99,6 @@ int64_t TExecutionContext::Invoke(
 }
 
 std::shared_ptr<TVmProgram> PrepareVmProgram(
-    NQumir::NAst::TTypeFactory& types,
     NKernel::TQueryModules& modules,
     NQumir::NAst::TExprPtr ast,
     const std::vector<std::string>& entryNames)
@@ -108,7 +107,7 @@ std::shared_ptr<TVmProgram> PrepareVmProgram(
     NQumir::NRegistry::EnsureQumirDbRuntimeSymbolsLinked();
     EnsureQumirDbUse(ast);
     KeepEntryNames(ast, entryNames);
-    TVmFrontendContext frontend(types, modules, {NUtils::ModuleFile("qumirdb.oz")});
+    TVmFrontendContext frontend(modules, {NUtils::ModuleFile("qumirdb.oz")});
     auto program = std::make_shared<TVmProgram>();
     auto lowered = frontend.Lower(std::move(ast), program->Module);
     if (!lowered) {

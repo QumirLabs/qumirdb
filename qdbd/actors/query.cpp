@@ -192,7 +192,7 @@ struct TBaseBehavior {
         State->Timing.KernelBuild += Seconds(buildStart);
         const auto jitStart = TClock::now();
         const auto image = SerializeKernelImage(CompileKernelImage(
-            lowered.Kernels, *lowered.Types, *lowered.Annotation.Modules, State->Settings.Kernel.Backend,
+            lowered.Kernels, *lowered.Annotation.Modules, State->Settings.Kernel.Backend,
             State->Settings.Jit.CacheDir));
         State->Timing.JitLLVM = Seconds(jitStart);
         std::vector<TTaskGraphMessage> messages(fragments.size());

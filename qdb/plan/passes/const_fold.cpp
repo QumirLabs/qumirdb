@@ -118,7 +118,7 @@ TExprPtr TConstFolder::Eval(const TExprPtr& expr, const TTypePtr& type) {
     }
     if (!Qumirdb_) {
         Qumirdb_ = std::make_unique<TVmFrontendContext>(
-            types, *Annotation_.Modules, std::vector<std::string>{NUtils::ModuleFile("qumirdb.oz")});
+            *Annotation_.Modules, std::vector<std::string>{NUtils::ModuleFile("qumirdb.oz")});
     }
     return EvalClosed(types, *Qumirdb_, {"qumirdb"}, expr, type);
 }

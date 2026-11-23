@@ -4,6 +4,7 @@
 #include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/finalize_fused.h>
+#include <qdb/kernel/query_modules.h>
 #include <qdb/kernel/vm_program.h>
 
 #ifdef QUMIR_ENABLE_TPDE
@@ -86,7 +87,7 @@ void FinalizeKernels(
             throw std::runtime_error(
                 "the vm kernel backend does not run external modules; use --kernel:backend=llvm");
         }
-        auto program = PrepareVmProgram(*types, *annotation.Modules, storage->Program, fused.Entrypoints);
+        auto program = PrepareVmProgram(*annotation.Modules, storage->Program, fused.Entrypoints);
         if (diagnostics) {
             *diagnostics << "========== END RUNTIME FUSED FINALIZE ==========\n";
         }
@@ -114,7 +115,7 @@ void FinalizeKernels(
         codegen = std::make_unique<NQumir::NCodeGen::TTpdeBackend>();
     }
 #endif
-    auto runner = std::make_shared<NQumir::TLLVMRunner>(std::move(options), std::move(codegen), types.get());
+    auto runner = std::make_shared<NQumir::TLLVMRunner>(std::move(options), std::move(codegen), &annotation.Modules->Types());
 
     std::string error;
     std::unordered_map<std::string, void*> fns;

@@ -1543,7 +1543,7 @@ TLoweredFragment LowerFragment(const std::string& sql)
     writer.Body = TRemoteSinkNode{.In = in};
     spec->Externals.push_back({.Id = 1, .Node = static_cast<uint32_t>(spec->Nodes.size() - 1)});
     return {std::move(*spec), SerializeKernelImage(
-        CompileKernelImage(lowered.Kernels, TestTypes(), *lowered.Annotation.Modules))};
+        CompileKernelImage(lowered.Kernels, *lowered.Annotation.Modules))};
 }
 
 // Plays the query actor: counts what the compute actor reports.
@@ -3217,7 +3217,7 @@ TEST(DistributedScheduler, SplitsALoweredPlanIntoFragmentSpecs) {
     const auto fragments = ExtractFragmentSpecs(lowered);
     ASSERT_EQ(fragments.size(), 3u);
     ASSERT_EQ(split.Graphs().size(), 3u);
-    auto image = CompileKernelImage(lowered.Kernels, TestTypes(), *lowered.Annotation.Modules);
+    auto image = CompileKernelImage(lowered.Kernels, *lowered.Annotation.Modules);
     std::vector<std::shared_ptr<TKernelSlot>> slots;
     for (size_t i = 0; i < image.Entrypoints.size(); ++i) {
         slots.push_back(std::make_shared<TKernelSlot>());
@@ -3537,7 +3537,7 @@ TEST(DistributedScheduler, SplitsRuntimeFiltersSoEveryProbeMergesEveryBuildLane)
     }
 
     // The fragments build, with the placeholders of each cut on their ends.
-    auto image = CompileKernelImage(lowered.Kernels, TestTypes(), *lowered.Annotation.Modules);
+    auto image = CompileKernelImage(lowered.Kernels, *lowered.Annotation.Modules);
     std::vector<std::shared_ptr<TKernelSlot>> slots;
     for (size_t i = 0; i < image.Entrypoints.size(); ++i) {
         slots.push_back(std::make_shared<TKernelSlot>());
@@ -3669,7 +3669,7 @@ TEST(DistributedScheduler, SplitsACteIntoSegmentAndSpoolCuts) {
     }));
 
     // The fragments build, with the placeholders of each cut on their ends.
-    auto image = CompileKernelImage(lowered.Kernels, TestTypes(), *lowered.Annotation.Modules);
+    auto image = CompileKernelImage(lowered.Kernels, *lowered.Annotation.Modules);
     std::vector<std::shared_ptr<TKernelSlot>> slots;
     for (size_t i = 0; i < image.Entrypoints.size(); ++i) {
         slots.push_back(std::make_shared<TKernelSlot>());

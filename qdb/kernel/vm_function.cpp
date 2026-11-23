@@ -51,10 +51,9 @@ TVmFrontendContext::TVmFrontendContext(TTypeFactory& types)
 }
 
 TVmFrontendContext::TVmFrontendContext(
-    TTypeFactory& types,
     NKernel::TQueryModules& modules,
     const std::vector<std::string>& moduleFiles)
-    : Impl_(std::make_unique<TImpl>(types))
+    : Impl_(std::make_unique<TImpl>(modules.Types()))
 {
     for (const auto& path : moduleFiles) {
         if (auto loaded = modules.Load(Impl_->Loader, path); !loaded) {

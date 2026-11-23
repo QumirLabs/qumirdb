@@ -179,7 +179,7 @@ TEST(TypeText, QumirDbTypesAreTheOnesQumirdbOzDeclares) {
     const auto before = build();
 
     NKernel::TQueryModules modules(types);
-    TVmFrontendContext frontend(types, modules, {NUtils::ModuleFile("qumirdb.oz")});
+    TVmFrontendContext frontend(modules, {NUtils::ModuleFile("qumirdb.oz")});
     std::vector<TParam> params;
     for (const auto& type : before) {
         params.push_back(NQumir::MakeIntrusive<TVarStmt>(

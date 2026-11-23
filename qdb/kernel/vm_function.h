@@ -45,7 +45,6 @@ public:
     explicit TVmFrontendContext(NQumir::NAst::TTypeFactory& types);
     // With the modules of `moduleFiles` (NUtils::ModuleFile paths).
     TVmFrontendContext(
-        NQumir::NAst::TTypeFactory& types,
         NKernel::TQueryModules& modules,
         const std::vector<std::string>& moduleFiles);
     ~TVmFrontendContext();
