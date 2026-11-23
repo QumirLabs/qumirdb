@@ -13,6 +13,10 @@ NQumir::NAst::TTypeFactory& TQueryModules::Types() const {
     return Types_;
 }
 
+size_t TQueryModules::ParseCount() const {
+    return Parsed_.size();
+}
+
 std::expected<std::monostate, NQumir::TError> TQueryModules::Load(
     NQumir::NFrontend::TSourceModuleLoader& loader,
     const std::string& file)

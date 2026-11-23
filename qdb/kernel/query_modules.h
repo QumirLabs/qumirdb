@@ -4,6 +4,7 @@
 #include <qumir/frontend/source_module_loader.h>
 #include <qumir/parser/type_factory.h>
 
+#include <cstddef>
 #include <expected>
 #include <map>
 #include <string>
@@ -19,6 +20,9 @@ public:
     explicit TQueryModules(NQumir::NAst::TTypeFactory& types);
 
     NQumir::NAst::TTypeFactory& Types() const;
+
+    // The number of source files parsed so far.
+    size_t ParseCount() const;
 
     // Loads the module of `file`, a NUtils::ModuleFile path, into `loader`.
     std::expected<std::monostate, NQumir::TError> Load(
