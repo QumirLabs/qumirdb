@@ -96,8 +96,12 @@ protected:
                  "aggregation_hashtable_generic.oz", "owned_blocks.oz",
                  "robin_hood_dual_key.oz"}) {
             auto library = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
-                NQdb::NKernel::ReadKernel("aggregation", name), {"aht_update"});
+                NQdb::NKernel::ReadKernel("aggregation", name));
             ASSERT_TRUE(library) << name << ": " << library.error().ToString();
+            std::erase_if(*library, [](const auto& stmt) {
+                auto fun = NQumir::NAst::TMaybeNode<NQumir::NAst::TFunDecl>(stmt);
+                return fun && fun.Cast()->Name == "aht_update";
+            });
             functions.insert(functions.end(), library->begin(), library->end());
         }
         auto entries = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(), TestEntries);

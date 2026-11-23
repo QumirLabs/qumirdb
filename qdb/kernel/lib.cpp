@@ -181,8 +181,7 @@ BuildJoinDualKeyLibrary(TQueryModules& modules) {
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
 ParseFunctionLibrary(
     NQumir::NAst::TTypeFactory& types,
-    const std::string& source,
-    const std::unordered_set<std::string>& exclude)
+    const std::string& source)
 {
     using namespace NQumir;
     using namespace NQumir::NAst;
@@ -209,9 +208,6 @@ ParseFunctionLibrary(
     for (auto& stmt : block.Cast()->Stmts) {
         auto fun = TMaybeNode<TFunDecl>(stmt);
         if (fun) {
-            if (exclude.contains(fun.Cast()->Name)) {
-                continue;
-            }
             // Library functions are stable across compilations, so cache them
             // (generics are already content-addressed by their instance name).
             if (fun.Cast()->GenericParams.empty() && !KeepBare.contains(fun.Cast()->Name)) {

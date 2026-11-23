@@ -58,7 +58,7 @@ std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
 BuildJoinDualKeyLibrary(TQueryModules& modules);
 
 // Parses `source` as a top-level (block (fun ...) ...) and returns its
-// FunDecl statements, in order, skipping any whose Name is in `exclude`.
+// FunDecl statements, in order.
 // The result is unresolved/unannotated, like GenFilterKernelAst's output:
 // callers merge it with a generated entry point via MergeKernelLibrary and
 // pass the combined block to TLLVMRunner::CompileKernelAst, which resolves
@@ -66,8 +66,7 @@ BuildJoinDualKeyLibrary(TQueryModules& modules);
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
 ParseFunctionLibrary(
     NQumir::NAst::TTypeFactory& types,
-    const std::string& source,
-    const std::unordered_set<std::string>& exclude = {});
+    const std::string& source);
 
 // Builds (block <library...> <entry>). Callers select the compiled entry point
 // explicitly by its source function name.

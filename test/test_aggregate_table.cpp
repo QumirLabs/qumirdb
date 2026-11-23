@@ -145,8 +145,12 @@ protected:
     void SetUp() override {
         std::vector<TExprPtr> functions;
         auto add = [&](const std::string& source, const std::string& name) {
-            auto library = NKernel::ParseFunctionLibrary(TestTypes(), source, {"aht_update"});
+            auto library = NKernel::ParseFunctionLibrary(TestTypes(), source);
             ASSERT_TRUE(library) << name << ": " << library.error().ToString();
+            std::erase_if(*library, [](const auto& stmt) {
+                auto fun = NQumir::NAst::TMaybeNode<NQumir::NAst::TFunDecl>(stmt);
+                return fun && fun.Cast()->Name == "aht_update";
+            });
             functions.insert(functions.end(), library->begin(), library->end());
         };
         for (const char* name : {
