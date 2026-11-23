@@ -114,10 +114,9 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: bash .clusterfuzzlite/report_finding.sh
 
-  # The corpus of qdb_fuzz_plan is merged in about as long as the whole budget of
-  # one target, so the targets are pruned in two passes, one after the other: the
-  # budget is split only across the targets of a pass, and no two passes push to
-  # the corpus repository at the same time.
+  # Merging the corpus of qdb_fuzz_plan or qdb_fuzz_vm takes about the whole budget,
+  # so each target is pruned in its own pass, one after the other: the budget is not
+  # split, and no two passes push to the corpus repository at the same time.
   prune:
     name: prune (${{ matrix.name }})
     # The corpus token is used here: never hand it to a dispatch from another branch.
@@ -131,8 +130,10 @@ jobs:
         include:
           - name: plan
             targets: qdb_fuzz_plan
-          - name: parse and vm
-            targets: qdb_fuzz_parse qdb_fuzz_vm
+          - name: vm
+            targets: qdb_fuzz_vm
+          - name: parse
+            targets: qdb_fuzz_parse
     steps:
       - uses: actions/checkout@v4
         with:
