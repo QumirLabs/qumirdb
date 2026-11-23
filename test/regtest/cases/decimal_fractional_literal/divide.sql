@@ -1,0 +1,1 @@
+SELECT id, 0.7 / -CAST(n AS DECIMAL(10,1)) AS a, 3.5 / CAST(n AS DECIMAL(1)) AS b FROM t WHERE n <> 0 ORDER BY id;

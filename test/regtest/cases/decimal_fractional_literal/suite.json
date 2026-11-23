@@ -9,6 +9,7 @@
   "cases": {
     "arith.sql": {"order": "ordered"},
     "compare.sql": {"order": "ordered"},
+    "divide.sql": {"order": "ordered"},
     "filter.sql": {"order": "ordered"},
     "aggregate.sql": {"order": "ordered"}
   }
