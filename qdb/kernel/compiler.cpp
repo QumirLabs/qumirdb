@@ -172,6 +172,29 @@ std::expected<NQumir::NFrontend::TComposeResult, NQumir::TError> ComposeKernelPr
     return composed;
 }
 
+namespace {
+
+// Composes the program with qumirdb.oz and hands it to `compile`; on a compose error sets
+// *error and returns an empty result.
+template <class TResult, class TCompile>
+TResult CompileComposed(
+    NKernel::TQueryModules& modules,
+    NQumir::NFrontend::TComposeResult program,
+    std::string* error,
+    TCompile&& compile)
+{
+    auto composed = ComposeKernelProgram(modules, std::move(program));
+    if (!composed) {
+        if (error) {
+            *error = composed.error().ToString();
+        }
+        return {};
+    }
+    return compile(std::move(*composed));
+}
+
+} // namespace
+
 std::unordered_map<std::string, void*> CompileKernelAst(
     NQumir::TLLVMRunner& runner,
     NKernel::TQueryModules& modules,
@@ -180,14 +203,10 @@ std::unordered_map<std::string, void*> CompileKernelAst(
     std::string* error)
 {
     NQumir::NRegistry::EnsureQumirDbRuntimeSymbolsLinked();
-    auto composed = ComposeKernelProgram(modules, std::move(program));
-    if (!composed) {
-        if (error) {
-            *error = composed.error().ToString();
-        }
-        return {};
-    }
-    return runner.CompileKernelAst(std::move(*composed), entryNames, error);
+    return CompileComposed<std::unordered_map<std::string, void*>>(
+        modules, std::move(program), error, [&](NQumir::NFrontend::TComposeResult composed) {
+            return runner.CompileKernelAst(std::move(composed), entryNames, error);
+        });
 }
 
 namespace {
@@ -222,15 +241,16 @@ NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
     std::string* error)
 {
     NQumir::NRegistry::EnsureQumirDbRuntimeSymbolsLinked();
-    auto composed = ComposeKernelProgram(modules, {.Ast = std::move(ast)});
-    if (!composed) {
-        if (error) {
-            *error = composed.error().ToString();
-        }
-        return {};
-    }
-    return runner.CompileFusedKernelsCached(
-        std::move(composed->Ast), entryNames, cacheDir, CacheSchemaVersion, KernelLibVersion, error);
+    return CompileComposed<NQumir::NCodeGen::TLlvmRunner::TLinkedModule>(
+        modules, {.Ast = std::move(ast)}, error, [&](NQumir::NFrontend::TComposeResult composed) {
+            return runner.CompileFusedKernelsCached(
+                std::move(composed.Ast),
+                entryNames,
+                cacheDir,
+                CacheSchemaVersion,
+                KernelLibVersion,
+                error);
+        });
 }
 
 std::shared_ptr<TKernelSlot> TKernelCompiler::CompileInstrumentation() {
@@ -302,14 +322,10 @@ std::optional<std::string> CompileKernelAstToObject(
     const std::vector<std::string>& entryNames,
     std::string* error)
 {
-    auto composed = ComposeKernelProgram(modules, std::move(program));
-    if (!composed) {
-        if (error) {
-            *error = composed.error().ToString();
-        }
-        return std::nullopt;
-    }
-    return runner.CompileKernelAstToObject(std::move(*composed), entryNames, error);
+    return CompileComposed<std::optional<std::string>>(
+        modules, std::move(program), error, [&](NQumir::NFrontend::TComposeResult composed) {
+            return runner.CompileKernelAstToObject(std::move(composed), entryNames, error);
+        });
 }
 
 std::optional<NQumir::TLLVMRunner::TCachedObjectModule>
@@ -321,20 +337,16 @@ CompileKernelAstToObjectsCached(
     const std::string& cacheDir,
     std::string* error)
 {
-    auto composed = ComposeKernelProgram(modules, {.Ast = std::move(ast)});
-    if (!composed) {
-        if (error) {
-            *error = composed.error().ToString();
-        }
-        return std::nullopt;
-    }
-    return runner.CompileFusedKernelsToObjectsCached(
-        std::move(composed->Ast),
-        entryNames,
-        cacheDir,
-        CacheSchemaVersion,
-        KernelLibVersion,
-        error);
+    return CompileComposed<std::optional<NQumir::TLLVMRunner::TCachedObjectModule>>(
+        modules, {.Ast = std::move(ast)}, error, [&](NQumir::NFrontend::TComposeResult composed) {
+            return runner.CompileFusedKernelsToObjectsCached(
+                std::move(composed.Ast),
+                entryNames,
+                cacheDir,
+                CacheSchemaVersion,
+                KernelLibVersion,
+                error);
+        });
 }
 
 namespace {
