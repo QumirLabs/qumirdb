@@ -91,7 +91,11 @@ std::shared_ptr<const NQumir::NAst::TTypeFactory> TModuleBase::Types() const {
 std::expected<const NQumir::NFrontend::TSourceModule*, NQumir::TError> TModuleBase::Find(
     const std::string& file) const
 {
-    return Modules_.at(file);
+    auto it = Modules_.find(file);
+    if (it == Modules_.end()) {
+        return std::unexpected(NQumir::TError(file + " is not a module of the base"));
+    }
+    return it->second;
 }
 
 std::shared_ptr<NQumir::NAst::TTypeFactory> MakeQueryTypes(const TModuleBase& base) {

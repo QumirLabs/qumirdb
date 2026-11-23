@@ -23,7 +23,7 @@ public:
 
     std::shared_ptr<const NQumir::NAst::TTypeFactory> Types() const;
 
-    // The parsed module of `file`, a NUtils::ModuleFile path.
+    // The parsed module of `file`, a NUtils::ModuleFile path of one of the two modules.
     std::expected<const NQumir::NFrontend::TSourceModule*, NQumir::TError> Find(const std::string& file) const;
 
 private:
@@ -44,7 +44,7 @@ public:
 
     NQumir::NAst::TTypeFactory& Types() const;
 
-    // Loads the module of `file`, a NUtils::ModuleFile path, into `loader`.
+    // Loads the module of `file`, a NUtils::ModuleFile path of a base module, into `loader`.
     std::expected<std::monostate, NQumir::TError> Load(
         NQumir::NFrontend::TSourceModuleLoader& loader,
         const std::string& file);

@@ -9,10 +9,9 @@
 #include <qdb/scheduler/lowering/plan_lowerer.h>
 #include <qdb/utils/module_path.h>
 
-#include <qumir/parser/core/printer.h>
-
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <set>
 #include <sstream>
 #include <vector>
@@ -76,6 +75,38 @@ void CollectNamedTypes(TTypePtr type, std::set<const TNamedType*>& out) {
         }
         CollectNamedTypes(function.Cast()->ReturnType, out);
     }
+}
+
+// A node of an AST with what name resolution would write into it.
+struct TNodeState {
+    const NQumir::NAst::TExpr* Node = nullptr;
+    TTypePtr Type = nullptr;
+    TTypePtr RetType = nullptr;
+    int32_t Scope = -1;
+
+    bool operator==(const TNodeState&) const = default;
+};
+
+std::vector<TNodeState> NodeStates(const NQumir::NAst::TExprPtr& node) {
+    std::vector<TNodeState> states;
+    std::vector<NQumir::NAst::TExprPtr> stack{node};
+    while (!stack.empty()) {
+        auto current = std::move(stack.back());
+        stack.pop_back();
+        if (!current) {
+            continue;
+        }
+        TNodeState state{.Node = current.Get(), .Type = current->Type};
+        if (auto fun = NQumir::NAst::TMaybeNode<NQumir::NAst::TFunDecl>(current)) {
+            state.RetType = fun.Cast()->RetType;
+            state.Scope = fun.Cast()->Scope;
+        }
+        states.push_back(state);
+        for (auto* child : current->MutableChildren()) {
+            stack.push_back(*child);
+        }
+    }
+    return states;
 }
 
 // Every named type that the AST of `node` mentions.
@@ -150,11 +181,12 @@ TEST(QueryCompiler, DeclarationsAreAppliedBeforeQueries) {
 }
 
 // Every query loads qumirdb.oz from the process's frozen module base: queries share its
-// AST, which compiling a query leaves as it is, and a base type is one object in all.
+// AST, which compiling a query leaves as it is (the same nodes, types and scopes), and a
+// base type is one object in all.
 TEST(QueryCompiler, QueriesShareTheModuleBase) {
     const auto file = NUtils::ModuleFile("qumirdb.oz");
     const auto& base = **TestModuleBase()->Find(file);
-    const auto text = NQumir::NAst::NCore::PrintAst(base.Ast);
+    const auto states = NodeStates(base.Ast);
     std::vector<NQumir::NAst::TTypePtr> rowSets;
     for (int i = 0; i < 2; ++i) {
         TFixture fixture;
@@ -176,7 +208,13 @@ TEST(QueryCompiler, QueriesShareTheModuleBase) {
         rowSets.push_back(NQumir::NRegistry::QumirDbNamedType(*(**prepared).Types, "TRowSet"));
     }
     EXPECT_EQ(rowSets[0], rowSets[1]);
-    EXPECT_EQ(NQumir::NAst::NCore::PrintAst(base.Ast), text);
+    EXPECT_TRUE(NodeStates(base.Ast) == states);
+}
+
+TEST(QueryCompiler, ModuleOutsideTheBaseIsAnError) {
+    auto found = TestModuleBase()->Find(NUtils::ModuleFile("other.oz"));
+    ASSERT_FALSE(found);
+    EXPECT_NE(found.error().ToString().find("is not a module of the base"), std::string::npos);
 }
 
 // Compiling kernels and row-group pruning resolves the base modules in a query's clone.
