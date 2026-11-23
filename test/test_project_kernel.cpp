@@ -54,14 +54,14 @@ TEST(CompileProject, ComputesF64AndI64Columns) {
     std::vector<TExprPtr> exprs = {Parse("(* p (- 1.0 d))"), Parse("(+ k 100)")};
     std::vector<TTypePtr> types;
     for (auto& e : exprs) {
-        types.push_back(NKernel::AnnotateExprType(TestTypes(), e, inputType));
+        types.push_back(NKernel::AnnotateExprType(TestTypes(), e, inputType, TestAnnotation()));
     }
     ASSERT_TRUE(TMaybeType<TFloatType>(types[0]));
     ASSERT_TRUE(TMaybeType<TIntegerType>(types[1]));
 
-    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
     auto dispatch = compiler.CompileProject(
-        NKernel::BuildProjectKernelSpec(TestTypes(), inputType, exprs, types));
+        NKernel::BuildProjectKernelSpec(TestTypes(), TestAnnotation(), inputType, exprs, types));
 
     std::array<double, 3> p = {100.0, 200.0, 50.0};
     std::array<double, 3> d = {0.1, 0.05, 0.2};
@@ -90,10 +90,10 @@ TEST(CompileProject, CompilesFromKernelSpec) {
     });
     std::vector<TExprPtr> exprs = {Parse("(+ value 10)")};
     std::vector<TTypePtr> types = {
-        NKernel::AnnotateExprType(TestTypes(), exprs[0], inputType),
+        NKernel::AnnotateExprType(TestTypes(), exprs[0], inputType, TestAnnotation()),
     };
-    auto spec = NKernel::BuildProjectKernelSpec(TestTypes(), inputType, exprs, types);
-    auto dispatch = TKernelCompiler({.Types = SharedTestTypes()}).CompileProject(spec);
+    auto spec = NKernel::BuildProjectKernelSpec(TestTypes(), TestAnnotation(), inputType, exprs, types);
+    auto dispatch = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileProject(spec);
 
     std::array<int64_t, 3> values = {1, 2, 3};
     std::array<TColumn, 1> cols = {
@@ -117,10 +117,10 @@ TEST(CompileProject, CastsIntegerIfBranchesBeforeLoweringPhi) {
         Parse("(if (< d (: 10 i32)) qty 0)"),
     };
     std::vector<TTypePtr> types = {
-        NKernel::AnnotateExprType(TestTypes(), exprs[0], inputType),
+        NKernel::AnnotateExprType(TestTypes(), exprs[0], inputType, TestAnnotation()),
     };
-    auto spec = NKernel::BuildProjectKernelSpec(TestTypes(), inputType, exprs, types);
-    auto dispatch = TKernelCompiler({.Types = SharedTestTypes()}).CompileProject(spec);
+    auto spec = NKernel::BuildProjectKernelSpec(TestTypes(), TestAnnotation(), inputType, exprs, types);
+    auto dispatch = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileProject(spec);
 
     std::array<int32_t, 3> d = {5, 10, 3};
     std::array<int32_t, 3> qty = {11, 22, 33};
@@ -147,16 +147,15 @@ TEST(CompileProject, RegexpReplaceUsesCompiledQueryHandle) {
         "(cast \"^https?://(?:www\\\\.)?([^/]+)/.*$\" StringView) "
         "(cast \"\\\\1\" StringView))")};
     ASSERT_TRUE(TMaybeType<TStringType>(
-        NKernel::AnnotateExprType(TestTypes(), exprs[0], inputType)));
+        NKernel::AnnotateExprType(TestTypes(), exprs[0], inputType, TestAnnotation())));
     std::vector<TTypePtr> types = {
         TestTypes().MakeNamed("StringView", nullptr),
     };
     auto runtime = std::make_shared<TRuntimeContext>();
-    auto spec = NKernel::BuildProjectKernelSpec(TestTypes(),
-        inputType, exprs, types, "<project>", nullptr,
-        runtime.get());
+    auto spec = NKernel::BuildProjectKernelSpec(TestTypes(), TestAnnotation(),
+        inputType, exprs, types, "<project>", runtime.get());
     auto dispatch = TKernelCompiler(TKernelCompilerOptions{
-        .Types = SharedTestTypes(), .RuntimeContext = runtime,
+        .Types = SharedTestTypes(), .Annotation = TestAnnotation(), .RuntimeContext = runtime,
     }).CompileProject(spec);
 
     const std::array<std::string_view, 3> values = {

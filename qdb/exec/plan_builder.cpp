@@ -331,7 +331,7 @@ private:
                     static_cast<const TProjectOperator*>(stage.Operator));
                 auto* input = static_cast<const TStructType*>(inputs[0].OutputType);
                 outputType = BuildProjectColumnPlan(
-                    *Lowered_.Types, *project, *input, &Lowered_.Annotation).OutputType;
+                    *Lowered_.Types, *project, *input, Lowered_.Annotation).OutputType;
                 break;
             }
             case EExecPlanNodeKind::Aggregate: {

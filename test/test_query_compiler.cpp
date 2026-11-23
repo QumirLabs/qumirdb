@@ -1,15 +1,20 @@
 #include "mock_source.h"
 
 #include <qdb/compiler/query.h>
+#include <qdb/io/parquet/row_group_predicate.h>
 #include <qdb/kernel/finalize.h>
 #include <qdb/kernel/query_modules.h>
+#include <qdb/modules/qumirdb.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/scheduler/lowering/plan_lowerer.h>
 #include <qdb/utils/module_path.h>
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
+#include <set>
 #include <sstream>
+#include <vector>
 
 using namespace NQdb;
 using namespace NQdb::NCompiler;
@@ -27,7 +32,7 @@ struct TFixture {
         return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(Source), std::string(table));
     };
     // Parses and prepares with one factory, as a query does.
-    TQueryCompiler Compiler{Catalog, Sources};
+    TQueryCompiler Compiler{TestModuleBase(), Catalog, Sources};
 
     std::expected<TParsedQuery, NQumir::TError> Parse(
         const std::string& text,
@@ -37,6 +42,86 @@ struct TFixture {
         return Compiler.Parse(input, syntax);
     }
 };
+
+using NQumir::NAst::TTypePtr;
+using NQumir::NAst::TNamedType;
+
+void CollectNamedTypes(TTypePtr type, std::set<const TNamedType*>& out) {
+    using namespace NQumir::NAst;
+    if (!type) {
+        return;
+    }
+    if (auto named = TMaybeType<TNamedType>(type)) {
+        if (!out.insert(named.Cast()).second) {
+            return;
+        }
+        CollectNamedTypes(named.Cast()->UnderlyingType(), out);
+        for (const auto& arg : named.Cast()->TypeArgs) {
+            CollectNamedTypes(arg.Type, out);
+        }
+    } else if (auto pointer = TMaybeType<TPointerType>(type)) {
+        CollectNamedTypes(pointer.Cast()->PointeeType, out);
+    } else if (auto reference = TMaybeType<TReferenceType>(type)) {
+        CollectNamedTypes(reference.Cast()->ReferencedType, out);
+    } else if (auto array = TMaybeType<TArrayType>(type)) {
+        CollectNamedTypes(array.Cast()->ElementType, out);
+    } else if (auto structure = TMaybeType<TStructType>(type)) {
+        for (const auto& [name, field] : structure.Cast()->Fields) {
+            CollectNamedTypes(field, out);
+        }
+    } else if (auto function = TMaybeType<TFunctionType>(type)) {
+        for (const auto& param : function.Cast()->ParamTypes) {
+            CollectNamedTypes(param, out);
+        }
+        CollectNamedTypes(function.Cast()->ReturnType, out);
+    }
+}
+
+// A node of an AST with what name resolution would write into it.
+struct TNodeState {
+    const NQumir::NAst::TExpr* Node = nullptr;
+    TTypePtr Type = nullptr;
+    TTypePtr RetType = nullptr;
+    int32_t Scope = -1;
+
+    bool operator==(const TNodeState&) const = default;
+};
+
+std::vector<TNodeState> NodeStates(const NQumir::NAst::TExprPtr& node) {
+    std::vector<TNodeState> states;
+    std::vector<NQumir::NAst::TExprPtr> stack{node};
+    while (!stack.empty()) {
+        auto current = std::move(stack.back());
+        stack.pop_back();
+        if (!current) {
+            continue;
+        }
+        TNodeState state{.Node = current.Get(), .Type = current->Type};
+        if (auto fun = NQumir::NAst::TMaybeNode<NQumir::NAst::TFunDecl>(current)) {
+            state.RetType = fun.Cast()->RetType;
+            state.Scope = fun.Cast()->Scope;
+        }
+        states.push_back(state);
+        for (auto* child : current->MutableChildren()) {
+            stack.push_back(*child);
+        }
+    }
+    return states;
+}
+
+// Every named type that the AST of `node` mentions.
+void CollectNamedTypes(const NQumir::NAst::TExprPtr& node, std::set<const TNamedType*>& out) {
+    if (!node) {
+        return;
+    }
+    CollectNamedTypes(node->Type, out);
+    if (auto fun = NQumir::NAst::TMaybeNode<NQumir::NAst::TFunDecl>(node)) {
+        CollectNamedTypes(fun.Cast()->RetType, out);
+    }
+    for (auto* child : node->MutableChildren()) {
+        CollectNamedTypes(*child, out);
+    }
+}
 
 } // namespace
 
@@ -95,32 +180,77 @@ TEST(QueryCompiler, DeclarationsAreAppliedBeforeQueries) {
     }
 }
 
-// Typing, const folding, pruning and the kernels of a query share the query's one
-// TQueryModules, so qumirdb.oz is parsed once and its AST is never replaced.
-TEST(QueryCompiler, PreparedQueryParsesEachModuleOnce) {
+// Every query loads qumirdb.oz from the process's frozen module base: queries share its
+// AST, which compiling a query leaves as it is (the same nodes, types and scopes), and a
+// base type is one object in all.
+TEST(QueryCompiler, QueriesShareTheModuleBase) {
+    const auto file = NUtils::ModuleFile("qumirdb.oz");
+    const auto& base = **TestModuleBase()->Find(file);
+    const auto states = NodeStates(base.Ast);
+    std::vector<NQumir::NAst::TTypePtr> rowSets;
+    for (int i = 0; i < 2; ++i) {
+        TFixture fixture;
+        auto query = fixture.Parse("SELECT value + 1 FROM items WHERE value > 1 + 1;");
+        ASSERT_TRUE(query) << query.error().ToString();
+        auto prepared = fixture.Compiler.Prepare(query->Statements[0]);
+        ASSERT_TRUE(prepared) << prepared.error().ToString();
+        ASSERT_TRUE(*prepared);
+        auto& annotation = (**prepared).Annotation;
+        NQumir::NFrontend::TSourceModuleLoader loader(annotation.Modules->Types());
+        ASSERT_TRUE(annotation.Modules->Load(loader, file));
+        EXPECT_EQ(loader.Find("qumirdb")->Ast.Get(), base.Ast.Get());
+
+        auto lowered = NScheduler::LowerPlanToGraph(
+            (**prepared).Plan, (**prepared).Types, {}, nullptr, annotation);
+        EXPECT_EQ(lowered.Annotation.Modules, annotation.Modules);
+        FinalizeKernels(lowered.Kernels, lowered.Types, lowered.Annotation, EKernelBackend::Llvm);
+        EXPECT_FALSE(lowered.Kernels.empty());
+        rowSets.push_back(NQumir::NRegistry::QumirDbNamedType(*(**prepared).Types, "TRowSet"));
+    }
+    EXPECT_EQ(rowSets[0], rowSets[1]);
+    EXPECT_TRUE(NodeStates(base.Ast) == states);
+}
+
+TEST(QueryCompiler, ModuleOutsideTheBaseIsAnError) {
+    auto found = TestModuleBase()->Find(NUtils::ModuleFile("other.oz"));
+    ASSERT_FALSE(found);
+    EXPECT_NE(found.error().ToString().find("is not a module of the base"), std::string::npos);
+}
+
+// Compiling kernels and row-group pruning resolves the base modules in a query's clone.
+// The query must find every named type the modules mention in the base, and never
+// make a copy of its own under the same key, which would split the type in two.
+TEST(QueryCompiler, QueriesMakeNoCopiesOfBaseTypes) {
     TFixture fixture;
     auto query = fixture.Parse("SELECT value + 1 FROM items WHERE value > 1 + 1;");
     ASSERT_TRUE(query) << query.error().ToString();
     auto prepared = fixture.Compiler.Prepare(query->Statements[0]);
     ASSERT_TRUE(prepared) << prepared.error().ToString();
     ASSERT_TRUE(*prepared);
-    auto& annotation = (**prepared).Annotation;
-    auto& modules = *annotation.Modules;
-    const auto file = NUtils::ModuleFile("qumirdb.oz");
-    NQumir::NFrontend::TSourceModuleLoader before(modules.Types());
-    ASSERT_TRUE(modules.Load(before, file));
-    const auto* ast = before.Find("qumirdb")->Ast.Get();
-
+    auto& types = *(**prepared).Types;
+    const auto& annotation = (**prepared).Annotation;
     auto lowered = NScheduler::LowerPlanToGraph(
-        (**prepared).Plan, (**prepared).Types, {}, nullptr, &annotation);
-    EXPECT_EQ(lowered.Annotation.Modules, annotation.Modules);
+        (**prepared).Plan, (**prepared).Types, {}, nullptr, annotation);
     FinalizeKernels(lowered.Kernels, lowered.Types, lowered.Annotation, EKernelBackend::Llvm);
-    EXPECT_FALSE(lowered.Kernels.empty());
 
-    EXPECT_EQ(modules.ParseCount(), 1);
-    NQumir::NFrontend::TSourceModuleLoader after(modules.Types());
-    ASSERT_TRUE(modules.Load(after, file));
-    EXPECT_EQ(after.Find("qumirdb")->Ast.Get(), ast);
+    const auto i64 = types.MakeInteger();
+    const TSchema schema{{{.Name = "value", .Type = i64}}};
+    NQumir::TLocation loc{};
+    auto column = NQumir::MakeIntrusive<NQumir::NAst::TIdentExpr>(loc, "value");
+    column->Type = i64;
+    auto predicate = NQumir::MakeIntrusive<NQumir::NAst::TBinaryExpr>(
+        loc, NQumir::NAst::TOperator(">"), column, NQumir::MakeIntrusive<NQumir::NAst::TNumberExpr>(loc, int64_t{10}, types));
+    predicate->Type = types.Make<NQumir::NAst::TBoolType>();
+    ASSERT_TRUE(TRowGroupPredicateEvaluator::Compile(types, predicate, schema, "", annotation));
+
+    std::set<const TNamedType*> named;
+    for (const auto* name : {"qumirdb.oz", "row_group_interval.oz"}) {
+        CollectNamedTypes((*TestModuleBase()->Find(NUtils::ModuleFile(name)))->Ast, named);
+    }
+    ASSERT_FALSE(named.empty());
+    for (const auto* type : named) {
+        EXPECT_EQ(types.MakeNamed(type->Name, nullptr, auto(type->TypeArgs)), type) << type->ToString();
+    }
 }
 
 TEST(QueryCompiler, SexprUsesSourceFactory) {
@@ -144,7 +274,7 @@ TEST(QueryCompiler, SourceErrorsArePreserved) {
         return std::unexpected(NQumir::TError("table unavailable"));
     };
     std::istringstream sexpr("(rel source \"missing\")");
-    TQueryCompiler compiler(catalog, sources);
+    TQueryCompiler compiler(TestModuleBase(), catalog, sources);
     auto parsedSexpr = compiler.Parse(sexpr, ESyntax::Sexpr);
     ASSERT_FALSE(parsedSexpr);
     EXPECT_NE(parsedSexpr.error().ToString().find("table unavailable"), std::string::npos);

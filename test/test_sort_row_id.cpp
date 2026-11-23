@@ -72,7 +72,7 @@ CompileRowIdSort(const std::vector<NQdb::TSortRadixKeyInput>& keys) {
     auto program = NQumir::MakeIntrusive<NQumir::NAst::TBlockExpr>(
         NQumir::TLocation{}, std::move(statements));
     std::string error;
-    NQdb::NKernel::TQueryModules modules(NQdb::TestTypes());
+    NQdb::NKernel::TQueryModules modules(NQdb::TestTypes(), NQdb::TestModuleBase());
     auto entries = NQdb::CompileKernelAst(*runner, modules, {.Ast = std::move(program)},
                                           {"test_sort_row_ids"}, &error);
     auto entry = entries.find("test_sort_row_ids");
@@ -88,7 +88,7 @@ CompileRowIdSort(const std::vector<NQdb::TSortRadixKeyInput>& keys) {
 
 NQdb::TKernelCompiler::THeapTopKDispatch
 CompileHeapTopK(const std::vector<NQdb::TSortRadixKeyInput>& keys) {
-    return NQdb::TKernelCompiler({.Types = NQdb::SharedTestTypes()}).CompileHeapTopK(keys);
+    return NQdb::TKernelCompiler({.Types = NQdb::SharedTestTypes(), .Annotation = NQdb::TestAnnotation()}).CompileHeapTopK(keys);
 }
 
 std::vector<int64_t> MakeRowIds(std::array<NQdb::TRowSet, 2>& store) {

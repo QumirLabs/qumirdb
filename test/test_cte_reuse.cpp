@@ -44,7 +44,7 @@ TOperatorPtr BuildSqlPlan(std::string_view sql, const std::map<std::string, ITab
         }
         return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(*it->second), std::string(table));
     };
-    auto plan = BuildPlan(TestTypes(), parsed.value(), factory);
+    auto plan = BuildPlan(TestTypes(), TestAnnotation(), parsed.value(), factory);
     EXPECT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
     return plan.value();
 }
@@ -52,7 +52,7 @@ TOperatorPtr BuildSqlPlan(std::string_view sql, const std::map<std::string, ITab
 void Annotate(const TOperatorPtr& plan) {
     AssignSourceAliases(TestTypes(), plan);
     QualifyColumns(TestTypes(), plan);
-    AnnotateTypes(TestTypes(), plan);
+    AnnotateTypes(TestTypes(), plan, TestAnnotation());
 }
 
 // Builds and annotates main + every definition, then propagates demand (as the
@@ -377,7 +377,7 @@ TEST(CteReuse, ConsumerPredicatePushedToDefinitionSource) {
     auto plan = BuildSqlPlan(
         "WITH x AS (SELECT a, b FROM t) "
         "SELECT p.a FROM x p JOIN x q ON p.a = q.a WHERE p.b = 1 AND q.b = 1", tables);
-    ApplyPlanPasses(TestTypes(), plan);
+    ApplyPlanPasses(TestTypes(), plan, {.Annotation = TestAnnotation()});
 
     auto consumers = FindConsumers(plan);
     ASSERT_EQ(consumers.size(), 2u);
@@ -395,7 +395,7 @@ TEST(CteReuse, MultiColumnConsumerPredicatesUseSharedSupersetBuilder) {
         "SELECT p.a FROM x p JOIN x q ON p.a = q.a "
         "WHERE p.a + p.b < 10 AND q.a + q.b < 20",
         tables);
-    ApplyPlanPasses(TestTypes(), plan);
+    ApplyPlanPasses(TestTypes(), plan, {.Annotation = TestAnnotation()});
 
     auto consumers = FindConsumers(plan);
     ASSERT_EQ(consumers.size(), 2u);
@@ -416,7 +416,7 @@ TEST(CteReuse, AsymmetricPredicateNotPushed) {
     auto plan = BuildSqlPlan(
         "WITH x AS (SELECT a, b FROM t) "
         "SELECT p.a FROM x p JOIN x q ON p.a = q.a WHERE p.b = 1", tables);
-    ApplyPlanPasses(TestTypes(), plan);
+    ApplyPlanPasses(TestTypes(), plan, {.Annotation = TestAnnotation()});
 
     auto consumers = FindConsumers(plan);
     ASSERT_EQ(consumers.size(), 2u);

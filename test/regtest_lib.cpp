@@ -5,6 +5,7 @@
 
 #include <qdb/catalog/external_module.h>
 #include <qdb/io/parquet/source.h>
+#include <qdb/kernel/query_modules.h>
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/pipeline.h>
@@ -117,7 +118,7 @@ std::expected<std::string, std::string> BuildPlanText(std::istream& input) {
         return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(*source), std::string(table));
     };
     // The mock tables are typed in TestTypes().
-    auto plan = BuildPlan(TestTypes(), *parsed, factory);
+    auto plan = BuildPlan(TestTypes(), TestAnnotation(), *parsed, factory);
     if (!plan) return std::unexpected(plan.error().ToString() + "\n");
     std::ostringstream output;
     NSexp::PrintRelPlan(output, *plan);
@@ -1028,7 +1029,7 @@ TParsedQuery ParseQuery(const std::shared_ptr<TTypeFactory>& types, const fs::pa
     return {
         .Query = statements->back(),
         .Annotation = NKernel::MakeAnnotationContext(
-            *types, statements->size() > 1 ? catalog.Snapshot(types) : nullptr),
+            *types, TestModuleBase(), statements->size() > 1 ? catalog.Snapshot(types) : nullptr),
     };
 }
 
@@ -1364,7 +1365,7 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize, const TRegTestOptio
     variant.Kernel.Backend = *ParseKernelBackend(test.Backend);
     ApplyEngineConfig(options.Engine, engine);
     // The query's type factory: its plan, kernels and result schema are its types.
-    const auto types = std::make_shared<TTypeFactory>();
+    const auto types = NKernel::MakeQueryTypes(*TestModuleBase());
     std::optional<TParsedQuery> parsed;
     TOperatorPtr plan;
     // Parsing, binding and optimization are the planning stage: its error is the
@@ -1375,7 +1376,7 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize, const TRegTestOptio
     const auto planError = CaptureError([&] {
         parsed.emplace(ParseQuery(types, test.Sql));
         parseMs = mark();
-        auto built = BuildPlan(*types, parsed->Query, [&](TTypeFactory& queryTypes, std::string_view table)
+        auto built = BuildPlan(*types, parsed->Annotation, parsed->Query, [&](TTypeFactory& queryTypes, std::string_view table)
             -> std::expected<TOperatorPtr, NQumir::TError>
         {
             const auto binding = test.Tables.find(std::string(table));
@@ -1386,7 +1387,7 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize, const TRegTestOptio
             if (!fixture.Error.empty()) throw THarnessError(fixture.Error);
             if (!fixture.File) throw THarnessError("fixture was not prepared");
             return NQumir::MakeIntrusive<TSourceOperator>(queryTypes, fixture.File, std::string(table));
-        }, parsed->Annotation);
+        });
         buildMs = mark();
         if (!built) throw built.error();
         plan = std::move(*built);

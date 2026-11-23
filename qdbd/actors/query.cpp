@@ -167,7 +167,7 @@ struct TBaseBehavior {
     // The rows leave the graph through a remote sink to this actor.
     void Lower(const NCompiler::TPreparedQuery& query) {
         auto& lowered = State->Lowered.emplace(NScheduler::LowerPlanToGraph(
-            query.Plan, query.Types, State->Settings, nullptr, &query.Annotation));
+            query.Plan, query.Types, State->Settings, nullptr, query.Annotation));
         lowered.Graph->MarkExternal(NScheduler::AttachRemoteSink(lowered), ResultSinkId);
         std::string error;
         State->Sealed = lowered.Graph->Seal(&error);

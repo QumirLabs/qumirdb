@@ -40,7 +40,7 @@ void Execute(const NCompiler::TPreparedQuery& prepared, bool explain, size_t sca
     settings.ScanSplit.MaxScanTasks = 1;
     settings.Kernel.Backend = EKernelBackend::Vm;
     auto lowered = NScheduler::LowerPlanToGraph(
-        prepared.Plan, prepared.Types, settings, nullptr, &prepared.Annotation);
+        prepared.Plan, prepared.Types, settings, nullptr, prepared.Annotation);
     FinalizeKernels(lowered.Kernels, lowered.Types, lowered.Annotation, settings.Kernel.Backend);
     const auto outputType = lowered.OutputType;
     auto output = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(outputType);

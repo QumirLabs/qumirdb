@@ -43,7 +43,7 @@ namespace {
 
 std::shared_ptr<TKernelSlot> MeasurementKernel() {
     // Prepared code may be shared; every test owns its mutable counters.
-    return TKernelCompiler({.Types = SharedTestTypes()}).CompileInstrumentation();
+    return TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileInstrumentation();
 }
 
 TOperatorPtr SqlPlan(const std::string& sql, ITable& source) {
@@ -54,7 +54,7 @@ TOperatorPtr SqlPlan(const std::string& sql, ITable& source) {
     if (!parsed) {
         throw parsed.error();
     }
-    auto plan = BuildPlan(TestTypes(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
+    auto plan = BuildPlan(TestTypes(), TestAnnotation(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(table));
@@ -62,7 +62,7 @@ TOperatorPtr SqlPlan(const std::string& sql, ITable& source) {
     if (!plan) {
         throw plan.error();
     }
-    AnnotateTypes(TestTypes(), *plan);
+    AnnotateTypes(TestTypes(), *plan, TestAnnotation());
     ApplyColumnPruning(TestTypes(), *plan);
     return *plan;
 }
@@ -191,8 +191,8 @@ TEST(OperatorInstrumentation, BackpressureRetriesDoNotCountFailedPushOrEmptyFetc
 TEST(OperatorInstrumentation, ObservesEveryGeometricGrowthInsideABatch) {
     auto i64 = TestTypes().MakeInteger();
     const auto& inputType = *TestTypes().MakeStruct({{"k", i64}});
-    auto spec = NKernel::BuildAggregateKernelSpec(TestTypes(), inputType, {"k"}, {{.Name = "n", .Func = "count"}});
-    auto kernels = TKernelCompiler({.Types = SharedTestTypes()}).CompileAggregate(spec);
+    auto spec = NKernel::BuildAggregateKernelSpec(TestTypes(), TestAnnotation(), inputType, {"k"}, {{.Name = "n", .Func = "count"}});
+    auto kernels = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileAggregate(spec);
     TOperatorInstrumentation counters;
     counters.Kernel = MeasurementKernel();
     TAggregateProcessor processor(kernels, {.InitialCapacity = 8});
@@ -236,9 +236,9 @@ TEST(OperatorInstrumentation, StringStateMemoryCountsOnlyTheGroupsAfterRehash) {
     auto measure = [](int64_t length) {
         const auto& inputType = *TestTypes().MakeStruct({{"k", TestTypes().Make<TStringType>()},
             {"s", TestTypes().Make<TStringType>()}});
-        auto spec = NKernel::BuildAggregateKernelSpec(TestTypes(), inputType, {"k"}, {{.Name = "m",
+        auto spec = NKernel::BuildAggregateKernelSpec(TestTypes(), TestAnnotation(), inputType, {"k"}, {{.Name = "m",
             .Func = "min", .Arg = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "s")}});
-        auto kernels = TKernelCompiler({.Types = SharedTestTypes()}).CompileAggregate(spec);
+        auto kernels = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileAggregate(spec);
         TOperatorInstrumentation counters;
         counters.Kernel = MeasurementKernel();
         TAggregateProcessor processor(kernels, {.InitialCapacity = 8});
@@ -279,7 +279,7 @@ TEST(OperatorInstrumentation, MeasuresResidualSemiJoinMatchSetWithoutRowBuckets)
     const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}});
     auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}},
         EJoinType::LeftSemi, NKernel::NOz::Bool(TestTypes(), true));
-    auto kernels = TKernelCompiler({.Types = SharedTestTypes()}).CompileJoin(spec);
+    auto kernels = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileJoin(spec);
     alignas(8) std::array<uint8_t, TKernelCompiler::HashTableSize> left{};
     alignas(8) std::array<uint8_t, TKernelCompiler::HashTableSize> right{};
     alignas(8) std::array<uint8_t, TKernelCompiler::PairBufferSize> pairs{};
@@ -297,7 +297,7 @@ TEST(OperatorInstrumentation, MeasuresResidualSemiJoinMatchSetWithoutRowBuckets)
 TEST(OperatorInstrumentation, DisabledPlanHasNoMeasurementProgramOrCounters) {
     TMockSource source({"k"});
     auto plan = SqlPlan("SELECT k FROM t", source);
-    auto lowered = LowerPlanToGraph(plan, SharedTestTypes(), {}, nullptr);
+    auto lowered = LowerPlanToGraph(plan, SharedTestTypes(), {}, nullptr, TestAnnotation());
     for (const auto& kernel : lowered.Kernels) {
         EXPECT_NE(kernel.Name, "instrumentation");
     }
@@ -368,7 +368,7 @@ TEST(OperatorInstrumentation, StreamingOuterResidualsKeepCountersAcrossFinalizat
                 NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(left), "l"),
                 NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(right), "r"),
                 std::vector<TJoinKey>{{"lk", "rk"}}, joinType, std::move(residual));
-            AnnotateTypes(TestTypes(), plan);
+            AnnotateTypes(TestTypes(), plan, TestAnnotation());
             ApplyColumnPruning(TestTypes(), plan);
             TSettings settings;
             settings.Scheduler.Mode = mode;
@@ -430,7 +430,7 @@ TEST(OperatorInstrumentation, UnionShufflesKeepTheirOwnInputSchemas) {
         };
         auto plan = NQumir::MakeIntrusive<TUnionAllOperator>(TestTypes(), std::vector<TOperatorPtr>{
             branch(first, second), branch(third, fourth)});
-        AnnotateTypes(TestTypes(), plan);
+        AnnotateTypes(TestTypes(), plan, TestAnnotation());
         ApplyColumnPruning(TestTypes(), plan);
         TSettings settings;
         settings.Scheduler.Mode = mode;
@@ -479,7 +479,7 @@ TEST(OperatorInstrumentation, ShuffleAccountsSparseRetainedOwnersOnceAcrossParti
         auto i64 = TestTypes().MakeInteger();
         auto schema = TestTypes().MakeStruct(std::vector<std::pair<std::string, TTypePtr>>{
             {"k", i64}, {"v", i64}});
-        auto hash = TKernelCompiler({.Types = SharedTestTypes()}).CompileAggregateHash(*schema, {"k"});
+        auto hash = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileAggregateHash(*schema, {"k"});
         std::vector<uint64_t> hashes(10000);
         ASSERT_TRUE(hash(&batch, hashes.data()));
         ASSERT_NE(hashes[9998] % 4, hashes[9999] % 4);

@@ -5,6 +5,7 @@
 #include <qdb/io/parquet/source.h>
 #include <qdb/io/text/sink.h>
 #include <qdb/kernel/finalize.h>
+#include <qdb/kernel/query_modules.h>
 #include <qdb/scheduler/lowering/plan_lowerer.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/scheduler/settings/engine_settings.h>
@@ -212,7 +213,7 @@ int ExecutePlan(
 
     auto buildStart = std::chrono::steady_clock::now();
     auto lowered = NQdb::NScheduler::LowerPlanToGraph(
-        plan, prepared.Types, config.Engine.Scheduler, diagnostics, &annotation);
+        plan, prepared.Types, config.Engine.Scheduler, diagnostics, annotation);
     auto buildElapsed = std::chrono::steady_clock::now() - buildStart;
     const auto backend = config.Engine.Scheduler.Kernel.Backend;
     auto llvmStart = std::chrono::steady_clock::now();
@@ -264,6 +265,7 @@ int RunQuery(
     ESyntax syntax,
     std::istream& in,
     const TCliOptions& config,
+    const std::shared_ptr<const NQdb::NKernel::TModuleBase>& base,
     NQdb::TExternalModuleCatalog& catalog)
 {
     auto factory = [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
@@ -280,7 +282,7 @@ int RunQuery(
                 "cannot open table '" + std::string(table) + "': " + e.what()));
         }
     };
-    NQdb::NCompiler::TQueryCompiler compiler(catalog, factory, config.Engine.Optimizer);
+    NQdb::NCompiler::TQueryCompiler compiler(base, catalog, factory, config.Engine.Optimizer);
     const auto parseStart = std::chrono::steady_clock::now();
     auto query = compiler.Parse(in, syntax);
     if (!query) {
@@ -420,6 +422,7 @@ bool HasCompleteSqlStatement(const std::string& text) {
 // Reads SQL statements from readline and runs complete batches terminated by ';'.
 int RunInteractive(
     TCliOptions config,
+    const std::shared_ptr<const NQdb::NKernel::TModuleBase>& base,
     NQdb::TExternalModuleCatalog& catalog)
 {
     const std::string historyPath = HistoryPath();
@@ -482,7 +485,7 @@ int RunInteractive(
         }
         try {
             std::istringstream in(buffer);
-            RunQuery(ESyntax::Sql, in, config, catalog);
+            RunQuery(ESyntax::Sql, in, config, base, catalog);
         } catch (const std::exception& e) {
             std::cerr << e.what() << "\n";
         }
@@ -621,8 +624,9 @@ int main(int argc, char** argv) {
     }
 
     try {
+        const auto base = std::make_shared<const NQdb::NKernel::TModuleBase>();
         if (queryFile.empty()) {
-            return RunInteractive(config, catalog);
+            return RunInteractive(config, base, catalog);
         }
 
         std::ifstream ifs(queryFile);
@@ -630,7 +634,7 @@ int main(int argc, char** argv) {
             std::cerr << "Cannot open query file: " << queryFile << "\n";
             return 1;
         }
-        return RunQuery(config.Syntax, ifs, config, catalog);
+        return RunQuery(config.Syntax, ifs, config, base, catalog);
     } catch (const std::exception& e) {
         std::cerr << e.what() << "\n";
         return 1;

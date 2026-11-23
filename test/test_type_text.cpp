@@ -1,3 +1,5 @@
+#include "test_types.h"
+
 #include <gtest/gtest.h>
 
 #include <qdb/kernel/query_modules.h>
@@ -163,7 +165,8 @@ TEST(TypeText, RejectsBadInput) {
 // MakeNamed makes a second object when the module is composed and the type splits in two.
 // DECIMAL and DATE[i32] are plan types: kernels see them erased to BinInt and i32.
 TEST(TypeText, QumirDbTypesAreTheOnesQumirdbOzDeclares) {
-    TTypeFactory types;
+    const auto queryTypes = NKernel::MakeQueryTypes(*TestModuleBase());
+    auto& types = *queryTypes;
     auto build = [&] {
         std::vector<TTypePtr> built;
         for (const auto& type : NQumir::NRegistry::QumirDbExternalTypes(types)) {
@@ -178,7 +181,7 @@ TEST(TypeText, QumirDbTypesAreTheOnesQumirdbOzDeclares) {
     };
     const auto before = build();
 
-    NKernel::TQueryModules modules(types);
+    NKernel::TQueryModules modules(types, TestModuleBase());
     TVmFrontendContext frontend(modules, {NUtils::ModuleFile("qumirdb.oz")});
     std::vector<TParam> params;
     for (const auto& type : before) {

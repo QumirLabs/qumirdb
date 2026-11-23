@@ -54,7 +54,7 @@ TOperatorPtr ParsePlan(const std::string& sexp, ITable& source) {
     }
 
     auto root = NQumir::StaticPointerCast<IOperator>(result.value());
-    AnnotateTypes(TestTypes(), root);
+    AnnotateTypes(TestTypes(), root, TestAnnotation());
     ApplyColumnPruning(TestTypes(), root);
     return root;
 }
@@ -688,7 +688,7 @@ TEST(WindowExec, Q47LikeCteSelfJoinUsesWindowRankNeighbors) {
       (psum |lag.sum_sales|)
       (nsum |lead.sum_sales|))))
 )qdb", source);
-    ApplyPlanPasses(TestTypes(), root);
+    ApplyPlanPasses(TestTypes(), root, {.Annotation = TestAnnotation()});
 
     auto runtime = RunPlan(root);
 
@@ -816,7 +816,7 @@ TEST(WindowExec, Q47LikeCteSelfJoinKeepsDecimalWindowAvg) {
       (psum |lag.sum_sales|)
       (nsum |lead.sum_sales|))))
 )qdb", source);
-    ApplyPlanPasses(TestTypes(), root);
+    ApplyPlanPasses(TestTypes(), root, {.Annotation = TestAnnotation()});
 
     auto runtime = RunPlan(root);
 
@@ -914,7 +914,7 @@ TEST(WindowExec, Q47LikeCteConsumerAppliesDecimalOutlierFilter) {
       (sum_sales sum_sales)
       (avg_monthly_sales avg_monthly_sales))))
 )qdb", source);
-    ApplyPlanPasses(TestTypes(), root);
+    ApplyPlanPasses(TestTypes(), root, {.Annotation = TestAnnotation()});
 
     auto runtime = RunPlan(root);
 
@@ -1037,7 +1037,7 @@ TEST(WindowExec, Q47LikeCteSelfJoinAppliesDecimalOutlierFilter) {
       (sum_sales |v1.sum_sales|)
       (avg_monthly_sales |v1.avg_monthly_sales|))))
 )qdb", source);
-    ApplyPlanPasses(TestTypes(), root);
+    ApplyPlanPasses(TestTypes(), root, {.Annotation = TestAnnotation()});
 
     auto runtime = RunPlan(root);
 

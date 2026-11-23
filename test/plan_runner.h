@@ -79,7 +79,8 @@ struct TPlanRunTimings {
     double ExecuteMs = 0;
 };
 
-// `types` is the factory the plan is built in, `annotation` the context it was planned with.
+// `types` is the factory the plan is built in, `annotation` the context it was planned with
+// (a new TestAnnotation() when null).
 inline std::unique_ptr<TTestRuntime> RunPlan(
     const TOperatorPtr& root,
     NScheduler::TSettings settings = {},
@@ -91,7 +92,7 @@ inline std::unique_ptr<TTestRuntime> RunPlan(
     using TClock = std::chrono::steady_clock;
     auto started = timings ? TClock::now() : TClock::time_point{};
     auto lowered = NScheduler::LowerPlanToGraph(
-        root, types, settings, nullptr, annotation, std::move(filterBindings));
+        root, types, settings, nullptr, annotation ? *annotation : TestAnnotation(), std::move(filterBindings));
     auto outputType = lowered.OutputType;
 
     if (timings) {

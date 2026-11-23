@@ -178,7 +178,7 @@ TOperatorPtr BuildSqlPlan(
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
     }
-    auto plan = BuildPlan(TestTypes(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
+    auto plan = BuildPlan(TestTypes(), TestAnnotation(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         return NQumir::MakeIntrusive<TSourceOperator>(types,
@@ -187,7 +187,7 @@ TOperatorPtr BuildSqlPlan(
     if (!plan) {
         throw std::runtime_error(plan.error().ToString());
     }
-    ApplyPlanPasses(TestTypes(), *plan, {.EnableCbo = false});
+    ApplyPlanPasses(TestTypes(), *plan, {.EnableCbo = false, .Annotation = TestAnnotation()});
     return *plan;
 }
 
@@ -258,7 +258,7 @@ TRunResult RunQuery(
                 projectedBytes += projectedGroups[rg].ByteSize;
             }
         }
-        auto lowered = NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), settings, &diagnostics);
+        auto lowered = NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), settings, &diagnostics, TestAnnotation());
         const auto lanes = std::ranges::count_if(
             lowered.Graph->Nodes(), [](const auto& node) {
                 return node->DebugKind == "source";
@@ -424,7 +424,7 @@ TEST(RowGroupPushdownE2E, AutoJoinRunsWithUnequalSourceWidths) {
     settings.ScanSplit.TargetRowsPerTask = 1;
     settings.ScanSplit.TargetBytesPerTask = 0;
     settings.HashShuffle.PartitionCount = 2;
-    auto lowered = NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), settings, nullptr);
+    auto lowered = NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), settings, nullptr, TestAnnotation());
     std::unordered_map<std::string, size_t> lanes;
     for (const auto& node : lowered.Graph->Nodes()) {
         if (node->DebugKind == "source") {

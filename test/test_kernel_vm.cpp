@@ -69,8 +69,8 @@ struct TKeyValueBatch {
 };
 
 std::vector<uint8_t> RunFilter(EKernelBackend backend) {
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Backend = backend});
-    auto dispatch = compiler.CompileFilter(NKernel::BuildFilterKernelSpec(TestTypes(),
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Backend = backend});
+    auto dispatch = compiler.CompileFilter(NKernel::BuildFilterKernelSpec(TestTypes(), TestAnnotation(),
         KeyValueType(), Parse("(&& (> v 2) (!= k 4))")));
     TKeyValueBatch batch{.Keys = {1, 2, 3, 4, 5}, .Values = {5, 1, 3, 9, 2}};
     std::vector<uint8_t> selection(batch.Keys.size());
@@ -82,10 +82,10 @@ std::vector<uint8_t> RunFilter(EKernelBackend backend) {
 std::vector<int64_t> RunProject(EKernelBackend backend) {
     const auto& inputType = KeyValueType();
     std::vector<TExprPtr> exprs = {Parse("(+ (* k 10) v)")};
-    std::vector<TTypePtr> types = {NKernel::AnnotateExprType(TestTypes(), exprs[0], inputType)};
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Backend = backend});
+    std::vector<TTypePtr> types = {NKernel::AnnotateExprType(TestTypes(), exprs[0], inputType, TestAnnotation())};
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Backend = backend});
     auto dispatch = compiler.CompileProject(
-        NKernel::BuildProjectKernelSpec(TestTypes(), inputType, exprs, types));
+        NKernel::BuildProjectKernelSpec(TestTypes(), TestAnnotation(), inputType, exprs, types));
     TKeyValueBatch batch{.Keys = {1, 2, 3}, .Values = {7, 8, 9}};
     auto rowSet = batch.RowSet();
     std::vector<int64_t> output(batch.Keys.size());
@@ -100,8 +100,8 @@ TAggregateKernels CompileSumByKey(EKernelBackend backend) {
         .Func = "sum",
         .Arg = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "v"),
     }};
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Backend = backend});
-    return compiler.CompileAggregate(NKernel::BuildAggregateKernelSpec(TestTypes(), KeyValueType(), {"k"}, aggs));
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Backend = backend});
+    return compiler.CompileAggregate(NKernel::BuildAggregateKernelSpec(TestTypes(), TestAnnotation(), KeyValueType(), {"k"}, aggs));
 }
 
 // Update over two batches, then finish; the result keyed by group.
@@ -200,8 +200,8 @@ TEST(KernelVm, AggregateMigratesAndOutputOutlivesExecutionState) {
 
 // Workers may each run the same program; their instances are independent.
 TEST(KernelVm, ContextsShareOneProgram) {
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Backend = EKernelBackend::Vm});
-    auto dispatch = compiler.CompileFilter(NKernel::BuildFilterKernelSpec(TestTypes(),
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Backend = EKernelBackend::Vm});
+    auto dispatch = compiler.CompileFilter(NKernel::BuildFilterKernelSpec(TestTypes(), TestAnnotation(),
         KeyValueType(), Parse("(> v 2)")));
     TKeyValueBatch batch{.Keys = {1, 2}, .Values = {3, 1}};
     TExecutionState state(1);
@@ -223,11 +223,11 @@ TEST(KernelVm, ContextsShareOneProgram) {
 
 TEST(KernelVm, KernelProgramHasNoModuleConstructor) {
     std::vector<TGeneratedKernel> kernels;
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
-    compiler.CompileAggregate(NKernel::BuildAggregateKernelSpec(TestTypes(), KeyValueType(), {"k"}, {}));
-    compiler.CompileFilter(NKernel::BuildFilterKernelSpec(TestTypes(), KeyValueType(), Parse("(> v 2)")));
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Sink = &kernels, .BindNow = false});
+    compiler.CompileAggregate(NKernel::BuildAggregateKernelSpec(TestTypes(), TestAnnotation(), KeyValueType(), {"k"}, {}));
+    compiler.CompileFilter(NKernel::BuildFilterKernelSpec(TestTypes(), TestAnnotation(), KeyValueType(), Parse("(> v 2)")));
     FinalizeKernels(
-        kernels, SharedTestTypes(), NKernel::MakeAnnotationContext(TestTypes(), nullptr), EKernelBackend::Vm);
+        kernels, SharedTestTypes(), TestAnnotation(), EKernelBackend::Vm);
     ASSERT_TRUE(kernels.front().Slot->Vm);
     // Kernels hold no module state, so an instance needs no constructor run.
     EXPECT_EQ(kernels.front().Slot->Vm->Module.ModuleConstructorFunctionId, -1);
@@ -237,9 +237,9 @@ TEST(KernelVm, KernelProgramHasNoModuleConstructor) {
 
 TEST(KernelVm, RefinalizingForAnotherBackendThrows) {
     std::vector<TGeneratedKernel> kernels;
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Sink = &kernels, .BindNow = false});
-    compiler.CompileFilter(NKernel::BuildFilterKernelSpec(TestTypes(), KeyValueType(), Parse("(> v 2)")));
-    const auto annotation = NKernel::MakeAnnotationContext(TestTypes(), nullptr);
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Sink = &kernels, .BindNow = false});
+    compiler.CompileFilter(NKernel::BuildFilterKernelSpec(TestTypes(), TestAnnotation(), KeyValueType(), Parse("(> v 2)")));
+    const auto annotation = TestAnnotation();
     FinalizeKernels(kernels, SharedTestTypes(), annotation, EKernelBackend::Vm);
     EXPECT_NO_THROW(FinalizeKernels(kernels, SharedTestTypes(), annotation, EKernelBackend::Vm));
     EXPECT_THROW(FinalizeKernels(kernels, SharedTestTypes(), annotation, EKernelBackend::Llvm), std::logic_error);

@@ -60,7 +60,7 @@ std::expected<TOperatorPtr, NQumir::TError> BuildSqlPlan(std::string_view sql, I
         return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(table));
     };
 
-    return BuildPlan(TestTypes(), parsed.value(), factory);
+    return BuildPlan(TestTypes(), TestAnnotation(), parsed.value(), factory);
 }
 
 TRowSet MakeStringI64Batch(const std::string& names, int64_t* offsets, int64_t* values,
@@ -370,7 +370,7 @@ TEST(SortPlan, GroupByExpressionMaterializesKeyAndSubstitutesRefs) {
     // full name/type resolution succeeds: no dangling base columns above the aggregate
     AssignSourceAliases(TestTypes(), *plan);
     QualifyColumns(TestTypes(), *plan);
-    EXPECT_NO_THROW(AnnotateTypes(TestTypes(), *plan));
+    EXPECT_NO_THROW(AnnotateTypes(TestTypes(), *plan, TestAnnotation()));
 }
 
 TEST(SortPlan, GroupBySelectAliasMaterializesAliasedExpression) {
@@ -402,7 +402,7 @@ TEST(SortPlan, GroupBySelectAliasMaterializesAliasedExpression) {
 
     AssignSourceAliases(TestTypes(), *plan);
     QualifyColumns(TestTypes(), *plan);
-    EXPECT_NO_THROW(AnnotateTypes(TestTypes(), *plan));
+    EXPECT_NO_THROW(AnnotateTypes(TestTypes(), *plan, TestAnnotation()));
 }
 
 TEST(SortPlan, GroupByColumnAliasUsesInputColumnDirectly) {
@@ -421,7 +421,7 @@ TEST(SortPlan, GroupByColumnAliasUsesInputColumnDirectly) {
 
     AssignSourceAliases(TestTypes(), *plan);
     QualifyColumns(TestTypes(), *plan);
-    EXPECT_NO_THROW(AnnotateTypes(TestTypes(), *plan));
+    EXPECT_NO_THROW(AnnotateTypes(TestTypes(), *plan, TestAnnotation()));
 }
 
 TEST(SortPlan, GroupByDropsConstantFromCompositeKey) {
@@ -445,7 +445,7 @@ TEST(SortPlan, GroupByDropsConstantFromCompositeKey) {
 
     AssignSourceAliases(TestTypes(), *plan);
     QualifyColumns(TestTypes(), *plan);
-    EXPECT_NO_THROW(AnnotateTypes(TestTypes(), *plan));
+    EXPECT_NO_THROW(AnnotateTypes(TestTypes(), *plan, TestAnnotation()));
 }
 
 TEST(SortPlan, GroupByDropsAffineKeysDeterminedByRetainedColumn) {
@@ -474,7 +474,7 @@ TEST(SortPlan, GroupByDropsAffineKeysDeterminedByRetainedColumn) {
 
     AssignSourceAliases(TestTypes(), *plan);
     QualifyColumns(TestTypes(), *plan);
-    EXPECT_NO_THROW(AnnotateTypes(TestTypes(), *plan));
+    EXPECT_NO_THROW(AnnotateTypes(TestTypes(), *plan, TestAnnotation()));
 }
 
 TEST(SortPlan, GroupByKeepsAffineKeyWithoutItsBaseKey) {

@@ -17,6 +17,7 @@
 #include <qdb/utils/config.h>
 #include <qdb/compiler/query.h>
 #include <qdb/io/parquet/table_cache.h>
+#include <qdb/kernel/query_modules.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/catalog/external_module.h>
 #include <qdb/scheduler/settings/engine_settings.h>
@@ -103,6 +104,7 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
     const auto& allHosts = options.AllHosts;
 
     TExternalModuleCatalog catalog;
+    const auto base = std::make_shared<const NKernel::TModuleBase>();
     const auto& EngineSettings = options.Engine;
     const auto& dataDir = options.DataDir;
     // Shared by planning and the compute actors' graphs.
@@ -119,7 +121,7 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
                     "cannot open table '" + std::string(table) + "': " + e.what()));
             }
         };
-        return std::make_unique<NCompiler::TQueryCompiler>(catalog, tableFactory, EngineSettings.Optimizer);
+        return std::make_unique<NCompiler::TQueryCompiler>(base, catalog, tableFactory, EngineSettings.Optimizer);
     };
 
     TAddress httpAddress{"::", httpPort};

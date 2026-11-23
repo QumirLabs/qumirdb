@@ -95,9 +95,9 @@ TExprPtr EvalClosed(
 
 TConstFolder::TConstFolder(
     NQumir::NAst::TTypeFactory& types,
-    const NKernel::TAnnotationContext* annotation)
+    const NKernel::TAnnotationContext& annotation)
     : Types_(types)
-    , Annotation_(NKernel::CompleteAnnotationContext(types, annotation))
+    , Annotation_(annotation)
 {}
 
 TConstFolder::~TConstFolder() = default;
@@ -136,7 +136,7 @@ TExprPtr TConstFolder::Fold(TExprPtr expr) {
     TTypePtr rewrittenType = nullptr;
     try {
         std::tie(rewritten, rewrittenType) =
-            NKernel::ExpandKernelExpr(types, CloneExpr(expr), *types.MakeStruct({}), &Annotation_);
+            NKernel::ExpandKernelExpr(types, CloneExpr(expr), *types.MakeStruct({}), Annotation_);
     } catch (const NQumir::TError&) {
         return expr;
     }

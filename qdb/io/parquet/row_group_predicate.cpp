@@ -721,7 +721,7 @@ std::unique_ptr<TRowGroupPredicateEvaluator> TRowGroupPredicateEvaluator::Compil
             }
         }
         NKernel::AnnotateExprTreeTypes(
-            types, typedPredicate, *types.MakeStruct(std::move(fields)), &annotation);
+            types, typedPredicate, *types.MakeStruct(std::move(fields)), annotation);
         auto truth = lowerer.LowerTruth(typedPredicate);
         auto params = lowerer.Params();
 

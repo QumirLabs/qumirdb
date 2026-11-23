@@ -61,7 +61,7 @@ TOperatorPtr ParseRel(const std::string& sexp, ITable& src)
     auto parsed = parser.Parse(ts);
     if (!parsed) throw std::runtime_error(parsed.error().ToString());
     auto root = NQumir::StaticPointerCast<IOperator>(*parsed);
-    AnnotateTypes(TestTypes(), root);
+    AnnotateTypes(TestTypes(), root, TestAnnotation());
     ApplyColumnPruning(TestTypes(), root);
     return root;
 }
@@ -87,7 +87,7 @@ std::unique_ptr<TTestRuntime> SqlPlan(
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
     }
-    auto root = BuildPlan(TestTypes(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
+    auto root = BuildPlan(TestTypes(), TestAnnotation(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         auto it = sources.find(std::string(table));
@@ -101,9 +101,9 @@ std::unique_ptr<TTestRuntime> SqlPlan(
         throw std::runtime_error(root.error().ToString());
     }
     if (optimize) {
-        ApplyPlanPasses(TestTypes(), *root);
+        ApplyPlanPasses(TestTypes(), *root, {.Annotation = TestAnnotation()});
     } else {
-        AnnotateTypes(TestTypes(), *root);
+        AnnotateTypes(TestTypes(), *root, TestAnnotation());
         ApplyColumnPruning(TestTypes(), *root);
     }
     return RunPlan(*root, settings);
@@ -131,7 +131,7 @@ TEST(ProjectE2E, NamedStructProjectionFreezesItsFlattenedLayout) {
         {.Expression = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "pair"),
             .ImplicitName = true},
     });
-    AnnotateTypes(TestTypes(), plan);
+    AnnotateTypes(TestTypes(), plan, TestAnnotation());
     ASSERT_EQ(plan->OutputColumns()->Fields.size(), 3);
 
     // Pruning the leading column must not renumber the struct's colN outputs
@@ -142,7 +142,7 @@ TEST(ProjectE2E, NamedStructProjectionFreezesItsFlattenedLayout) {
         (std::vector<std::string>{"col1", "col2"}));
     TColumnSet demand{"col2"};
     ApplyColumnPruning(TestTypes(), plan, &demand, nullptr);
-    AnnotateTypes(TestTypes(), plan);
+    AnnotateTypes(TestTypes(), plan, TestAnnotation());
     ASSERT_EQ(project.Cast()->Projections().size(), 1);
     EXPECT_FALSE(project.Cast()->Projections()[0].ImplicitName);
     ASSERT_EQ(plan->OutputColumns()->Fields.size(), 2);
@@ -199,7 +199,7 @@ TEST(ProjectE2E, FilterRebuildsFromPlanDataAndSlot) {
 
     std::vector<TGeneratedKernel> kernels;
     auto built = BuildFilterPlan(TestTypes(), *filter.Cast(),
-        filter.Cast()->Input()->OutputColumns(), {.Types = SharedTestTypes(), .Sink = &kernels});
+        filter.Cast()->Input()->OutputColumns(), {.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Sink = &kernels});
     ASSERT_EQ(kernels.size(), 1u);
     EXPECT_EQ(built.Plan.Kernel, 0u);
     EXPECT_TRUE(built.Plan.KeptInputColumns);
@@ -220,7 +220,7 @@ TEST(ProjectE2E, ProjectRebuildsFromPlanDataAndSlot) {
 
     std::vector<TGeneratedKernel> kernels;
     auto built = BuildProjectPlan(TestTypes(), *project.Cast(),
-        project.Cast()->Input()->OutputColumns(), {.Types = SharedTestTypes(), .Sink = &kernels});
+        project.Cast()->Input()->OutputColumns(), {.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Sink = &kernels});
     ASSERT_EQ(kernels.size(), 1u);
     ASSERT_TRUE(built.Plan.Kernel);
     EXPECT_EQ(built.Plan.Columns.size(), 2u);
@@ -241,7 +241,7 @@ TEST(ProjectE2E, FilterKeepAllRebuildsFromPlanDataAndSlot) {
 
     std::vector<TGeneratedKernel> kernels;
     auto built = BuildFilterPlan(TestTypes(), *filter.Cast(),
-        filter.Cast()->Input()->OutputColumns(), {.Types = SharedTestTypes(), .Sink = &kernels});
+        filter.Cast()->Input()->OutputColumns(), {.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Sink = &kernels});
     ASSERT_EQ(kernels.size(), 1u);
     EXPECT_FALSE(built.Plan.KeptInputColumns);
 

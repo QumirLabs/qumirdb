@@ -1505,15 +1505,16 @@ NQdb::NScheduler::TLoweredPlan LowerSql(
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
     }
-    auto plan = BuildPlan(TestTypes(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view) -> std::expected<TOperatorPtr, NQumir::TError> {
+    auto plan = BuildPlan(TestTypes(), TestAnnotation(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view) -> std::expected<TOperatorPtr, NQumir::TError> {
         return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), "t");
     });
     if (!plan) {
         throw std::runtime_error(plan.error().ToString());
     }
     auto root = *plan;
+    options.Annotation = TestAnnotation();
     ApplyPlanPasses(TestTypes(), root, options);
-    return LowerPlanToGraph(root, SharedTestTypes(), settings, nullptr);
+    return LowerPlanToGraph(root, SharedTestTypes(), settings, nullptr, options.Annotation);
 }
 
 struct TNoSink : ISink {
@@ -3353,7 +3354,7 @@ struct TDecimalsCompiler {
     TPlanPassOptions Options;
     TExternalModuleCatalog Catalog;
     std::vector<std::unique_ptr<TParquetFile>> Sources;
-    NCompiler::TQueryCompiler Compiler{Catalog, [this](NQumir::NAst::TTypeFactory& types, std::string_view) -> std::expected<TOperatorPtr, NQumir::TError> {
+    NCompiler::TQueryCompiler Compiler{TestModuleBase(), Catalog, [this](NQumir::NAst::TTypeFactory& types, std::string_view) -> std::expected<TOperatorPtr, NQumir::TError> {
         auto& source = Sources.emplace_back(std::make_unique<TParquetFile>(DecimalsPath));
         return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(*source), "t");
     }, Options};
@@ -3362,7 +3363,7 @@ struct TDecimalsCompiler {
     std::unique_ptr<NCompiler::TQueryCompiler> MakeQueryCompiler()
     {
         auto sources = std::make_shared<std::vector<std::unique_ptr<TParquetFile>>>();
-        return std::make_unique<NCompiler::TQueryCompiler>(Catalog, [sources](NQumir::NAst::TTypeFactory& types, std::string_view) -> std::expected<TOperatorPtr, NQumir::TError> {
+        return std::make_unique<NCompiler::TQueryCompiler>(TestModuleBase(), Catalog, [sources](NQumir::NAst::TTypeFactory& types, std::string_view) -> std::expected<TOperatorPtr, NQumir::TError> {
             auto& source = sources->emplace_back(std::make_unique<TParquetFile>(DecimalsPath));
             return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(*source), "t");
         }, Options);
@@ -3391,7 +3392,7 @@ std::string RunLocally(const std::string& sql, const NQdb::NScheduler::TSettings
     using namespace NQdb::NScheduler;
     TDecimalsCompiler compiler;
     const auto prepared = PlanQuery(compiler, sql);
-    auto lowered = LowerPlanToGraph(prepared.Plan, prepared.Types, settings, nullptr);
+    auto lowered = LowerPlanToGraph(prepared.Plan, prepared.Types, settings, nullptr, prepared.Annotation);
     FinalizeKernels(lowered.Kernels, prepared.Types, lowered.Annotation, settings.Kernel.Backend);
     std::vector<TColumnSchema> columns;
     for (const auto& [name, type] : static_cast<const NQumir::NAst::TStructType&>(*lowered.OutputType).Fields) {
@@ -3415,7 +3416,7 @@ size_t RelayCuts(TDecimalsCompiler& compiler, const std::string& sql,
     using namespace NQdb::NScheduler;
     settings.Scheduler.WorkerCount = width;
     const auto prepared = PlanQuery(compiler, sql);
-    auto lowered = LowerPlanToGraph(prepared.Plan, prepared.Types, settings, nullptr);
+    auto lowered = LowerPlanToGraph(prepared.Plan, prepared.Types, settings, nullptr, prepared.Annotation);
     AttachRemoteSink(lowered);
     TPartitioner partitioner(lowered.Graph->Seal(), 2);
     partitioner.Do();

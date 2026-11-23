@@ -40,14 +40,13 @@ struct TKernelCompilerOptions {
     // The query's type factory: kernels are built in it, and BindNow binds their
     // slots to it.
     std::shared_ptr<NQumir::NAst::TTypeFactory> Types;
+    // The query's typing context, with its external catalog and modules; required.
+    NKernel::TAnnotationContext Annotation;
     std::ostream* Diagnostics = nullptr;
     std::string Stage;
     TExecStageId ExecStageId = InvalidExecStageId;
     std::vector<TGeneratedKernel>* Sink = nullptr;
     bool BindNow = true;
-    // The query's typing context, with its external catalog and modules; without one
-    // the compiler makes its own.
-    const NKernel::TAnnotationContext* Annotation = nullptr;
     std::shared_ptr<TRuntimeContext> RuntimeContext;
     // Persistent JIT cache used when BindNow finalizes; empty disables it.
     std::string JitCacheDir;
@@ -440,7 +439,8 @@ public:
         , BindNow_(options.BindNow)
         , JitCacheDir_(std::move(options.JitCacheDir))
         , Backend_(options.Backend)
-        , Annotation_(NKernel::CompleteAnnotationContext(*Types_, options.Annotation))
+        , Annotation_(options.Annotation.Modules ? std::move(options.Annotation)
+            : throw std::logic_error("kernel compiler options have no annotation context"))
         , RuntimeContext_(std::move(options.RuntimeContext))
     {
         Opts_ = KernelRunnerOptions();

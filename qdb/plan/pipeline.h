@@ -24,11 +24,12 @@ struct TPlanPassOptions {
     bool ForceRuntimeFilters = false;
     TLateMaterializationSettings LateMaterialization;
     TPlanPassDiagnostics* Diagnostics = nullptr;
+    // The query's context (MakeAnnotationContext); required.
     NKernel::TAnnotationContext Annotation;
     // When set, the plan is dumped here after each pass (debugging).
     std::ostream* DumpPasses = nullptr;
 };
 
-void ApplyPlanPasses(NQumir::NAst::TTypeFactory& types, TOperatorPtr& plan, TPlanPassOptions options = {});
+void ApplyPlanPasses(NQumir::NAst::TTypeFactory& types, TOperatorPtr& plan, TPlanPassOptions options);
 
 } // namespace NQdb

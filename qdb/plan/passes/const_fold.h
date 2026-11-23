@@ -20,10 +20,10 @@ class TVmFrontendContext;
 class TConstFolder {
 public:
     // Folds in the query's `types` with the query's `annotation`, which types the
-    // folded expressions and holds the modules; without one the folder makes its own.
-    explicit TConstFolder(
+    // folded expressions and holds the modules.
+    TConstFolder(
         NQumir::NAst::TTypeFactory& types,
-        const NKernel::TAnnotationContext* annotation = nullptr);
+        const NKernel::TAnnotationContext& annotation);
     ~TConstFolder();
 
     TConstFolder(const TConstFolder&) = delete;

@@ -18,7 +18,6 @@ class TConstFolder;
 
 // `folder` folds the constants of the estimated predicates; the estimates of
 // one query share it.
-TStatsPtr EstimateStats(NQumir::NAst::TTypeFactory& types, TOperatorPtr op);
 TStatsPtr EstimateStats(TOperatorPtr op, TConstFolder& folder);
 
 class TJoinOperator;

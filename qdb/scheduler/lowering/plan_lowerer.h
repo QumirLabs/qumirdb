@@ -91,14 +91,14 @@ bool ShouldCascadeGlobalAggregate(
 
 // Lower a logical plan, whose types are of `types`, into a scheduler graph (no
 // terminal sink yet). Kernels are generated in `types` and typed with the query's
-// `annotation` (without one the lowering makes its own), but not compiled. A custom
-// filter factory replaces the local runtime filters.
+// `annotation`, but not compiled. A custom filter factory replaces the local runtime
+// filters.
 TLoweredPlan LowerPlanToGraph(
     const TOperatorPtr& root,
     std::shared_ptr<NQumir::NAst::TTypeFactory> types,
     TSettings settings,
     std::ostream* diagnostics,
-    const NKernel::TAnnotationContext* annotation = nullptr,
+    const NKernel::TAnnotationContext& annotation,
     std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings = nullptr);
 
 // Attach the terminal sink task that writes every output rowset to `sink`; the

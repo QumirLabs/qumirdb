@@ -98,7 +98,7 @@ std::unique_ptr<TTestRuntime> PlanJoinWithSources(
         throw std::runtime_error(parsed.error().ToString());
     }
     auto root = NQumir::StaticPointerCast<IOperator>(*parsed);
-    AnnotateTypes(TestTypes(), root);
+    AnnotateTypes(TestTypes(), root, TestAnnotation());
     ApplyColumnPruning(TestTypes(), root);
     if (configure) {
         configure(root);
@@ -709,7 +709,7 @@ TEST(JoinPlanner, RuntimeFilterCrossesOnlyDirectProjectKeyLineage) {
         join->MutableRuntimeFilter() = TRuntimeFilterSpec{
             .Id = 7, .BuildSide = EJoinFilterSide::Right};
         TOperatorPtr root = join;
-        AnnotateTypes(TestTypes(), root);
+        AnnotateTypes(TestTypes(), root, TestAnnotation());
         PlaceRuntimeFilterConsumers(root);
 
         ASSERT_EQ(source->RuntimeFilterUses.size(), reachesSource ? 1u : 0u);
@@ -842,7 +842,7 @@ TEST(JoinPlanner, RuntimeFilterUsesEachUnionBranchKeyName) {
     join->MutableRuntimeFilter() = TRuntimeFilterSpec{
         .Id = 7, .BuildSide = EJoinFilterSide::Right};
     TOperatorPtr root = join;
-    AnnotateTypes(TestTypes(), root);
+    AnnotateTypes(TestTypes(), root, TestAnnotation());
     PlaceRuntimeFilterConsumers(root);
 
     ASSERT_TRUE(unionAll->RuntimeFilterUses.empty());
@@ -917,7 +917,7 @@ TEST(JoinPlanner, RuntimeFilterCrossesOnlySameSideInnerJoinKeys) {
         parent->MutableRuntimeFilter() = TRuntimeFilterSpec{
             .Id = 7, .BuildSide = EJoinFilterSide::Right};
         TOperatorPtr root = parent;
-        AnnotateTypes(TestTypes(), root);
+        AnnotateTypes(TestTypes(), root, TestAnnotation());
         PlaceRuntimeFilterConsumers(root);
 
         auto hasUse = [](const TOperatorPtr& op, uint32_t id) {
@@ -972,7 +972,7 @@ TEST(JoinPlanner, RuntimeFilterStaysAboveInnerJoinForSplitKeys) {
     parent->MutableRuntimeFilter() = TRuntimeFilterSpec{
         .Id = 7, .BuildSide = EJoinFilterSide::Right};
     TOperatorPtr root = parent;
-    AnnotateTypes(TestTypes(), root);
+    AnnotateTypes(TestTypes(), root, TestAnnotation());
     PlaceRuntimeFilterConsumers(root);
 
     ASSERT_EQ(nested->RuntimeFilterUses.size(), 1u);

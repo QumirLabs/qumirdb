@@ -30,7 +30,7 @@ TEST(KernelSpec, LikeConstantPatternPicksFastPath) {
                 NQumir::MakeIntrusive<TStringLiteralExpr>(NQumir::TLocation{}, pattern, TestTypes()),
             });
         return NCore::PrintAst(
-            NKernel::ExpandKernelExpr(TestTypes(), call, input, nullptr).first);
+            NKernel::ExpandKernelExpr(TestTypes(), call, input, TestAnnotation()).first);
     };
     EXPECT_NE(lowered("%google%").find("qdb_like_contains"), std::string::npos);
     EXPECT_NE(lowered("google%").find("qdb_like_prefix"), std::string::npos);
@@ -114,7 +114,7 @@ TEST(KernelSpec, BuildsFilterSpecFromPredicate) {
         NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "c"),
         NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "a"));
 
-    auto spec = NKernel::BuildFilterKernelSpec(TestTypes(), input, predicate, "qdb_filter_test");
+    auto spec = NKernel::BuildFilterKernelSpec(TestTypes(), TestAnnotation(), input, predicate, "qdb_filter_test");
 
     EXPECT_EQ(spec.Kind, NKernel::EOperatorKernelKind::UnaryStreaming);
     EXPECT_EQ(spec.OperatorName, "filter");
@@ -151,7 +151,7 @@ TEST(KernelSpec, BuildsProjectSpecFromComputedExpressions) {
     };
     std::vector<TTypePtr> types = {f64};
 
-    auto spec = NKernel::BuildProjectKernelSpec(TestTypes(),
+    auto spec = NKernel::BuildProjectKernelSpec(TestTypes(), TestAnnotation(),
         input, exprs, types, "qdb_project_test");
 
     EXPECT_EQ(spec.Kind, NKernel::EOperatorKernelKind::UnaryStreaming);
@@ -190,7 +190,7 @@ TEST(KernelSpec, BuildsAggregateSpecFromGroupKeysAndAggregates) {
         .Arg = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "v"),
     }};
 
-    auto spec = NKernel::BuildAggregateKernelSpec(TestTypes(), input, {"k"}, aggs);
+    auto spec = NKernel::BuildAggregateKernelSpec(TestTypes(), TestAnnotation(), input, {"k"}, aggs);
 
     EXPECT_EQ(spec.Kind, NKernel::EOperatorKernelKind::UnaryBlocking);
     EXPECT_EQ(spec.OperatorName, "aggregate");
@@ -373,7 +373,7 @@ TEST(KernelSpec, RejectsRegexpReplaceInDirectAggregateAndJoinKernels) {
         }
     };
     expectClearError([&] {
-        NKernel::BuildAggregateKernelSpec(TestTypes(), input, {}, {{
+        NKernel::BuildAggregateKernelSpec(TestTypes(), TestAnnotation(), input, {}, {{
             .Name = "bad",
             .Func = "count",
             .Arg = regex,

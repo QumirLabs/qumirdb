@@ -302,12 +302,12 @@ public:
     {
         return TKernelCompilerOptions{
             .Types = Types_,
+            .Annotation = *Annotation_,
             .Diagnostics = Diagnostics_,
             .Stage = std::move(stage),
             .ExecStageId = execStageId,
             .Sink = KernelSink_,
             .BindNow = false,
-            .Annotation = Annotation_,
             .RuntimeContext = RuntimeContext_,
         };
     }
@@ -1299,7 +1299,7 @@ private:
         }
 
         auto spec = NKernel::BuildAggregateKernelSpec(
-            *Types_, *extInput, extKeys, aggregate.Aggs(), Annotation_,
+            *Types_, *Annotation_, *extInput, extKeys, aggregate.Aggs(),
             aggregate.EmptyInputGroups());
         spec.AggregateRowLayout = AggregateMayUseRowLayout(Settings_.Aggregate.Table, aggregate);
         TKernelCompiler compiler(
@@ -1346,7 +1346,7 @@ private:
         bool hasPrecomputedHash)
     {
         auto spec = NKernel::BuildAggregateKernelSpec(
-            *Types_, inputType, aggregate.GroupKeys(), aggregate.Aggs(), Annotation_,
+            *Types_, *Annotation_, inputType, aggregate.GroupKeys(), aggregate.Aggs(),
             aggregate.EmptyInputGroups());
         spec.HasPrecomputedHash = hasPrecomputedHash;
         // Only a table that may take the row layout needs its kernels.
@@ -3034,15 +3034,14 @@ TLoweredPlan LowerPlanToGraph(
     std::shared_ptr<NQumir::NAst::TTypeFactory> types,
     TSettings settings,
     std::ostream* diagnostics,
-    const NKernel::TAnnotationContext* annotation,
+    const NKernel::TAnnotationContext& annotation,
     std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings)
 {
     PlaceRuntimeFilterConsumers(root);
-    const auto context = NKernel::CompleteAnnotationContext(*types, annotation);
     auto graph = std::make_unique<TTaskGraph>();
     std::vector<TGeneratedKernel> kernels;
     TSchedulerGraphLowerer lowerer(
-        types, *graph, root, settings, diagnostics, &kernels, &context,
+        types, *graph, root, settings, diagnostics, &kernels, &annotation,
         std::move(filterBindings));
     const size_t lanes = lowerer.OutputLanes(root);
     if (lanes == 0) {
@@ -3077,7 +3076,7 @@ TLoweredPlan LowerPlanToGraph(
         .Producers = std::move(out.Producers),
         .Lanes = lanes,
         .Kernels = std::move(kernels),
-        .Annotation = context,
+        .Annotation = annotation,
         .ExecStages = std::move(lowerer.ExecStages()),
         .RuntimeFilters = std::move(lowerer.RuntimeFilters()),
         .NodeSpecs = std::move(nodeSpecs),

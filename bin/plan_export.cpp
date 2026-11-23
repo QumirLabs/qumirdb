@@ -35,6 +35,7 @@
 #include <qdb/kernel/finalize_fused.h>
 #include <qdb/kernel/join_key.h>
 #include <qdb/kernel/annotate_type.h>
+#include <qdb/kernel/query_modules.h>
 #include <qdb/scheduler/lowering/plan_lowerer.h>
 #include <qdb/scheduler/lowering/scan_split.h>
 #include <qdb/sexp/printer.h>
@@ -314,7 +315,8 @@ struct TCatalog {
 };
 
 struct TExportRequest {
-    // The request's type factory: its dataset schema and its query are its types.
+    std::shared_ptr<const NQdb::NKernel::TModuleBase> Base;
+    // The request's type factory, a child of Base: its dataset schema and its query are its types.
     std::shared_ptr<NQumir::NAst::TTypeFactory> Types;
     std::string Sql;
     TCatalog Catalog;
@@ -992,7 +994,10 @@ int ParseWasmBits(const llvm::json::Object& root) {
     return bits == 32 ? 32 : 64;
 }
 
-std::expected<TExportRequest, std::string> ParseRequest(std::string_view text) {
+std::expected<TExportRequest, std::string> ParseRequest(
+    std::string_view text,
+    std::shared_ptr<const NQdb::NKernel::TModuleBase> base)
+{
     auto parsed = llvm::json::parse(text);
     if (!parsed) {
         return std::unexpected(llvm::toString(parsed.takeError()));
@@ -1009,9 +1014,10 @@ std::expected<TExportRequest, std::string> ParseRequest(std::string_view text) {
     }
 
     try {
-        auto types = std::make_shared<NQumir::NAst::TTypeFactory>();
+        auto types = NQdb::NKernel::MakeQueryTypes(*base);
         auto catalog = ParseCatalog(*types, *root);
         return TExportRequest{
+            .Base = std::move(base),
             .Types = std::move(types),
             .Sql = std::string(*sql),
             .Catalog = std::move(catalog),
@@ -1025,6 +1031,7 @@ std::expected<TExportRequest, std::string> ParseRequest(std::string_view text) {
 }
 
 std::expected<TParsedSql, NQumir::TError> ParseSql(
+    const std::shared_ptr<const NQdb::NKernel::TModuleBase>& base,
     const std::shared_ptr<NQumir::NAst::TTypeFactory>& types,
     std::string_view sql,
     TCatalog& catalog)
@@ -1085,8 +1092,8 @@ std::expected<TParsedSql, NQumir::TError> ParseSql(
     };
 
     auto annotation = NQdb::NKernel::MakeAnnotationContext(
-        *types, hasExternalDefinitions ? externalCatalog.Snapshot(types) : nullptr);
-    auto plan = NQdb::BuildPlan(*types, query, sources, annotation);
+        *types, base, hasExternalDefinitions ? externalCatalog.Snapshot(types) : nullptr);
+    auto plan = NQdb::BuildPlan(*types, annotation, query, sources);
     if (!plan) {
         return std::unexpected(plan.error());
     }
@@ -2401,7 +2408,7 @@ struct TExecPlanCodec {
                     static_cast<const NQdb::TProjectOperator*>(node.Operator));
                 auto* input = static_cast<const TStructType*>(
                     Input(node, 0).OutputType);
-                auto columnPlan = BuildProjectColumnPlan(Types, *project, *input, &Annotation);
+                auto columnPlan = BuildProjectColumnPlan(Types, *project, *input, Annotation);
                 llvm::json::Object entrypoints;
                 if (!columnPlan.ComputedExprs.empty()) {
                     const auto* ref = FindKernel(
@@ -2819,7 +2826,7 @@ llvm::json::Object BuildBundle(
     TExportRequest& request,
     const std::string& cacheDir)
 {
-    auto plan = ParseSql(request.Types, request.Sql, request.Catalog);
+    auto plan = ParseSql(request.Base, request.Types, request.Sql, request.Catalog);
     if (!plan) {
         return ErrorObject("parse", plan.error().ToString());
     }
@@ -2879,7 +2886,7 @@ llvm::json::Object BuildBundle(
             request.Types,
             request.Scheduler,
             &lowerDiagnostics,
-            &annotation);
+            annotation);
 
         // Core owns graph contraction, ordered inputs, output propagation, and
         // stage/kernel binding. The exporter only encodes the returned plan.
@@ -2896,6 +2903,7 @@ llvm::json::Object BuildBundle(
         if (request.Scheduler.Instrumentation.Operators && typedExecPlan) {
             NQdb::TKernelCompiler compiler({
                 .Types = request.Types,
+                .Annotation = lowered.Annotation,
                 .Sink = &lowered.Kernels,
                 .BindNow = false,
             });
@@ -3041,7 +3049,7 @@ int RunPlanExport(int argc, char** argv) {
         return 2;
     }
 
-    auto request = ParseRequest(ReadAllStdin());
+    auto request = ParseRequest(ReadAllStdin(), std::make_shared<const NKernel::TModuleBase>());
     if (!request) {
         return PrintError("request", request.error());
     }

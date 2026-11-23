@@ -98,27 +98,27 @@ std::string_view KernelKindName(EOperatorKernelKind kind);
 
 TOperatorKernelSpec BuildFilterKernelSpec(
     NQumir::NAst::TTypeFactory& types,
+    const NKernel::TAnnotationContext& annotation,
     const NQumir::NAst::TStructType& inputType,
     const NQumir::NAst::TExprPtr& predicate,
     std::string entrypointName = "<kernel>",
-    const NKernel::TAnnotationContext* annotation = nullptr,
     TRuntimeContext* runtimeContext = nullptr);
 
 TOperatorKernelSpec BuildProjectKernelSpec(
     NQumir::NAst::TTypeFactory& types,
+    const NKernel::TAnnotationContext& annotation,
     const NQumir::NAst::TStructType& inputType,
     const std::vector<NQumir::NAst::TExprPtr>& computedExprs,
     const std::vector<NQumir::NAst::TTypePtr>& computedTypes,
     std::string entrypointName = "<project>",
-    const NKernel::TAnnotationContext* annotation = nullptr,
     TRuntimeContext* runtimeContext = nullptr);
 
 TOperatorKernelSpec BuildAggregateKernelSpec(
     NQumir::NAst::TTypeFactory& types,
+    const NKernel::TAnnotationContext& annotation,
     const NQumir::NAst::TStructType& inputType,
     const std::vector<std::string>& groupKeys,
     const std::vector<TAggregateSpec>& aggs,
-    const NKernel::TAnnotationContext* annotation = nullptr,
     std::vector<int64_t> emptyInputGroups = {});
 
 TOperatorKernelSpec BuildSortKernelSpec(

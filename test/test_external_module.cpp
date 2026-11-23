@@ -188,15 +188,15 @@ TEST(ExternalModuleCatalog, RustFunctionRunsThroughSqlPlan) {
     TMockSource source(
         {"x"}, {TestTypes().MakeFloat()}, {batch});
     auto snapshot = catalog.Snapshot(SharedTestTypes());
-    auto annotation = NKernel::MakeAnnotationContext(TestTypes(), snapshot);
-    auto plan = BuildPlan(TestTypes(), statements[3], [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
+    auto annotation = NKernel::MakeAnnotationContext(TestTypes(), TestModuleBase(), snapshot);
+    auto plan = BuildPlan(TestTypes(), annotation, statements[3], [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         if (table != "points") {
             return std::unexpected(NQumir::TError("unknown test table"));
         }
         return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(table));
-    }, annotation);
+    });
     ASSERT_TRUE(plan) << plan.error().ToString();
 
     auto sort = TMaybeOp<TSortOperator>(*plan);
@@ -274,7 +274,7 @@ TEST(ExternalModuleCatalog, DerivedTableQualifiesStructAliasGroup) {
         "AS (vector_x, vector_y, vector_z) FROM points) d;");
     ApplyDefinitions(catalog, {statements[0], statements[1]});
     auto snapshot = catalog.Snapshot(SharedTestTypes());
-    auto annotation = NKernel::MakeAnnotationContext(TestTypes(), snapshot);
+    auto annotation = NKernel::MakeAnnotationContext(TestTypes(), TestModuleBase(), snapshot);
 
     // Runs a query over points(x) = {1, 2, 1} and returns its rows sorted.
     auto run = [&](const TSqlNodePtr& statement) {
@@ -291,11 +291,11 @@ TEST(ExternalModuleCatalog, DerivedTableQualifiesStructAliasGroup) {
         };
         TMockSource source(
             {"x"}, {TestTypes().MakeFloat()}, {batch});
-        auto plan = BuildPlan(TestTypes(), statement, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
+        auto plan = BuildPlan(TestTypes(), annotation, statement, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
             -> std::expected<TOperatorPtr, NQumir::TError>
         {
             return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(table));
-        }, annotation);
+        });
         if (!plan) {
             ADD_FAILURE() << plan.error().ToString();
             return rows;
@@ -360,15 +360,15 @@ TEST(ExternalModuleCatalog, KumirFunctionsAreExportedAndRunWithoutCreateFunction
     };
     TMockSource source(
         {"x"}, {TestTypes().MakeFloat()}, {batch});
-    auto annotation = NKernel::MakeAnnotationContext(TestTypes(), snapshot);
-    auto plan = BuildPlan(TestTypes(), statements[1], [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
+    auto annotation = NKernel::MakeAnnotationContext(TestTypes(), TestModuleBase(), snapshot);
+    auto plan = BuildPlan(TestTypes(), annotation, statements[1], [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         if (table != "points") {
             return std::unexpected(NQumir::TError("unknown test table"));
         }
         return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(table));
-    }, annotation);
+    });
     ASSERT_TRUE(plan) << plan.error().ToString();
 
     AnnotateTypes(TestTypes(), *plan, annotation);
@@ -413,12 +413,12 @@ TEST(ExternalModuleCatalog, OzlangFunctionsAreExportedAndRunWithoutCreateFunctio
     TMockSource source(
         {"x"}, {TestTypes().MakeFloat()}, {batch});
     auto snapshot = catalog.Snapshot(SharedTestTypes());
-    auto annotation = NKernel::MakeAnnotationContext(TestTypes(), snapshot);
-    auto plan = BuildPlan(TestTypes(), statements[1], [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
+    auto annotation = NKernel::MakeAnnotationContext(TestTypes(), TestModuleBase(), snapshot);
+    auto plan = BuildPlan(TestTypes(), annotation, statements[1], [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(table));
-    }, annotation);
+    });
     ASSERT_TRUE(plan) << plan.error().ToString();
 
     AnnotateTypes(TestTypes(), *plan, annotation);
@@ -462,12 +462,12 @@ TEST(ExternalModuleCatalog, VmBackendRejectsExternalModules) {
     TMockSource source(
         {"x"}, {TestTypes().MakeFloat()}, {batch});
     auto snapshot = catalog.Snapshot(SharedTestTypes());
-    auto annotation = NKernel::MakeAnnotationContext(TestTypes(), snapshot);
-    auto plan = BuildPlan(TestTypes(), statements[2], [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
+    auto annotation = NKernel::MakeAnnotationContext(TestTypes(), TestModuleBase(), snapshot);
+    auto plan = BuildPlan(TestTypes(), annotation, statements[2], [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(table));
-    }, annotation);
+    });
     ASSERT_TRUE(plan) << plan.error().ToString();
     AnnotateTypes(TestTypes(), *plan, annotation);
     ApplyPlanPasses(TestTypes(), *plan, {
@@ -511,21 +511,21 @@ TEST(ExternalModuleCatalog, StddevArgumentTypesExternalFunctions) {
     TMockSource source(
         {"x"}, {TestTypes().MakeFloat()}, {batch});
     auto build = [&](const NKernel::TAnnotationContext& annotation) {
-        return BuildPlan(TestTypes(), statements[1], [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
+        return BuildPlan(TestTypes(), annotation, statements[1], [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
             -> std::expected<TOperatorPtr, NQumir::TError>
         {
             return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(table));
-        }, annotation);
+        });
     };
     // The aggregate argument is typed while the plan is built, so the builder
     // needs the catalog that declares the function.
-    auto untyped = build({});
+    auto untyped = build(TestAnnotation());
     ASSERT_FALSE(untyped);
     EXPECT_NE(untyped.error().ToString().find("oz_square"), std::string::npos)
         << untyped.error().ToString();
 
     auto snapshot = catalog.Snapshot(SharedTestTypes());
-    auto annotation = NKernel::MakeAnnotationContext(TestTypes(), snapshot);
+    auto annotation = NKernel::MakeAnnotationContext(TestTypes(), TestModuleBase(), snapshot);
     auto plan = build(annotation);
     ASSERT_TRUE(plan) << plan.error().ToString();
     ApplyPlanPasses(TestTypes(), *plan, {
@@ -559,20 +559,22 @@ TEST(ExternalModuleCatalog, DistinctStructProjectionNamesFieldsByColumnAliases) 
         TMockColumns{},
         {{"x", TestTypes().MakeFloat()}});
     auto build = [&](const TSqlNodePtr& statement) {
-        return BuildPlan(TestTypes(), statement, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
+        const auto annotation = NKernel::MakeAnnotationContext(
+            TestTypes(), TestModuleBase(), catalog.Snapshot(SharedTestTypes()));
+        return BuildPlan(TestTypes(), annotation, statement, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
             -> std::expected<TOperatorPtr, NQumir::TError>
         {
             if (table != "points") {
                 return std::unexpected(NQumir::TError("unknown test table"));
             }
             return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(table));
-        }, NKernel::MakeAnnotationContext(TestTypes(), catalog.Snapshot(SharedTestTypes())));
+        });
     };
 
     auto aliased = build(statements[2]);
     ASSERT_TRUE(aliased) << aliased.error().ToString();
     AnnotateTypes(TestTypes(), *aliased,
-        NKernel::MakeAnnotationContext(TestTypes(), catalog.Snapshot(SharedTestTypes())));
+        NKernel::MakeAnnotationContext(TestTypes(), TestModuleBase(), catalog.Snapshot(SharedTestTypes())));
     auto* output = static_cast<const TStructType*>((*aliased)->OutputColumns());
     ASSERT_TRUE(output);
     ASSERT_EQ(output->Fields.size(), 3u);
@@ -612,7 +614,8 @@ TEST(ExternalModuleCatalog, RustFunctionRunsInFilter) {
         {"x"},
         {MakeNullableType(TestTypes(), TestTypes().MakeFloat())},
         {batch});
-    auto plan = BuildPlan(TestTypes(), statements[2], [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
+    const auto annotation = NKernel::MakeAnnotationContext(TestTypes(), TestModuleBase(), catalog.Snapshot(SharedTestTypes()));
+    auto plan = BuildPlan(TestTypes(), annotation, statements[2], [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         if (table != "points") {
@@ -622,7 +625,6 @@ TEST(ExternalModuleCatalog, RustFunctionRunsInFilter) {
     });
     ASSERT_TRUE(plan) << plan.error().ToString();
 
-    const auto annotation = NKernel::MakeAnnotationContext(TestTypes(), catalog.Snapshot(SharedTestTypes()));
     ApplyPlanPasses(TestTypes(), *plan, {
         .EnableCbo = false,
         .Annotation = annotation,
