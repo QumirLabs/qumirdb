@@ -109,11 +109,9 @@ NQumir::TIntrusivePtr<TFilterOperator> FindFilter(const TOperatorPtr& op) {
     if (auto filter = TMaybeOp<TFilterOperator>(op)) {
         return filter.Cast();
     }
-    for (const auto& child : op->Children()) {
-        if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            if (auto found = FindFilter(TOperatorPtr(childOp.Cast()))) {
-                return found;
-            }
+    for (const auto& child : op->Inputs()) {
+        if (auto found = FindFilter(child)) {
+            return found;
         }
     }
     return nullptr;

@@ -53,8 +53,8 @@ void CollectJoinPredicates(const TExprPtr& predicate, TJoinPredicates& out) {
         auto maybeBinary = TMaybeNode<TBinaryExpr>(conj);
         if (maybeBinary) {
             auto binary = maybeBinary.Cast();
-            auto maybeLeft = TMaybeNode<TIdentExpr>(binary->Left);
-            auto maybeRight = TMaybeNode<TIdentExpr>(binary->Right);
+            auto maybeLeft = TMaybeNode<TIdentExpr>(binary->Left());
+            auto maybeRight = TMaybeNode<TIdentExpr>(binary->Right());
             if (binary->Operator == "=="_op && maybeLeft && maybeRight) {
                 auto left = maybeLeft.Cast();
                 auto right = maybeRight.Cast();

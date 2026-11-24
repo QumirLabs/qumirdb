@@ -87,7 +87,8 @@ struct IOperator : NQumir::NAst::TExpr {
     }
 
     // Relational inputs in RequiredColumnsForChild order. The mutable view can
-    // replace inputs but cannot change their count.
+    // replace inputs but cannot change their count. Inputs are not Children():
+    // plans are walked through Inputs() only.
     virtual std::span<const TOperatorPtr> Inputs() const {
         return {};
     }

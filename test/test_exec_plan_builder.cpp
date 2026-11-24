@@ -118,11 +118,9 @@ TJoinOperator* FindJoin(const TOperatorPtr& node) {
     if (auto join = TMaybeOp<TJoinOperator>(node)) {
         return join.Cast().Get();
     }
-    for (const auto& child : node->Children()) {
-        if (auto op = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            if (auto* join = FindJoin(TOperatorPtr(op.Cast()))) {
-                return join;
-            }
+    for (const auto& child : node->Inputs()) {
+        if (auto* join = FindJoin(child)) {
+            return join;
         }
     }
     return nullptr;

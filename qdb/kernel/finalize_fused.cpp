@@ -41,15 +41,15 @@ void RewriteCalls(const TExprPtr &expr,
   }
 
   if (auto call = TMaybeNode<TCallExpr>(expr)) {
-    if (auto callee = TMaybeNode<TIdentExpr>(call.Cast()->Callee)) {
+    if (auto callee = TMaybeNode<TIdentExpr>(call.Cast()->Callee())) {
       if (auto it = renames.find(callee.Cast()->Name); it != renames.end()) {
         callee.Cast()->Name = it->second;
       }
     }
   }
 
-  for (auto *child : expr->MutableChildren()) {
-    RewriteCalls(*child, renames);
+  for (auto &child : expr->MutableChildren()) {
+    RewriteCalls(child, renames);
   }
 }
 
@@ -61,7 +61,7 @@ void CollectLocalCalls(const TExprPtr &expr,
   }
 
   if (auto call = TMaybeNode<TCallExpr>(expr)) {
-    if (auto callee = TMaybeNode<TIdentExpr>(call.Cast()->Callee)) {
+    if (auto callee = TMaybeNode<TIdentExpr>(call.Cast()->Callee())) {
       const auto &name = callee.Cast()->Name;
       if (localNames.contains(name)) {
         calls.insert(name);

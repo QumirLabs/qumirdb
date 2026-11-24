@@ -57,12 +57,12 @@ std::array<uint8_t, 4> RunStringLiteralFilter(
         : "(" + op + " value \"placeholder\")");
     auto binary = TMaybeNode<TBinaryExpr>(predicate).Cast();
     auto literalExpr = TMaybeNode<TStringLiteralExpr>(
-        literalFirst ? binary->Left : binary->Right).Cast();
+        literalFirst ? binary->Left() : binary->Right()).Cast();
     literalExpr->Value = literal;
     if (castLiteral) {
         auto cast = NQumir::MakeIntrusive<TCastExpr>(literalExpr->Location,
             NQumir::TIntrusivePtr<TStringLiteralExpr>(literalExpr), TestTypes().Make<TStringType>());
-        (literalFirst ? binary->Left : binary->Right) = std::move(cast);
+        (literalFirst ? binary->Left() : binary->Right()) = std::move(cast);
     }
 
     auto dispatch = TKernelCompiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()}).CompileFilter(
@@ -300,7 +300,7 @@ TEST(FilterKernel, StringViewLiteralKeepsItsLength) {
     auto predicate = ParsePredicate(
         "(== value (cast \"placeholder\" <named StringView>))");
     auto cast = TMaybeNode<TCastExpr>(
-        TMaybeNode<TBinaryExpr>(predicate).Cast()->Right).Cast();
+        TMaybeNode<TBinaryExpr>(predicate).Cast()->Right()).Cast();
     TMaybeNode<TStringLiteralExpr>(cast->Operand).Cast()->Value = literal;
 
     std::ostringstream diagnostics;

@@ -50,7 +50,7 @@ std::optional<TAggCall> AsAggCall(const NAst::TExprPtr& expr) {
     if (!call) {
         return std::nullopt;
     }
-    auto callee = NAst::TMaybeNode<NAst::TIdentExpr>(call.Cast()->Callee);
+    auto callee = NAst::TMaybeNode<NAst::TIdentExpr>(call.Cast()->Callee());
     if (!callee) {
         return std::nullopt;
     }
@@ -61,7 +61,7 @@ std::optional<TAggCall> AsAggCall(const NAst::TExprPtr& expr) {
 
     TAggCall agg;
     agg.Func = func;
-    const auto& args = call.Cast()->Args;
+    const auto& args = call.Cast()->Args();
     agg.ArgCount = args.size();
     if (!args.empty()) {
         const auto& arg = args[0];
@@ -70,10 +70,10 @@ std::optional<TAggCall> AsAggCall(const NAst::TExprPtr& expr) {
         if (star && star.Cast()->Name == "*") {
             agg.Star = true;
         } else if (distinct) {
-            auto distinctCallee = NAst::TMaybeNode<NAst::TIdentExpr>(distinct.Cast()->Callee);
+            auto distinctCallee = NAst::TMaybeNode<NAst::TIdentExpr>(distinct.Cast()->Callee());
             if (distinctCallee && ToLower(distinctCallee.Cast()->Name) == "distinct") {
                 agg.Distinct = true;
-                const auto& distinctArgs = distinct.Cast()->Args;
+                const auto& distinctArgs = distinct.Cast()->Args();
                 agg.ArgCount = distinctArgs.size();
                 agg.Arg = distinctArgs.empty() ? nullptr : distinctArgs[0];
             } else {
@@ -150,78 +150,11 @@ bool IsRealArgument(NQumir::NAst::TTypeFactory& types, const NAst::TExprPtr& arg
     return IsFloatWidth(type, NAst::TFloatType::F32);
 }
 
-NSql::TSqlPtr<NSql::TSqlOrderItem> CloneSqlOrderItem(
-    const NSql::TSqlPtr<NSql::TSqlOrderItem>& item)
-{
-    if (!item) {
-        return nullptr;
+NQumir::TIntrusivePtr<NSql::TWindowExpr> CloneSqlWindowExpr(const NSql::TWindowExpr& window) {
+    auto copy = NQumir::MakeIntrusive<NSql::TWindowExpr>(window);
+    for (auto& operand : copy->Operands) {
+        operand = CloneExpr(operand);
     }
-    auto copy = std::make_shared<NSql::TSqlOrderItem>();
-    copy->Expr = item->Expr ? CloneExpr(item->Expr) : nullptr;
-    copy->Desc = item->Desc;
-    copy->NullOrder = item->NullOrder;
-    return copy;
-}
-
-NSql::TSqlPtr<NSql::TSqlOrder> CloneSqlOrder(
-    const NSql::TSqlPtr<NSql::TSqlOrder>& order)
-{
-    if (!order) {
-        return nullptr;
-    }
-    auto copy = std::make_shared<NSql::TSqlOrder>();
-    copy->Items.reserve(order->Items.size());
-    for (const auto& item : order->Items) {
-        copy->Items.push_back(CloneSqlOrderItem(item));
-    }
-    return copy;
-}
-
-NSql::TSqlPtr<NSql::TSqlFrameBound> CloneSqlFrameBound(
-    const NSql::TSqlPtr<NSql::TSqlFrameBound>& bound)
-{
-    if (!bound) {
-        return nullptr;
-    }
-    return std::make_shared<NSql::TSqlFrameBound>(
-        bound->Type,
-        bound->Expr ? CloneExpr(bound->Expr) : nullptr);
-}
-
-NSql::TSqlPtr<NSql::TSqlWindowFrame> CloneSqlWindowFrame(
-    const NSql::TSqlPtr<NSql::TSqlWindowFrame>& frame)
-{
-    if (!frame) {
-        return nullptr;
-    }
-    return std::make_shared<NSql::TSqlWindowFrame>(
-        frame->Type,
-        CloneSqlFrameBound(frame->Start),
-        CloneSqlFrameBound(frame->End));
-}
-
-NSql::TSqlPtr<NSql::TSqlWindowSpec> CloneSqlWindowSpec(
-    const NSql::TSqlPtr<NSql::TSqlWindowSpec>& spec)
-{
-    if (!spec) {
-        return nullptr;
-    }
-    return std::make_shared<NSql::TSqlWindowSpec>(
-        spec->PartitionBy ? CloneExpr(spec->PartitionBy) : nullptr,
-        CloneSqlOrder(spec->OrderBy),
-        CloneSqlWindowFrame(spec->Frame));
-}
-
-NQumir::TIntrusivePtr<NSql::TWindowExpr> CloneSqlWindowExpr(
-    const NQumir::TIntrusivePtr<NSql::TWindowExpr>& window)
-{
-    if (!window) {
-        return nullptr;
-    }
-    auto copy = NQumir::MakeIntrusive<NSql::TWindowExpr>(
-        window->Expr ? CloneExpr(window->Expr) : nullptr,
-        CloneSqlWindowSpec(window->WindowSpec));
-    copy->Type = window->Type;
     return copy;
 }
 
@@ -282,14 +215,14 @@ std::optional<TAffineForm> ExtractAffine(const NAst::TExprPtr& expr) {
     }
     const auto binary = maybeBinary.Cast();
 
-    const auto leftConstant = IntegerLiteral(binary->Left);
-    const auto rightConstant = IntegerLiteral(binary->Right);
+    const auto leftConstant = IntegerLiteral(binary->Left());
+    const auto rightConstant = IntegerLiteral(binary->Right());
     if (leftConstant.has_value() == rightConstant.has_value()) {
         return std::nullopt;
     }
     const bool constantOnLeft = leftConstant.has_value();
     const int64_t constant = constantOnLeft ? *leftConstant : *rightConstant;
-    auto affine = ExtractAffine(constantOnLeft ? binary->Right : binary->Left);
+    auto affine = ExtractAffine(constantOnLeft ? binary->Right() : binary->Left());
     if (!affine) {
         return std::nullopt;
     }
@@ -329,36 +262,28 @@ std::optional<TAffineForm> ExtractAffine(const NAst::TExprPtr& expr) {
     return std::nullopt;
 }
 
-std::optional<TWindowFrame> ConvertFrame(
-    const NSql::TSqlPtr<NSql::TSqlWindowFrame>& frame)
-{
-    if (!frame) {
-        return std::nullopt;
-    }
-    auto convertBound = [](const NSql::TSqlPtr<NSql::TSqlFrameBound>& bound) -> TFrameBound {
+TWindowFrame ConvertFrame(const NSql::TWindowExpr& window) {
+    auto convertBound = [](NSql::TSqlFrameBound::EType type, const NAst::TExprPtr& offset) -> TFrameBound {
         TFrameBound out;
-        if (!bound) {
-            return out;
-        }
-        switch (bound->Type) {
+        switch (type) {
             case NSql::TSqlFrameBound::EType::UnboundedPreceding:
                 out.Kind = EFrameBoundKind::UnboundedPreceding; break;
             case NSql::TSqlFrameBound::EType::Preceding:
-                out.Kind = EFrameBoundKind::Preceding; out.Offset = bound->Expr; break;
+                out.Kind = EFrameBoundKind::Preceding; out.Offset = offset; break;
             case NSql::TSqlFrameBound::EType::CurrentRow:
                 out.Kind = EFrameBoundKind::CurrentRow; break;
             case NSql::TSqlFrameBound::EType::Following:
-                out.Kind = EFrameBoundKind::Following; out.Offset = bound->Expr; break;
+                out.Kind = EFrameBoundKind::Following; out.Offset = offset; break;
             case NSql::TSqlFrameBound::EType::UnboundedFollowing:
                 out.Kind = EFrameBoundKind::UnboundedFollowing; break;
         }
         return out;
     };
     TWindowFrame out;
-    out.Mode = frame->Type == NSql::TSqlWindowFrame::EType::Rows
+    out.Mode = window.FrameType == NSql::TSqlWindowFrame::EType::Rows
         ? EWindowFrameMode::Rows : EWindowFrameMode::Range;
-    out.Start = convertBound(frame->Start);
-    out.End = frame->End ? convertBound(frame->End) : TFrameBound{};
+    out.Start = convertBound(window.FrameStart, window.FrameStartOffset());
+    out.End = window.FrameEnd ? convertBound(*window.FrameEnd, window.FrameEndOffset()) : TFrameBound{};
     return out;
 }
 
@@ -393,12 +318,12 @@ std::optional<std::string> AffineGroupKeyBase(const NAst::TExprPtr& expr) {
     if (binary->Operator != "+"_op && binary->Operator != "-"_op && binary->Operator != "*"_op) {
         return std::nullopt;
     }
-    const bool leftConstant = IntegerLiteral(binary->Left).has_value();
-    const bool rightConstant = IntegerLiteral(binary->Right).has_value();
+    const bool leftConstant = IntegerLiteral(binary->Left()).has_value();
+    const bool rightConstant = IntegerLiteral(binary->Right()).has_value();
     if (leftConstant == rightConstant) {
         return std::nullopt;
     }
-    return AffineGroupKeyBase(leftConstant ? binary->Right : binary->Left);
+    return AffineGroupKeyBase(leftConstant ? binary->Right() : binary->Left());
 }
 
 bool IsLiteralGroupKey(const NAst::TExprPtr& expr) {
@@ -420,7 +345,7 @@ bool IsGroupingCall(const NAst::TExprPtr& expr) {
     if (!call) {
         return false;
     }
-    auto callee = NAst::TMaybeNode<NAst::TIdentExpr>(call.Cast()->Callee);
+    auto callee = NAst::TMaybeNode<NAst::TIdentExpr>(call.Cast()->Callee());
     return callee && ToLower(callee.Cast()->Name) == "grouping";
 }
 
@@ -472,10 +397,10 @@ std::expected<NAst::TExprPtr, TError> BuildGroupingValue(
     const TGroupingRewriteInfo& info)
 {
     auto call = NAst::TMaybeNode<NAst::TCallExpr>(expr);
-    if (!call || call.Cast()->Args.size() != 1) {
+    if (!call || call.Cast()->Args().size() != 1) {
         return std::unexpected(TError(expr->Location, "GROUPING() expects exactly one argument"));
     }
-    auto arg = call.Cast()->Args[0];
+    auto arg = call.Cast()->Args()[0];
     // A key holds no subquery or window, so an argument with one names no key.
     auto key = IsCoreExpr(arg)
         ? info.KeyIndex.find(NAst::NCore::PrintAst(arg))
@@ -545,22 +470,14 @@ std::string TFreshNames::Next(const std::string& prefix) {
 
 std::vector<NAst::TExprPtr*> WindowInputs(NSql::TWindowExpr& window) {
     std::vector<NAst::TExprPtr*> inputs;
-    if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(window.Expr)) {
-        for (auto& arg : call.Cast()->Args) {
+    if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(window.Expr())) {
+        for (auto& arg : call.Cast()->Args()) {
             inputs.push_back(&arg);
         }
     }
-    if (const auto& spec = window.WindowSpec) {
-        if (spec->PartitionBy) {
-            inputs.push_back(&spec->PartitionBy);
-        }
-        if (spec->OrderBy) {
-            for (const auto& item : spec->OrderBy->Items) {
-                if (item && item->Expr) {
-                    inputs.push_back(&item->Expr);
-                }
-            }
-        }
+    // PARTITION BY and the ORDER BY keys follow the function.
+    for (auto& key : std::span(window.Operands).subspan(1, window.HasPartitionBy + window.Order.size())) {
+        inputs.push_back(&key);
     }
     return inputs;
 }
@@ -579,7 +496,7 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Rewrite(NQumir::NAst::TType
                     "window function calls cannot be nested"));
             }
         }
-        auto w = CloneSqlWindowExpr(NQumir::TIntrusivePtr<NSql::TWindowExpr>(window.Cast()));
+        auto w = CloneSqlWindowExpr(*window.Cast());
         for (auto* input : WindowInputs(*w)) {
             auto rewritten = Rewrite(types, *input);
             if (!rewritten) {
@@ -597,12 +514,12 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Rewrite(NQumir::NAst::TType
         }
         return Emit(types, *agg, expr->Location);
     }
-    for (auto* child : expr->MutableChildren()) {
-        auto rewritten = Rewrite(types, *child);
+    for (auto& child : expr->MutableChildren()) {
+        auto rewritten = Rewrite(types, child);
         if (!rewritten) {
             return std::unexpected(rewritten.error());
         }
-        *child = std::move(*rewritten);
+        child = std::move(*rewritten);
     }
     return expr;
 }
@@ -930,12 +847,12 @@ std::expected<NAst::TExprPtr, TError> TWindowCollector::Rewrite(NQumir::NAst::TT
     if (auto window = NAst::TMaybeNode<NSql::TWindowExpr>(expr)) {
         return Emit(types, NQumir::TIntrusivePtr<NSql::TWindowExpr>(window.Cast()));
     }
-    for (auto* child : expr->MutableChildren()) {
-        auto rewritten = Rewrite(types, *child);
+    for (auto& child : expr->MutableChildren()) {
+        auto rewritten = Rewrite(types, child);
         if (!rewritten) {
             return std::unexpected(rewritten.error());
         }
-        *child = std::move(*rewritten);
+        child = std::move(*rewritten);
     }
     return expr;
 }
@@ -974,9 +891,9 @@ std::expected<TOperatorPtr, TError> TWindowCollector::Build(NQumir::NAst::TTypeF
         }
         for (const auto& item : raw.OrderItems) {
             r.OrderKeys.push_back(TSortKey{
-                .Column = keyName(item->Expr),
-                .Direction = item->Desc ? ESortDirection::Desc : ESortDirection::Asc,
-                .Nulls = ConvertSortNulls(item->NullOrder),
+                .Column = keyName(item.Expr),
+                .Direction = item.Order.Desc ? ESortDirection::Desc : ESortDirection::Asc,
+                .Nulls = ConvertSortNulls(item.Order.NullOrder),
             });
         }
         r.Frame = raw.Frame;
@@ -1029,11 +946,11 @@ std::expected<TOperatorPtr, TError> TWindowCollector::Build(NQumir::NAst::TTypeF
 }
 
 std::expected<NAst::TExprPtr, TError> TWindowCollector::Emit(NQumir::NAst::TTypeFactory& types, const NQumir::TIntrusivePtr<NSql::TWindowExpr>& w) {
-    auto call = NAst::TMaybeNode<NAst::TCallExpr>(w->Expr);
+    auto call = NAst::TMaybeNode<NAst::TCallExpr>(w->Expr());
     if (!call) {
         return std::unexpected(TError(w->Location, "unsupported window function expression"));
     }
-    auto callee = NAst::TMaybeNode<NAst::TIdentExpr>(call.Cast()->Callee);
+    auto callee = NAst::TMaybeNode<NAst::TIdentExpr>(call.Cast()->Callee());
     if (!callee) {
         return std::unexpected(TError(w->Location, "unsupported window function"));
     }
@@ -1044,7 +961,7 @@ std::expected<NAst::TExprPtr, TError> TWindowCollector::Emit(NQumir::NAst::TType
     }
     TRaw raw;
     raw.Func = func;
-    const auto& args = call.Cast()->Args;
+    const auto& args = call.Cast()->Args();
     const size_t arity = func == "rank" ? 0 : 1;
     if (args.size() > arity) {
         return std::unexpected(TError(w->Location, func + "() takes " +
@@ -1057,25 +974,20 @@ std::expected<NAst::TExprPtr, TError> TWindowCollector::Emit(NQumir::NAst::TType
     if (func != "rank" && !raw.Arg) {
         return std::unexpected(TError(w->Location, func + " window requires an argument"));
     }
-    if (w->WindowSpec) {
-        if (w->WindowSpec->PartitionBy) {
-            if (auto block = NAst::TMaybeNode<NAst::TBlockExpr>(w->WindowSpec->PartitionBy)) {
-                for (const auto& expr : block.Cast()->Stmts) {
-                    raw.PartitionExprs.push_back(expr);
-                }
-            } else {
-                raw.PartitionExprs.push_back(w->WindowSpec->PartitionBy);
+    if (auto partitionBy = w->PartitionBy()) {
+        if (auto block = NAst::TMaybeNode<NAst::TBlockExpr>(partitionBy)) {
+            for (const auto& expr : block.Cast()->Stmts) {
+                raw.PartitionExprs.push_back(expr);
             }
+        } else {
+            raw.PartitionExprs.push_back(partitionBy);
         }
-        if (w->WindowSpec->OrderBy) {
-            for (const auto& item : w->WindowSpec->OrderBy->Items) {
-                if (item && item->Expr) {
-                    raw.OrderItems.push_back(item);
-                }
-            }
-        }
-        raw.Frame = ConvertFrame(w->WindowSpec->Frame);
     }
+    const auto keys = w->OrderKeys();
+    for (size_t i = 0; i < keys.size(); ++i) {
+        raw.OrderItems.push_back({.Expr = keys[i], .Order = w->Order[i]});
+    }
+    raw.Frame = ConvertFrame(*w);
     raw.Name = Names_.Next("w");
     raw.Signature = Signature(raw);
     auto loc = w->Location;
@@ -1094,9 +1006,9 @@ std::string TWindowCollector::Signature(const TRaw& raw) const {
     }
     s += "o:";
     for (const auto& item : raw.OrderItems) {
-        s += NAst::NCore::PrintAst(item->Expr);
-        s += item->Desc ? " desc " : " asc ";
-        s += std::to_string(static_cast<int>(item->NullOrder));
+        s += NAst::NCore::PrintAst(item.Expr);
+        s += item.Order.Desc ? " desc " : " asc ";
+        s += std::to_string(static_cast<int>(item.Order.NullOrder));
         s += ";";
     }
     s += "f:" + FrameSignature(raw.Frame);
@@ -1215,12 +1127,12 @@ std::expected<NAst::TExprPtr, TError> RewriteGroupingCalls(
     if (IsGroupingCall(expr)) {
         return BuildGroupingValue(types, expr, info);
     }
-    for (auto* child : expr->MutableChildren()) {
-        auto rewritten = RewriteGroupingCalls(types, *child, info);
+    for (auto& child : expr->MutableChildren()) {
+        auto rewritten = RewriteGroupingCalls(types, child, info);
         if (!rewritten) {
             return std::unexpected(rewritten.error());
         }
-        *child = std::move(*rewritten);
+        child = std::move(*rewritten);
     }
     return expr;
 }
@@ -1239,8 +1151,8 @@ NAst::TExprPtr SubstituteGroupKeys(
             return Ident(expr->Location, it->second);
         }
     }
-    for (auto* child : expr->MutableChildren()) {
-        *child = SubstituteGroupKeys(*child, byExpr);
+    for (auto& child : expr->MutableChildren()) {
+        child = SubstituteGroupKeys(child, byExpr);
     }
     return expr;
 }

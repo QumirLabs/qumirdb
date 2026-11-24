@@ -102,8 +102,8 @@ std::vector<TNodeState> NodeStates(const NQumir::NAst::TExprPtr& node) {
             state.Scope = fun.Cast()->Scope;
         }
         states.push_back(state);
-        for (auto* child : current->MutableChildren()) {
-            stack.push_back(*child);
+        for (auto& child : current->MutableChildren()) {
+            stack.push_back(child);
         }
     }
     return states;
@@ -118,8 +118,8 @@ void CollectNamedTypes(const NQumir::NAst::TExprPtr& node, std::set<const TNamed
     if (auto fun = NQumir::NAst::TMaybeNode<NQumir::NAst::TFunDecl>(node)) {
         CollectNamedTypes(fun.Cast()->RetType, out);
     }
-    for (auto* child : node->MutableChildren()) {
-        CollectNamedTypes(*child, out);
+    for (auto& child : node->MutableChildren()) {
+        CollectNamedTypes(child, out);
     }
 }
 

@@ -1955,10 +1955,10 @@ TAstExprTask concat_expr(TParserContext& ctx) {
 NQumir::NAst::TExprPtr IntervalMonths(const NQumir::NAst::TExprPtr& e) {
     if (auto maybeCall = NQumir::NAst::TMaybeNode<NQumir::NAst::TCallExpr>(e)) {
         auto c = maybeCall.Cast();
-        if (auto maybeId = NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(c->Callee);
+        if (auto maybeId = NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(c->Callee());
             maybeId && maybeId.Cast()->Name == IntervalMonthsMarker)
         {
-            return c->Args.front();
+            return c->Args().front();
         }
     }
     return nullptr;
@@ -2075,7 +2075,7 @@ TAstExprTask postfix_expr(TParserContext& ctx) {
     }
 
     if (windowSpec) {
-        ret = NQumir::MakeIntrusive<TWindowExpr>(std::move(ret), std::move(windowSpec));
+        ret = NQumir::MakeIntrusive<TWindowExpr>(std::move(ret), *windowSpec);
     }
 
     while (isCast()) {

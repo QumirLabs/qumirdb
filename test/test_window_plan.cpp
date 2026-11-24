@@ -48,11 +48,9 @@ const TWindowOperator* FindWindow(const IOperator* op) {
     if (auto* window = dynamic_cast<const TWindowOperator*>(op)) {
         return window;
     }
-    for (const auto& child : op->Children()) {
-        if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            if (auto* found = FindWindow(childOp.Cast())) {
-                return found;
-            }
+    for (const auto& child : op->Inputs()) {
+        if (auto* found = FindWindow(child.Get())) {
+            return found;
         }
     }
     return nullptr;
@@ -60,10 +58,8 @@ const TWindowOperator* FindWindow(const IOperator* op) {
 
 int CountWindows(const IOperator* op) {
     int count = dynamic_cast<const TWindowOperator*>(op) ? 1 : 0;
-    for (const auto& child : op->Children()) {
-        if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            count += CountWindows(childOp.Cast());
-        }
+    for (const auto& child : op->Inputs()) {
+        count += CountWindows(child.Get());
     }
     return count;
 }
@@ -72,11 +68,9 @@ const TJoinOperator* FindJoin(const IOperator* op) {
     if (auto* join = dynamic_cast<const TJoinOperator*>(op)) {
         return join;
     }
-    for (const auto& child : op->Children()) {
-        if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            if (auto* found = FindJoin(childOp.Cast())) {
-                return found;
-            }
+    for (const auto& child : op->Inputs()) {
+        if (auto* found = FindJoin(child.Get())) {
+            return found;
         }
     }
     return nullptr;
@@ -102,10 +96,8 @@ void AssertWindowFuncArgsExistInInput(const IOperator* op) {
             }
         }
     }
-    for (const auto& child : op->Children()) {
-        if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            AssertWindowFuncArgsExistInInput(childOp.Cast());
-        }
+    for (const auto& child : op->Inputs()) {
+        AssertWindowFuncArgsExistInInput(child.Get());
     }
 }
 

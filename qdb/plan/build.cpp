@@ -706,15 +706,15 @@ public:
             }
             // A call's callee names a function, not a column.
             if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(node)) {
-                for (auto& argument : call.Cast()->Args) {
+                for (auto& argument : call.Cast()->Args()) {
                     if (auto bound = self(self, argument); !bound) {
                         return bound;
                     }
                 }
                 return {};
             }
-            for (auto* child : node->MutableChildren()) {
-                if (auto bound = self(self, *child); !bound) {
+            for (auto& child : node->MutableChildren()) {
+                if (auto bound = self(self, child); !bound) {
                     return bound;
                 }
             }
@@ -1538,8 +1538,8 @@ std::optional<TCorrelation> AsCorrelation(
     if (!binary || binary.Cast()->Operator != "==") {
         return std::nullopt;
     }
-    auto left = NAst::TMaybeNode<NAst::TIdentExpr>(binary.Cast()->Left);
-    auto right = NAst::TMaybeNode<NAst::TIdentExpr>(binary.Cast()->Right);
+    auto left = NAst::TMaybeNode<NAst::TIdentExpr>(binary.Cast()->Left());
+    auto right = NAst::TMaybeNode<NAst::TIdentExpr>(binary.Cast()->Right());
     if (!left || !right) {
         return std::nullopt;
     }
@@ -1571,13 +1571,13 @@ void CollectCorrelations(
         return;
     }
     if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(expr)) {
-        for (const auto& arg : call.Cast()->Args) {
+        for (const auto& arg : call.Cast()->Args()) {
             CollectCorrelations(arg, local, out);
         }
         return;
     }
-    for (auto* child : expr->MutableChildren()) {
-        CollectCorrelations(*child, local, out);
+    for (auto& child : expr->MutableChildren()) {
+        CollectCorrelations(child, local, out);
     }
 }
 
@@ -1597,8 +1597,8 @@ std::vector<TCorrelation> RequiredCorrelations(
     if (!binary || (binary.Cast()->Operator != "&&" && binary.Cast()->Operator != "||")) {
         return {};
     }
-    auto result = RequiredCorrelations(binary.Cast()->Left, local);
-    const auto right = RequiredCorrelations(binary.Cast()->Right, local);
+    auto result = RequiredCorrelations(binary.Cast()->Left(), local);
+    const auto right = RequiredCorrelations(binary.Cast()->Right(), local);
     if (binary.Cast()->Operator == "||") {
         std::erase_if(result, [&](const TCorrelation& correlation) {
             return std::ranges::find(right, correlation) == right.end();
@@ -1643,13 +1643,13 @@ void ReplaceIdents(
         return;
     }
     if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(expr)) {
-        for (auto& arg : call.Cast()->Args) {
+        for (auto& arg : call.Cast()->Args()) {
             ReplaceIdents(arg, replacements);
         }
         return;
     }
-    for (auto* child : expr->MutableChildren()) {
-        ReplaceIdents(*child, replacements);
+    for (auto& child : expr->MutableChildren()) {
+        ReplaceIdents(child, replacements);
     }
 }
 
@@ -1810,8 +1810,8 @@ NAst::TExprPtr RestoreCorrelatedCountDefaults(
             return CloneExpr(it->second);
         }
     }
-    for (auto* child : expr->MutableChildren()) {
-        *child = RestoreCorrelatedCountDefaults(*child, replacements);
+    for (auto& child : expr->MutableChildren()) {
+        child = RestoreCorrelatedCountDefaults(child, replacements);
     }
     return expr;
 }
@@ -2173,12 +2173,12 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
         node = JoinRelations(types, std::move(node), std::move(*right), {}, EJoinType::Left, nullptr);
         return extract(Ident(expr->Location, column));
     }
-    for (NAst::TExprPtr* child : expr->MutableChildren()) {
-        auto rewritten = ExtractScalarSubqueries(types, *child, node, context, extracted);
+    for (auto& child : expr->MutableChildren()) {
+        auto rewritten = ExtractScalarSubqueries(types, child, node, context, extracted);
         if (!rewritten) {
             return std::unexpected(rewritten.error());
         }
-        *child = std::move(*rewritten);
+        child = std::move(*rewritten);
     }
     return expr;
 }
@@ -2214,7 +2214,7 @@ std::expected<void, TError> ExtractAggregateArgumentSubqueries(
         return {};
     }
     if (IsAggregateCall(expr)) {
-        for (auto& arg : NAst::TMaybeNode<NAst::TCallExpr>(expr).Cast()->Args) {
+        for (auto& arg : NAst::TMaybeNode<NAst::TCallExpr>(expr).Cast()->Args()) {
             auto rewritten = ExtractScalarSubqueries(types, arg, node, context, extracted);
             if (!rewritten) {
                 return std::unexpected(rewritten.error());

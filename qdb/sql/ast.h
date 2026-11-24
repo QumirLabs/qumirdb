@@ -257,73 +257,50 @@ struct TSqlWindowSpec : TSqlNode {
     void Accept(ISqlVisitor& visitor) override;
 };
 
+// One ORDER BY key of a window; the key expression is in TWindowExpr::Operands.
+struct TWindowOrder {
+    bool Desc = false;
+    TSqlOrderItem::ENullOrder NullOrder = TSqlOrderItem::ENullOrder::Default;
+};
+
+// `Expr OVER (...)`. The node keeps every expression in Operands, so that
+// Children() is one span: Expr, PARTITION BY (optional), the ORDER BY keys,
+// then the offsets of the PRECEDING/FOLLOWING frame bounds.
 struct TWindowExpr : NQumir::NAst::TExpr {
     static constexpr const char* NodeId = "WindowExpr";
 
-    NQumir::NAst::TExprPtr Expr;
-    TSqlPtr<TSqlWindowSpec> WindowSpec;
+    std::vector<NQumir::NAst::TExprPtr> Operands;
+    bool HasPartitionBy = false;
+    std::vector<TWindowOrder> Order;
+    TSqlWindowFrame::EType FrameType = TSqlWindowFrame::EType::Range;
+    TSqlFrameBound::EType FrameStart = TSqlFrameBound::EType::UnboundedPreceding;
+    std::optional<TSqlFrameBound::EType> FrameEnd; // BETWEEN form only
 
     // A window call is located at its function call.
-    explicit TWindowExpr(NQumir::NAst::TExprPtr expr, TSqlPtr<TSqlWindowSpec> spec)
-        : NQumir::NAst::TExpr(expr ? expr->Location : NQumir::TLocation{})
-        , Expr(std::move(expr))
-        , WindowSpec(std::move(spec))
-    { }
+    TWindowExpr(NQumir::NAst::TExprPtr expr, const TSqlWindowSpec& spec);
 
-    std::vector<NQumir::NAst::TExprPtr> Children() const override {
-        std::vector<NQumir::NAst::TExprPtr> children;
-        if (Expr) {
-            children.push_back(Expr);
-        }
-        if (WindowSpec) {
-            if (WindowSpec->PartitionBy) {
-                children.push_back(WindowSpec->PartitionBy);
-            }
-            if (WindowSpec->OrderBy) {
-                for (const auto& item : WindowSpec->OrderBy->Items) {
-                    if (item && item->Expr) {
-                        children.push_back(item->Expr);
-                    }
-                }
-            }
-            if (WindowSpec->Frame) {
-                if (WindowSpec->Frame->Start && WindowSpec->Frame->Start->Expr) {
-                    children.push_back(WindowSpec->Frame->Start->Expr);
-                }
-                if (WindowSpec->Frame->End && WindowSpec->Frame->End->Expr) {
-                    children.push_back(WindowSpec->Frame->End->Expr);
-                }
-            }
-        }
-        return children;
+    auto& Expr(this auto& self) {
+        return self.Operands[0];
     }
 
-    std::vector<NQumir::NAst::TExprPtr*> MutableChildren() override {
-        std::vector<NQumir::NAst::TExprPtr*> children;
-        if (Expr) {
-            children.push_back(&Expr);
-        }
-        if (WindowSpec) {
-            if (WindowSpec->PartitionBy) {
-                children.push_back(&WindowSpec->PartitionBy);
-            }
-            if (WindowSpec->OrderBy) {
-                for (auto& item : WindowSpec->OrderBy->Items) {
-                    if (item && item->Expr) {
-                        children.push_back(&item->Expr);
-                    }
-                }
-            }
-            if (WindowSpec->Frame) {
-                if (WindowSpec->Frame->Start && WindowSpec->Frame->Start->Expr) {
-                    children.push_back(&WindowSpec->Frame->Start->Expr);
-                }
-                if (WindowSpec->Frame->End && WindowSpec->Frame->End->Expr) {
-                    children.push_back(&WindowSpec->Frame->End->Expr);
-                }
-            }
-        }
-        return children;
+    NQumir::NAst::TExprPtr PartitionBy() const {
+        return HasPartitionBy ? Operands[1] : nullptr;
+    }
+
+    auto OrderKeys(this auto& self) {
+        return std::span(self.Operands).subspan(1 + self.HasPartitionBy, self.Order.size());
+    }
+
+    // The offset of a PRECEDING/FOLLOWING bound, null for the other bounds.
+    NQumir::NAst::TExprPtr FrameStartOffset() const;
+    NQumir::NAst::TExprPtr FrameEndOffset() const;
+
+    std::span<const NQumir::NAst::TExprPtr> Children() const override {
+        return Operands;
+    }
+
+    std::span<NQumir::NAst::TExprPtr> MutableChildren() override {
+        return Operands;
     }
 
     const std::string_view NodeName() const override {
@@ -549,18 +526,12 @@ struct TSubqueryExpr : NQumir::NAst::TExpr {
         , Query(std::move(query))
     { }
 
-    std::vector<NQumir::NAst::TExprPtr> Children() const override {
-        if (Operand) {
-            return { Operand };
-        }
-        return {};
+    std::span<const NQumir::NAst::TExprPtr> Children() const override {
+        return { &Operand, Operand ? 1u : 0u };
     }
 
-    std::vector<NQumir::NAst::TExprPtr*> MutableChildren() override {
-        if (Operand) {
-            return { &Operand };
-        }
-        return {};
+    std::span<NQumir::NAst::TExprPtr> MutableChildren() override {
+        return { &Operand, Operand ? 1u : 0u };
     }
 
     const std::string_view NodeName() const override {

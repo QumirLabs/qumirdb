@@ -28,9 +28,9 @@ bool YieldsNull(const TExprPtr& expr, const TColumns& columns) {
     if (auto maybeBinary = TMaybeNode<TBinaryExpr>(expr)) {
         auto binary = maybeBinary.Cast();
         if (binary->Operator == "&&"_op || binary->Operator == "||"_op) {
-            return YieldsNull(binary->Left, columns) && YieldsNull(binary->Right, columns);
+            return YieldsNull(binary->Left(), columns) && YieldsNull(binary->Right(), columns);
         }
-        return YieldsNull(binary->Left, columns) || YieldsNull(binary->Right, columns);
+        return YieldsNull(binary->Left(), columns) || YieldsNull(binary->Right(), columns);
     }
     if (auto maybeUnary = TMaybeNode<TUnaryExpr>(expr)) {
         return YieldsNull(maybeUnary.Cast()->Operand, columns);
@@ -40,14 +40,14 @@ bool YieldsNull(const TExprPtr& expr, const TColumns& columns) {
     }
     if (auto maybeCall = TMaybeNode<TCallExpr>(expr)) {
         auto call = maybeCall.Cast();
-        auto maybeCallee = TMaybeNode<TIdentExpr>(call->Callee);
+        auto maybeCallee = TMaybeNode<TIdentExpr>(call->Callee());
         if (!maybeCallee) {
             return false;
         }
         auto callee = maybeCallee.Cast();
-        for (size_t index = 0; index < call->Args.size(); ++index) {
+        for (size_t index = 0; index < call->Args().size(); ++index) {
             if (NKernel::IsNullStrictCallArgument(callee->Name, index)
-                && YieldsNull(call->Args[index], columns))
+                && YieldsNull(call->Args()[index], columns))
             {
                 return true;
             }
@@ -73,11 +73,11 @@ TExprPtr IsNotNullOperand(const TExprPtr& predicate) {
         return nullptr;
     }
     auto call = maybeCall.Cast();
-    auto maybeCallee = TMaybeNode<TIdentExpr>(call->Callee);
-    if (!maybeCallee || maybeCallee.Cast()->Name != "qdb_is_null" || call->Args.size() != 1) {
+    auto maybeCallee = TMaybeNode<TIdentExpr>(call->Callee());
+    if (!maybeCallee || maybeCallee.Cast()->Name != "qdb_is_null" || call->Args().size() != 1) {
         return nullptr;
     }
-    return call->Args.front();
+    return call->Args().front();
 }
 
 } // namespace
@@ -86,10 +86,10 @@ bool RejectsNulls(const TExprPtr& predicate, const TColumns& columns) {
     if (auto maybeBinary = TMaybeNode<TBinaryExpr>(predicate)) {
         auto binary = maybeBinary.Cast();
         if (binary->Operator == "&&"_op) {
-            return RejectsNulls(binary->Left, columns) || RejectsNulls(binary->Right, columns);
+            return RejectsNulls(binary->Left(), columns) || RejectsNulls(binary->Right(), columns);
         }
         if (binary->Operator == "||"_op) {
-            return RejectsNulls(binary->Left, columns) && RejectsNulls(binary->Right, columns);
+            return RejectsNulls(binary->Left(), columns) && RejectsNulls(binary->Right(), columns);
         }
     }
     // IS NOT NULL is FALSE, not NULL, on a NULL operand.

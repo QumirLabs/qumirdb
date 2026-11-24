@@ -192,14 +192,14 @@ public:
             const auto op = binary.Cast()->Operator.ToString();
             if (op == "&&" || op == "||") {
                 return Call(op == "&&" ? "rg_truth_and" : "rg_truth_or", {
-                    LowerTruth(binary.Cast()->Left),
-                    LowerTruth(binary.Cast()->Right),
+                    LowerTruth(binary.Cast()->Left()),
+                    LowerTruth(binary.Cast()->Right()),
                 });
             }
             if (op == "==" || op == "!=" || op == "<" || op == "<=" ||
                 op == ">" || op == ">=")
             {
-                return LowerComparison(op, binary.Cast()->Left, binary.Cast()->Right);
+                return LowerComparison(op, binary.Cast()->Left(), binary.Cast()->Right());
             }
             return UnknownTruth();
         }
@@ -219,16 +219,16 @@ public:
             return UnknownTruth();
         }
         if (auto call = TMaybeNode<TCallExpr>(expr)) {
-            auto callee = TMaybeNode<TIdentExpr>(call.Cast()->Callee);
+            auto callee = TMaybeNode<TIdentExpr>(call.Cast()->Callee());
             if (!callee) {
                 return UnknownTruth();
             }
             const auto& name = callee.Cast()->Name;
-            if (name == "qdb_is_true" && call.Cast()->Args.size() == 1) {
-                return Call("rg_truth_is_true", {LowerTruth(call.Cast()->Args.front())});
+            if (name == "qdb_is_true" && call.Cast()->Args().size() == 1) {
+                return Call("rg_truth_is_true", {LowerTruth(call.Cast()->Args().front())});
             }
-            if (name == "qdb_is_null" && call.Cast()->Args.size() == 1) {
-                auto value = LowerNumber(call.Cast()->Args.front(), std::nullopt);
+            if (name == "qdb_is_null" && call.Cast()->Args().size() == 1) {
+                auto value = LowerNumber(call.Cast()->Args().front(), std::nullopt);
                 return value
                     ? Call("rg_is_null", {std::move(value.Expr)})
                     : UnknownTruth();
@@ -572,7 +572,7 @@ private:
                 native = *expected;
             }
             return LowerArithmetic(
-                op, binary.Cast()->Left, binary.Cast()->Right, native, expected);
+                op, binary.Cast()->Left(), binary.Cast()->Right(), native, expected);
         }
         if (auto unary = TMaybeNode<TUnaryExpr>(expr)) {
             if (unary.Cast()->Operator != "-") {

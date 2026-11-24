@@ -17,7 +17,6 @@ public:
 
     std::string_view RelName() const override { return OpId; }
     std::vector<TColumnReference> ColumnReferences() const override;
-    std::vector<NQumir::NAst::TExprPtr> Children() const override { return {Input_}; }
     const std::string ToString() const override;
 
     TOperatorPtr Input() const { return Input_; }

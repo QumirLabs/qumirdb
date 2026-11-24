@@ -32,7 +32,6 @@ public:
         size_t, const std::unordered_set<std::string>&) const override {
         return ComputeReferencedColumns();
     }
-    std::vector<NQumir::NAst::TExprPtr> Children() const override { return {Input_}; }
     const std::string ToString() const override;
 
     TOperatorPtr Input() const { return Input_; }

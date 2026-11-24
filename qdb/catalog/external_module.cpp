@@ -455,7 +455,7 @@ void CollectCallNames(const TExprPtr& expr, std::unordered_set<std::string>& nam
         return;
     }
     if (auto call = TMaybeNode<TCallExpr>(expr)) {
-        if (auto ident = TMaybeNode<TIdentExpr>(call.Cast()->Callee)) {
+        if (auto ident = TMaybeNode<TIdentExpr>(call.Cast()->Callee())) {
             names.insert(ident.Cast()->Name);
         }
     }

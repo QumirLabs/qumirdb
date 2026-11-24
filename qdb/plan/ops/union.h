@@ -24,9 +24,6 @@ public:
     std::unordered_set<std::string> RequiredColumnsForChild(
         size_t childIdx, const std::unordered_set<std::string>& needed) const override;
 
-    std::vector<NQumir::NAst::TExprPtr> Children() const override {
-        return std::vector<NQumir::NAst::TExprPtr>(Inputs_.begin(), Inputs_.end());
-    }
     const std::string ToString() const override;
 
     std::span<const TOperatorPtr> Inputs() const override {

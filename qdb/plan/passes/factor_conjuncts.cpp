@@ -24,8 +24,8 @@ bool IsCommutative(const TOperator& op) {
 std::string Key(const TExprPtr& expr) {
     if (auto binary = TMaybeNode<TBinaryExpr>(expr)) {
         auto node = binary.Cast();
-        std::string left = Key(node->Left);
-        std::string right = Key(node->Right);
+        std::string left = Key(node->Left());
+        std::string right = Key(node->Right());
         if (IsCommutative(node->Operator) && right < left) {
             std::swap(left, right);
         }

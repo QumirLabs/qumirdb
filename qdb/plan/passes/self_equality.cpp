@@ -19,8 +19,8 @@ TExprPtr Simplify(const TExprPtr& expr, const TStructType& schema) {
     }
     auto binary = maybeBinary.Cast();
     if (binary->Operator == "&&"_op || binary->Operator == "||"_op) {
-        auto left = Simplify(binary->Left, schema);
-        auto right = Simplify(binary->Right, schema);
+        auto left = Simplify(binary->Left(), schema);
+        auto right = Simplify(binary->Right(), schema);
         if (binary->Operator == "||"_op) {
             if (!left || !right) {
                 return nullptr;
@@ -28,7 +28,7 @@ TExprPtr Simplify(const TExprPtr& expr, const TStructType& schema) {
         } else if (!left || !right) {
             return left ? left : right;
         }
-        if (left == binary->Left && right == binary->Right) {
+        if (left == binary->Left() && right == binary->Right()) {
             return expr;
         }
         return NQumir::MakeIntrusive<TBinaryExpr>(
@@ -37,8 +37,8 @@ TExprPtr Simplify(const TExprPtr& expr, const TStructType& schema) {
     if (binary->Operator != "=="_op) {
         return expr;
     }
-    auto maybeLeft = TMaybeNode<TIdentExpr>(binary->Left);
-    auto maybeRight = TMaybeNode<TIdentExpr>(binary->Right);
+    auto maybeLeft = TMaybeNode<TIdentExpr>(binary->Left());
+    auto maybeRight = TMaybeNode<TIdentExpr>(binary->Right());
     if (!maybeLeft || !maybeRight) {
         return expr;
     }
@@ -63,7 +63,7 @@ TExprPtr Simplify(const TExprPtr& expr, const TStructType& schema) {
             NQumir::MakeIntrusive<TCallExpr>(
                 binary->Location,
                 NQumir::MakeIntrusive<TIdentExpr>(binary->Location, "qdb_is_null"),
-                std::vector<TExprPtr>{binary->Left}));
+                std::vector<TExprPtr>{binary->Left()}));
     }
     return expr;
 }

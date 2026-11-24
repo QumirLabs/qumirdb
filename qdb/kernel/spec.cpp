@@ -51,23 +51,23 @@ void LowerRegexCalls(
     if (!expr) {
         return;
     }
-    for (auto* child : expr->MutableChildren()) {
-        LowerRegexCalls(types, *child, registry);
+    for (auto& child : expr->MutableChildren()) {
+        LowerRegexCalls(types, child, registry);
     }
 
     auto call = TMaybeNode<TCallExpr>(expr);
     if (!call) {
         return;
     }
-    auto callee = TMaybeNode<TIdentExpr>(call.Cast()->Callee);
+    auto callee = TMaybeNode<TIdentExpr>(call.Cast()->Callee());
     if (!callee || callee.Cast()->Name != "regexp_replace") {
         return;
     }
-    if (call.Cast()->Args.size() != 3) {
+    if (call.Cast()->Args().size() != 3) {
         throw std::runtime_error("REGEXP_REPLACE expects 3 arguments");
     }
-    const auto* pattern = StringLiteral(call.Cast()->Args[1]);
-    const auto* replacement = StringLiteral(call.Cast()->Args[2]);
+    const auto* pattern = StringLiteral(call.Cast()->Args()[1]);
+    const auto* replacement = StringLiteral(call.Cast()->Args()[2]);
     if (!pattern || !replacement) {
         throw std::runtime_error(
             "REGEXP_REPLACE pattern and replacement must be constant strings");
@@ -89,7 +89,7 @@ void LowerRegexCalls(
         std::vector<TExprPtr>{
             NQumir::MakeIntrusive<TIdentExpr>(call.Cast()->Location, "__arena__"),
             std::move(handle),
-            call.Cast()->Args[0],
+            call.Cast()->Args()[0],
         });
     lowered->Type = expr->Type;
     expr = std::move(lowered);
@@ -101,7 +101,7 @@ bool ContainsRegexCall(const NQumir::NAst::TExprPtr& expr) {
         return false;
     }
     if (auto call = TMaybeNode<TCallExpr>(expr)) {
-        if (auto callee = TMaybeNode<TIdentExpr>(call.Cast()->Callee);
+        if (auto callee = TMaybeNode<TIdentExpr>(call.Cast()->Callee());
             callee && callee.Cast()->Name == "regexp_replace")
         {
             return true;
