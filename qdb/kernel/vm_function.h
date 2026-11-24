@@ -68,7 +68,8 @@ public:
     std::expected<void, std::string> Lower(
         NQumir::NAst::TExprPtr module,
         NQumir::NIR::TModule& output,
-        // Kernel entry points, maybe library functions; nullptr keeps every program function.
+        // Roots of the reachability cut: the kernel entry names, possibly library functions.
+        // nullptr means no cut: every program function is lowered.
         const std::vector<std::string>* entries);
 
 private:
