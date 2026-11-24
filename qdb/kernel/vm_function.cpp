@@ -104,6 +104,8 @@ std::expected<TExprPtr, std::string> TransformWithResolver(
     if (!composed) {
         return std::unexpected(composed.error().ToString());
     }
+    // The program's functions are the roots: module functions they do not reach skip the semantics.
+    NQumir::NFrontend::DropUnreachableModuleFunctions(composed->Ast, {});
     resolver.ApplyPragmas(composed->Pragmas);
     resolver.GetOrCreateRootScope()->RootLevel = false;
     if (auto error = resolver.Resolve(composed->Ast)) {
