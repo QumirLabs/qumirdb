@@ -67,7 +67,10 @@ public:
     // qumirdb module the analysis takes most of a compilation.
     std::expected<void, std::string> Lower(
         NQumir::NAst::TExprPtr module,
-        NQumir::NIR::TModule& output);
+        NQumir::NIR::TModule& output,
+        // Roots of the reachability cut: the kernel entry names, possibly library functions.
+        // nullptr means no cut: every program function is lowered.
+        const std::vector<std::string>* entries);
 
 private:
     struct TImpl;

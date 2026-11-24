@@ -149,7 +149,9 @@ std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError> TQueryModules
     for (const auto& stmt : *it->second) {
         auto fun = TMaybeNode<TFunDecl>(stmt);
         if (!fun || !exclude.contains(fun.Cast()->Name)) {
+            // Library code, like a module: the kernel frontends skip what the program does not reach.
             library.push_back(DeepCloneExpr(stmt));
+            library.back()->Origin = name;
         }
     }
     return library;
