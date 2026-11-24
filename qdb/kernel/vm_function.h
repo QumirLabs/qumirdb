@@ -67,7 +67,9 @@ public:
     // qumirdb module the analysis takes most of a compilation.
     std::expected<void, std::string> Lower(
         NQumir::NAst::TExprPtr module,
-        NQumir::NIR::TModule& output);
+        NQumir::NIR::TModule& output,
+        // Kernel entry points, maybe library functions; nullptr keeps every program function.
+        const std::vector<std::string>* entries);
 
 private:
     struct TImpl;

@@ -19,7 +19,9 @@
 
 #include <bit>
 #include <exception>
+#include <optional>
 #include <sstream>
+#include <unordered_set>
 #include <utility>
 
 namespace NQdb {
@@ -97,6 +99,7 @@ std::expected<TExprPtr, std::string> TransformWithResolver(
     const std::vector<TPragma>& pragmas,
     NQumir::NSemantics::TNameResolver& resolver,
     TExprPtr module,
+    const std::vector<std::string>& roots,
     bool runDefiniteAssignment = true)
 {
     auto composed = NQumir::NFrontend::LoadAndCompose(
@@ -104,8 +107,8 @@ std::expected<TExprPtr, std::string> TransformWithResolver(
     if (!composed) {
         return std::unexpected(composed.error().ToString());
     }
-    // The program's functions are the roots: module functions they do not reach skip the semantics.
-    NQumir::NFrontend::DropUnreachableModuleFunctions(composed->Ast, {});
+    // Module functions that neither the program nor `roots` reach skip the semantics.
+    NQumir::NFrontend::DropUnreachableModuleFunctions(composed->Ast, roots);
     resolver.ApplyPragmas(composed->Pragmas);
     resolver.GetOrCreateRootScope()->RootLevel = false;
     if (auto error = resolver.Resolve(composed->Ast)) {
@@ -134,12 +137,13 @@ std::expected<TExprPtr, std::string> TVmFrontendContext::Transform(
     resolver.RegisterModule(Impl_->Builtins.get());
     (void)resolver.ImportModule(Impl_->Builtins->Name());
     return TransformWithResolver(
-        Impl_->Loader, Impl_->Pragmas, resolver, std::move(module));
+        Impl_->Loader, Impl_->Pragmas, resolver, std::move(module), {});
 }
 
 std::expected<void, std::string> TVmFrontendContext::Lower(
     TExprPtr module,
-    NQumir::NIR::TModule& output)
+    NQumir::NIR::TModule& output,
+    const std::vector<std::string>* entries)
 {
     if (Impl_->LoadError) {
         return std::unexpected(*Impl_->LoadError);
@@ -153,13 +157,18 @@ std::expected<void, std::string> TVmFrontendContext::Lower(
     resolver.RegisterModule(Impl_->Builtins.get());
     (void)resolver.ImportModule(Impl_->Builtins->Name());
     auto transformed = TransformWithResolver(
-        Impl_->Loader, Impl_->Pragmas, resolver, std::move(module), /*runDefiniteAssignment=*/false);
+        Impl_->Loader, Impl_->Pragmas, resolver, std::move(module),
+        entries ? *entries : std::vector<std::string>{}, /*runDefiniteAssignment=*/false);
     if (!transformed) {
         return std::unexpected(transformed.error());
     }
     NQumir::NIR::TBuilder builder(output);
     NQumir::NIR::TAstLowerer lowerer(output, builder, resolver);
-    if (auto lowered = lowerer.LowerTop(*transformed); !lowered) {
+    std::optional<std::unordered_set<std::string>> entrySet;
+    if (entries) {
+        entrySet.emplace(entries->begin(), entries->end());
+    }
+    if (auto lowered = lowerer.LowerTop(*transformed, entrySet ? &*entrySet : nullptr); !lowered) {
         return std::unexpected(lowered.error().ToString());
     }
     return {};
@@ -211,7 +220,7 @@ std::expected<std::unique_ptr<TVmFunction>, std::string> TVmFunction::Compile(
 
         NKernel::EraseDateTypes(context.Types(), chunk);
         auto impl = std::make_unique<TImpl>();
-        if (auto lowered = context.Lower(std::move(chunk), impl->Module);
+        if (auto lowered = context.Lower(std::move(chunk), impl->Module, nullptr);
             !lowered)
         {
             return std::unexpected(lowered.error());
