@@ -150,8 +150,9 @@ std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError> TQueryModules
         auto fun = TMaybeNode<TFunDecl>(stmt);
         if (!fun || !exclude.contains(fun.Cast()->Name)) {
             // Library code, like a module: the kernel frontends skip what the program does not reach.
+            // The kernel fusion keys library functions by this origin, so it names the file uniquely.
             library.push_back(DeepCloneExpr(stmt));
-            library.back()->Origin = name;
+            library.back()->Origin = kind + "/" + name;
         }
     }
     return library;

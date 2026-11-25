@@ -290,6 +290,33 @@ TEST(FinalizeFused, ReusesPreviouslyRenamedFunctionComponent) {
                                       "__qdb_k1_entry"}));
 }
 
+// Library functions are keyed by their file: equal names and signatures from two files
+// stay apart, clones of one file are shared.
+TEST(FinalizeFused, KeysLibraryFunctionsByFile) {
+  auto libraryHelper = [](std::string origin, int64_t marker) {
+    auto fun = MarkerFunction("helper", marker);
+    fun->Origin = std::move(origin);
+    return fun;
+  };
+  auto k0 = Kernel("k0",
+                   {libraryHelper("join/a.oz", 0), CallingFunction("entry0", "helper")},
+                   {"entry0"});
+  auto k1 = Kernel("k1",
+                   {libraryHelper("join/a.oz", 0), CallingFunction("entry1", "helper")},
+                   {"entry1"});
+  auto k2 = Kernel("k2",
+                   {libraryHelper("sort/a.oz", 1), CallingFunction("entry2", "helper")},
+                   {"entry2"});
+
+  std::array<NQdb::TGeneratedKernel *, 3> kernels{&k0, &k1, &k2};
+  auto fused = NQdb::BuildFusedProgram(
+      std::span<NQdb::TGeneratedKernel *const>(kernels.data(), kernels.size()));
+
+  EXPECT_EQ(FunctionDeclNames(fused.Program),
+            (std::vector<std::string>{"helper", "entry0", "entry1",
+                                      "__qdb_k2_helper", "__qdb_k2_entry2"}));
+}
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
