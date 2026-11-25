@@ -71,7 +71,7 @@ TTypePtr NullableInner(const TTypePtr& t) {
 
 bool IsI32(const TTypePtr& t) {
     auto integer = TMaybeType<TIntegerType>(t).Cast();
-    return integer && integer->Kind == TIntegerType::I32;
+    return integer && integer->Width == TIntegerType::I32;
 }
 
 size_t CountOccurrences(std::string_view text, std::string_view needle) {
@@ -178,12 +178,12 @@ TEST(ProjectType, OutOfRangeLiteralWidensOperation) {
         ASSERT_TRUE(IsNullable(type)) << src;
         auto integer = TMaybeType<TIntegerType>(NullableInner(type)).Cast();
         ASSERT_TRUE(integer) << src;
-        EXPECT_EQ(integer->Kind, TIntegerType::I64) << src;
+        EXPECT_EQ(integer->Width, TIntegerType::I64) << src;
     }
     auto required = TMaybeType<TIntegerType>(
         AnnotateExprType(NQdb::TestTypes(), Parse("(* k 10000000000)"), Schema(), NQdb::TestAnnotation())).Cast();
     ASSERT_TRUE(required);
-    EXPECT_EQ(required->Kind, TIntegerType::I64);
+    EXPECT_EQ(required->Width, TIntegerType::I64);
     EXPECT_TRUE(IsI32(AnnotateExprType(NQdb::TestTypes(), Parse("(* k 2147483647)"), Schema(), NQdb::TestAnnotation())));
 }
 

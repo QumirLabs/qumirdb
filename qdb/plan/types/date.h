@@ -63,7 +63,7 @@ inline NQumir::NAst::TMaybeType<NQumir::NAst::TIntegerType> MaybeIntegerType(
 
 // The day count of the DATE cell `row` of a column of type `type` (IsDateType).
 inline int64_t DateCellDays(const char* data, int64_t row, const NQumir::NAst::TTypePtr& type) {
-    return DateStorageType(UnwrapNullableType(type))->Kind == NQumir::NAst::TIntegerType::I64
+    return DateStorageType(UnwrapNullableType(type))->Width == NQumir::NAst::TIntegerType::I64
         ? reinterpret_cast<const int64_t*>(data)[row]
         : reinterpret_cast<const int32_t*>(data)[row];
 }

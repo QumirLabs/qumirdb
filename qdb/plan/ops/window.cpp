@@ -46,7 +46,7 @@ TTypePtr WindowResultType(NQumir::NAst::TTypeFactory& types, const std::string& 
     if (IsDateType(inner)) {
         return wrap(MakeDateType(types, TIntegerType::I64));
     }
-    if (inner && inner->TypeName() == TIntegerType::TypeId) {
+    if (inner && inner->Kind == TIntegerType::TypeId) {
         return wrap(types.MakeInteger());
     }
     return argType;

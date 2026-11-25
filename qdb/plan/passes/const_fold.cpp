@@ -50,7 +50,7 @@ TExprPtr LiteralFromResult(NQumir::NAst::TTypeFactory& types, const std::string&
 
 bool IsReal(const TTypePtr& type) {
     auto floating = TMaybeType<TFloatType>(type);
-    return floating && floating.Cast()->Kind == TFloatType::F32;
+    return floating && floating.Cast()->Width == TFloatType::F32;
 }
 
 // A compilation rewrites its expression, so each one gets its own copy. The result is a

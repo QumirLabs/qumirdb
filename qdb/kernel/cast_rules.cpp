@@ -165,7 +165,7 @@ TExprPtr FloatToDecimal(NQumir::NAst::TTypeFactory& types, const TExprPtr& opera
     TLocation loc)
 {
     auto floating = TMaybeType<TFloatType>(UnwrapNamedValueType(from));
-    if (floating && floating.Cast()->Kind == TFloatType::F32) {
+    if (floating && floating.Cast()->Width == TFloatType::F32) {
         // REAL has its own rounding (six digits first), so it does not go through f64.
         auto wide = Call("qdb_decimal_from_f32", {operand, Int64(types, ScaleOf(to), loc)}, loc);
         return IsDecimal64(to)
@@ -221,7 +221,7 @@ TExprPtr DecimalToFloat(NQumir::NAst::TTypeFactory& types, const TExprPtr& opera
     auto value = Call(IsDecimal64(from) ? "qdb_decimal64_to_f64" : "qdb_decimal_to_f64",
         {operand, Int64(types, ScaleOf(from), loc)}, loc);
     auto floating = TMaybeType<TFloatType>(UnwrapNamedValueType(to));
-    if (floating && floating.Cast()->Kind == TFloatType::F32) {
+    if (floating && floating.Cast()->Width == TFloatType::F32) {
         return NQumir::MakeIntrusive<TCastExpr>(loc, std::move(value),
             types.MakeFloat(TFloatType::F32));
     }

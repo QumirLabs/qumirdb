@@ -173,7 +173,7 @@ TEST(ConstFold, KeepsRealResultAsRealLiteral) {
     ASSERT_TRUE(folded);
     auto type = TMaybeType<TFloatType>(folded.Cast()->Type);
     ASSERT_TRUE(type);
-    EXPECT_EQ(type.Cast()->Kind, TFloatType::F32);
+    EXPECT_EQ(type.Cast()->Width, TFloatType::F32);
     EXPECT_EQ(folded.Cast()->FloatValue, static_cast<double>(0.1f + 0.2f));
 }
 

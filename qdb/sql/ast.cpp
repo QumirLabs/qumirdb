@@ -38,7 +38,7 @@ bool HasOffset(TSqlFrameBound::EType type) {
 } // namespace
 
 TWindowExpr::TWindowExpr(NQumir::NAst::TExprPtr expr, const TSqlWindowSpec& spec)
-    : NQumir::NAst::TExpr(expr->Location)
+    : NQumir::NAst::TExpr(expr->Location, NodeId)
 {
     Operands.push_back(std::move(expr));
     if (spec.PartitionBy) {

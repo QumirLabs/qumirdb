@@ -1262,7 +1262,7 @@ std::optional<TDecorrelation> AsDecorrelation(const NAst::TExprPtr& conjunct) {
         return std::nullopt;
     }
     using EKind = NSql::TSubqueryExpr::EKind;
-    EKind kind = sub.Cast()->Kind;
+    EKind kind = sub.Cast()->Form;
     if (kind != EKind::Exists && kind != EKind::In) {
         return std::nullopt;
     }
@@ -1666,7 +1666,7 @@ std::vector<NQumir::TIntrusivePtr<NSql::TSubqueryExpr>> AsExistsOrDisjunction(
     std::vector<NQumir::TIntrusivePtr<NSql::TSubqueryExpr>> existsList;
     for (const auto& d : disjuncts) {
         auto sub = NAst::TMaybeNode<NSql::TSubqueryExpr>(d);
-        if (!sub || sub.Cast()->Kind != NSql::TSubqueryExpr::EKind::Exists) {
+        if (!sub || sub.Cast()->Form != NSql::TSubqueryExpr::EKind::Exists) {
             return {};
         }
         existsList.emplace_back(sub.Cast());
@@ -1929,7 +1929,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
             extracted.Columns.emplace(scalar, CloneExpr(replacement));
             return replacement;
         };
-        if (scalar->Kind == NSql::TSubqueryExpr::EKind::In) {
+        if (scalar->Form == NSql::TSubqueryExpr::EKind::In) {
             // An uncorrelated IN-subquery nested inside a boolean expression (e.g. one
             // side of an OR) cannot be a semi-join - that would drop rows the OR keeps.
             // Rewrite it as a mark join: LEFT-join `node` to the DISTINCT subquery on
@@ -1986,7 +1986,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                 expr->Location, NAst::TOperator("!"),
                 Call(expr->Location, "qdb_is_null", { Ident(expr->Location, markName) })));
         }
-        if (scalar->Kind != NSql::TSubqueryExpr::EKind::Scalar) {
+        if (scalar->Form != NSql::TSubqueryExpr::EKind::Scalar) {
             return std::unexpected(TError(expr->Location,
                 "subquery is not supported in this position"));
         }

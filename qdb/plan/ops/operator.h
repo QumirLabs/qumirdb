@@ -34,8 +34,9 @@ struct TRuntimeFilterUseSpec {
 struct IOperator : NQumir::NAst::TExpr {
     // Type of Source: TFunctionType : () -> TStructType
     // Type: TFunctionType : (TStructType) -> TStructType
-    static constexpr const char* NodeId = "Rel";
+    static constexpr NQumir::NAst::TExprNodeId NodeId{"Rel"};
     TStatsPtr Stats_;
+    IOperator() : NQumir::NAst::TExpr(NodeId) {}
     // The relation yields at most one row: SQL gives a scalar subquery a value
     // only then. Row estimates take it as a bound.
     bool AtMostOneRow = false;
@@ -43,7 +44,6 @@ struct IOperator : NQumir::NAst::TExpr {
     // They do not change SQL semantics or row-count estimates.
     std::vector<TRuntimeFilterUseSpec> RuntimeFilterUses;
 
-    const std::string_view NodeName() const override { return NodeId; }
     virtual std::string_view RelName() const = 0;
     void Accept(NQumir::NAst::IVisitor& visitor) override { visitor.VisitOtherwise(*this); }
 
@@ -121,12 +121,12 @@ inline std::string BareColumnName(const std::string& name) {
 }
 
 // Analogous to TMaybeNode<T> in qumir.
-// Checks NodeName() == "Rel" AND RelName() == T::OpId.
+// Checks Kind == "Rel" AND RelName() == T::OpId.
 template<typename T>
 struct TMaybeOp {
     explicit TMaybeOp(TOperatorPtr node)
         : Op(node
-            && std::string_view(IOperator::NodeId) == node->NodeName()
+            && IOperator::NodeId == node->Kind
             && std::string_view(T::OpId) == node->RelName()
             ? NQumir::StaticPointerCast<T>(std::move(node))
             : nullptr)

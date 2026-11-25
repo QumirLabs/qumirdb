@@ -119,7 +119,7 @@ inline bool IsBinIntStorageType(const NQumir::NAst::TTypePtr& type) {
 inline bool IsInt128Type(const NQumir::NAst::TTypePtr& type) {
     auto integer = NQumir::NAst::TMaybeType<NQumir::NAst::TIntegerType>(
         UnwrapNullableType(type));
-    return integer && integer.Cast()->Kind == NQumir::NAst::TIntegerType::I128;
+    return integer && integer.Cast()->Width == NQumir::NAst::TIntegerType::I128;
 }
 
 inline bool IsDecimal128Type(const NQumir::NAst::TTypePtr& type) {

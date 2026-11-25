@@ -267,7 +267,7 @@ struct TWindowOrder {
 // Children() is one span: Expr, PARTITION BY (optional), the ORDER BY keys,
 // then the offsets of the PRECEDING/FOLLOWING frame bounds.
 struct TWindowExpr : NQumir::NAst::TExpr {
-    static constexpr const char* NodeId = "WindowExpr";
+    static constexpr NQumir::NAst::TExprNodeId NodeId{"WinExpr"};
 
     std::vector<NQumir::NAst::TExprPtr> Operands;
     bool HasPartitionBy = false;
@@ -301,10 +301,6 @@ struct TWindowExpr : NQumir::NAst::TExpr {
 
     std::span<NQumir::NAst::TExprPtr> MutableChildren() override {
         return Operands;
-    }
-
-    const std::string_view NodeName() const override {
-        return NodeId;
     }
 
     void Accept(NQumir::NAst::IVisitor& visitor) override {
@@ -508,7 +504,7 @@ struct ISqlVisitor {
 // A subquery used inside an expression. Bridges a SQL query into the Qumir
 // expression tree; visitors handle it through IVisitor::VisitOtherwise.
 struct TSubqueryExpr : NQumir::NAst::TExpr {
-    static constexpr const char* NodeId = "SqlSubquery";
+    static constexpr NQumir::NAst::TExprNodeId NodeId{"Subquery"};
 
     enum class EKind {
         Scalar, // ( <select> )
@@ -516,13 +512,13 @@ struct TSubqueryExpr : NQumir::NAst::TExpr {
         In,     // <operand> IN ( <select> )
     };
 
-    EKind Kind = EKind::Scalar;
+    EKind Form = EKind::Scalar;
     TSqlPtr<TSqlQuery> Query;
     NQumir::NAst::TExprPtr Operand; // left-hand side, used by the IN form
 
     TSubqueryExpr(NQumir::TLocation loc, EKind kind, TSqlPtr<TSqlQuery> query)
-        : NQumir::NAst::TExpr(std::move(loc))
-        , Kind(kind)
+        : NQumir::NAst::TExpr(std::move(loc), NodeId)
+        , Form(kind)
         , Query(std::move(query))
     { }
 
@@ -532,10 +528,6 @@ struct TSubqueryExpr : NQumir::NAst::TExpr {
 
     std::span<NQumir::NAst::TExprPtr> MutableChildren() override {
         return { &Operand, Operand ? 1u : 0u };
-    }
-
-    const std::string_view NodeName() const override {
-        return NodeId;
     }
 
     void Accept(NQumir::NAst::IVisitor& visitor) override {

@@ -117,7 +117,7 @@ TEST(IOTest, ParquetRoundtrip) {
     EXPECT_TRUE(IsNullableType(s.Columns[1].Type));
     EXPECT_TRUE(IsNullableType(s.Columns[2].Type));
     EXPECT_TRUE(IsNullableType(s.Columns[3].Type));
-    EXPECT_EQ(UnwrapNullableType(s.Columns[1].Type)->TypeName(),
+    EXPECT_EQ(UnwrapNullableType(s.Columns[1].Type)->Kind,
         NQumir::NAst::TStringType::TypeId);
 
     auto structType = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(
@@ -612,7 +612,7 @@ TEST(IOTest, FloatColumnIsReadAsFloat) {
                 auto type = NQumir::NAst::TMaybeType<NQumir::NAst::TFloatType>(
                     UnwrapNullableType(source->Schema(TestTypes()).Columns[0].Type));
                 ASSERT_TRUE(type);
-                EXPECT_EQ(type.Cast()->Kind, NQumir::NAst::TFloatType::F32);
+                EXPECT_EQ(type.Cast()->Width, NQumir::NAst::TFloatType::F32);
 
                 std::vector<std::optional<uint32_t>> scanned;
                 std::vector<TPhysicalRowId> rowIds;

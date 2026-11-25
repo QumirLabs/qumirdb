@@ -35,7 +35,7 @@ TTypePtr AggregateResultType(NQumir::NAst::TTypeFactory& types, const std::strin
         if (IsDateType(inner) && (func == "sum" || func == "avg")) {
             throw NQumir::TError("function " + func + "(DATE) does not exist");
         }
-        if (inner && inner->TypeName() == TIntegerType::TypeId) {
+        if (inner && inner->Kind == TIntegerType::TypeId) {
             // i64 state for every integer aggregate, incl. min/max over narrow ints.
             TTypePtr i64Type = types.MakeInteger();
             return nullable ? MakeNullableType(types, std::move(i64Type)) : i64Type;

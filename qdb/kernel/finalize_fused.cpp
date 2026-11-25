@@ -449,7 +449,7 @@ private:
         }
       } else {
         throw std::runtime_error("unsupported top-level kernel AST node '" +
-                                 std::string(stmt->NodeName()) + "'");
+                                 stmt->Kind.ToString() + "'");
       }
     }
   }

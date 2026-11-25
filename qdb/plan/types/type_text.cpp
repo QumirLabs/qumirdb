@@ -47,7 +47,7 @@ std::expected<TTypePtr, std::string> BuildDate(TTypeFactory& types, TArgs args) 
     if (!maybeStorage) {
         return std::unexpected("DATE expects an i32 or i64 storage argument");
     }
-    const auto kind = maybeStorage.Cast()->Kind;
+    const auto kind = maybeStorage.Cast()->Width;
     if (kind != TIntegerType::I32 && kind != TIntegerType::I64) {
         return std::unexpected("DATE expects an i32 or i64 storage argument");
     }
@@ -119,7 +119,7 @@ std::string SqlTypeName(const TTypePtr& type) {
         return integer.Cast()->BitWidth() == 64 ? "BIGINT" : "INTEGER";
     }
     if (auto floating = TMaybeType<TFloatType>(plain)) {
-        return floating.Cast()->Kind == TFloatType::F32 ? "REAL" : "DOUBLE";
+        return floating.Cast()->Width == TFloatType::F32 ? "REAL" : "DOUBLE";
     }
     return TypeDiagnosticName(value);
 }
