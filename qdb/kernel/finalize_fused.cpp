@@ -467,13 +467,8 @@ private:
 } // namespace
 
 std::string MakeKernelDedupKey(const TGeneratedKernel &kernel) {
-  auto block = TMaybeNode<TBlockExpr>(kernel.Ast);
-  if (!block) {
-    throw std::runtime_error("kernel '" + kernel.Name +
-                             "' AST is not a top-level block");
-  }
   std::string key;
-  for (const auto &stmt : block.Cast()->Stmts) {
+  for (const auto &stmt : TMaybeNode<TBlockExpr>(kernel.Ast).Cast()->Stmts) {
     if (auto fun = TMaybeNode<TFunDecl>(stmt)) {
       NQumir::TIntrusivePtr<TFunDecl> decl(fun.Cast());
       AppendKeyPart(key, FunctionKey(decl, FunctionSignatureKey(*decl)));

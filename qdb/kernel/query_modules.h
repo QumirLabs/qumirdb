@@ -55,6 +55,8 @@ public:
 
     // The statements of kernel library `name` in qdb/kernel/`kind`, without the functions in
     // `exclude`. A query parses each library once and gives every kernel a clone to rewrite.
+    // Rule: a clone that keeps its `Origin` is never edited before the kernel dedup and fusion,
+    // because they key its text by file, name and signature.
     std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError> KernelLibrary(
         const std::string& kind,
         const std::string& name,
