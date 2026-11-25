@@ -17,7 +17,7 @@ TIMINGS = {
     "execution_cpu_seconds": rf"Cpu: {NUMBER} seconds",
     "planning_seconds": rf"Planning: {NUMBER} seconds",
     "kernel_build_seconds": rf"KernelBuild: {NUMBER} seconds",
-    "jit_llvm_seconds": rf"JitLLVM: {NUMBER} seconds",
+    "jit_seconds": rf"Jit(?:LLVM|Tpde): {NUMBER} seconds",
 }
 
 

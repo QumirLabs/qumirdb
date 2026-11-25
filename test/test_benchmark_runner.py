@@ -119,7 +119,10 @@ class BenchmarkTest(unittest.TestCase):
         record = parse_timings("Returned 1 rows in 2e-5 seconds. Cpu: 3.5E-5 seconds.")
         self.assertEqual(record["processing_seconds"], 2e-5)
         self.assertEqual(record["execution_cpu_seconds"], 3.5e-5)
-        self.assertIsNone(record["jit_llvm_seconds"])
+        self.assertIsNone(record["jit_seconds"])
+
+    def test_jit_time_of_the_tpde_backend(self):
+        self.assertEqual(parse_timings("JitTpde: 0.5 seconds.")["jit_seconds"], 0.5)
 
     def test_result_multiset_preserves_duplicates(self):
         header = ["number", "text"]

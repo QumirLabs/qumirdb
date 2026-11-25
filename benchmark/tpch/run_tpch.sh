@@ -74,7 +74,7 @@ query_enabled() {
 }
 
 # Run qdb with the given args; result rows go to RESULT_FILE, diagnostics to
-# LOG_FILE. Echoes "<exec> <cpu> <plan> <kernel-build> <llvm> <return-code>".
+# LOG_FILE. Echoes "<exec> <cpu> <plan> <kernel-build> <jit> <return-code>".
 run_query() {
     local label="$1"; shift
     python3 "$SCRIPT_DIR/../query_runner.py" \
@@ -181,14 +181,14 @@ for scale in "${SCALES[@]}"; do
 
     echo "[qdb] mode=$MODE scale=$sf_num parquet=$data_dir" | tee -a "$LOG_FILE" >&2
 
-    printf "%-8s  %-9s  %-9s  %-9s  %-9s  %-9s  %s\n" "Query" "Plan(s)" "KBuild(s)" "LLVM(s)" "Exec(s)" "Cpu(s)" "Status"
+    printf "%-8s  %-9s  %-9s  %-9s  %-9s  %-9s  %s\n" "Query" "Plan(s)" "KBuild(s)" "JIT(s)" "Exec(s)" "Cpu(s)" "Status"
     printf "%-8s  %-9s  %-9s  %-9s  %-9s  %-9s  %s\n" "------" "-------" "---------" "-------" "-------" "------" "------"
 
     total_s="0"
     cpu_s="0"
     plan_s="0"
     build_s="0"
-    llvm_s="0"
+    jit_s="0"
     failed=0
 
     for q_num in $(seq 1 22); do
@@ -214,25 +214,25 @@ for scale in "${SCALES[@]}"; do
             continue
         fi
         if [[ "$MODE" == "sql" ]]; then
-            read -r seconds cpu plan build llvm rc <<< "$(run_query "Q${q_num} sf${sf_num}" ${EXTRA_QDB_ARGS[@]+"${EXTRA_QDB_ARGS[@]}"} --sql -i "$query" --data "$data_dir")"
+            read -r seconds cpu plan build jit rc <<< "$(run_query "Q${q_num} sf${sf_num}" ${EXTRA_QDB_ARGS[@]+"${EXTRA_QDB_ARGS[@]}"} --sql -i "$query" --data "$data_dir")"
         else
-            read -r seconds cpu plan build llvm rc <<< "$(run_query "Q${q_num} sf${sf_num}" ${EXTRA_QDB_ARGS[@]+"${EXTRA_QDB_ARGS[@]}"} -i "$query")"
+            read -r seconds cpu plan build jit rc <<< "$(run_query "Q${q_num} sf${sf_num}" ${EXTRA_QDB_ARGS[@]+"${EXTRA_QDB_ARGS[@]}"} -i "$query")"
         fi
 
         total_s=$(python3 -c "print(round($total_s + $seconds, 3))")
         cpu_s=$(python3 -c "print(round($cpu_s + $cpu, 3))")
         plan_s=$(python3 -c "print(round($plan_s + $plan, 3))")
         build_s=$(python3 -c "print(round($build_s + $build, 3))")
-        llvm_s=$(python3 -c "print(round($llvm_s + $llvm, 3))")
+        jit_s=$(python3 -c "print(round($jit_s + $jit, 3))")
 
         if [[ $rc -eq 0 ]]; then status="OK"; else status="FAILED"; (( failed++ )) || true; fi
         printf "%-8s  %-9s  %-9s  %-9s  %-9s  %-9s  %s\n" \
-            "Q$q_num" "$plan" "$build" "$llvm" "$seconds" "$cpu" "$status"
-        echo "[qdb] q${q_num} plan=${plan}s kbuild=${build}s llvm=${llvm}s exec=${seconds}s cpu=${cpu}s ${status}" >> "$LOG_FILE"
+            "Q$q_num" "$plan" "$build" "$jit" "$seconds" "$cpu" "$status"
+        echo "[qdb] q${q_num} plan=${plan}s kbuild=${build}s jit=${jit}s exec=${seconds}s cpu=${cpu}s ${status}" >> "$LOG_FILE"
     done
 
     [[ "$RENDER_ONLY" == "1" ]] && continue
     printf "Total (processing): %ss,  Cpu: %ss,  Failed: %s\n" "$total_s" "$cpu_s" "$failed"
-    printf "Compile (excluded from processing): plan=%ss  kbuild=%ss  llvm=%ss\n" "$plan_s" "$build_s" "$llvm_s"
+    printf "Compile (excluded from processing): plan=%ss  kbuild=%ss  jit=%ss\n" "$plan_s" "$build_s" "$jit_s"
     echo "[qdb] log: $LOG_FILE  results: $RESULT_FILE" >&2
 done

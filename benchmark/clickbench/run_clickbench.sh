@@ -60,10 +60,10 @@ unsupported_reason() {
 }
 
 # Result rows and diagnostics are kept separately. Echoes
-# "<exec> <cpu> <plan> <kernel-build> <llvm> <return-code>" on stdout.
+# "<exec> <cpu> <plan> <kernel-build> <jit> <return-code>" on stdout.
 run_query() {
     local label="$1"; shift
-    local out_file err_file rc seconds cpu plan build llvm
+    local out_file err_file rc seconds cpu plan build jit
     out_file="$(mktemp "$tmpdir/qdb_output.XXXXXX")"
     err_file="$(mktemp "$tmpdir/qdb_stderr.XXXXXX")"
     set +e
@@ -86,8 +86,8 @@ run_query() {
     cpu=$(sed -nE 's/.*Cpu: ([0-9]+([.][0-9]+)?) seconds.*/\1/p' "$err_file" | tail -n 1)
     plan=$(sed -nE 's/.*Planning: ([0-9]+([.][0-9]+)?) seconds.*/\1/p' "$err_file" | tail -n 1)
     build=$(sed -nE 's/.*KernelBuild: ([0-9]+([.][0-9]+)?) seconds.*/\1/p' "$err_file" | tail -n 1)
-    llvm=$(sed -nE 's/.*JitLLVM: ([0-9]+([.][0-9]+)?) seconds.*/\1/p' "$err_file" | tail -n 1)
-    echo "${seconds:-0} ${cpu:-0} ${plan:-0} ${build:-0} ${llvm:-0} $rc"
+    jit=$(sed -nE 's/.*Jit(LLVM|Tpde): ([0-9]+([.][0-9]+)?) seconds.*/\2/p' "$err_file" | tail -n 1)
+    echo "${seconds:-0} ${cpu:-0} ${plan:-0} ${build:-0} ${jit:-0} $rc"
 }
 
 mkdir -p "$OUT_DIR"
@@ -100,14 +100,14 @@ RESULT_FILE="$OUT_DIR/clickbench.results"
 : > "$RESULT_FILE"
 
 echo "[qdb] clickbench parquet=$DATA_DIR" | tee -a "$LOG_FILE" >&2
-printf "%-8s  %-9s  %-9s  %-9s  %-9s  %-9s  %s\n" "Query" "Plan(s)" "KBuild(s)" "LLVM(s)" "Exec(s)" "Cpu(s)" "Status"
+printf "%-8s  %-9s  %-9s  %-9s  %-9s  %-9s  %s\n" "Query" "Plan(s)" "KBuild(s)" "JIT(s)" "Exec(s)" "Cpu(s)" "Status"
 printf "%-8s  %-9s  %-9s  %-9s  %-9s  %-9s  %s\n" "------" "-------" "---------" "-------" "-------" "------" "------"
 
 total_s="0"
 cpu_s="0"
 plan_s="0"
 build_s="0"
-llvm_s="0"
+jit_s="0"
 failed=0
 skipped=0
 
@@ -124,20 +124,20 @@ for query in "$SQL_DIR"/q*.sql; do
         continue
     fi
 
-    read -r seconds cpu plan build llvm rc <<< "$(run_query "$base" \
+    read -r seconds cpu plan build jit rc <<< "$(run_query "$base" \
         ${EXTRA_QDB_ARGS[@]+"${EXTRA_QDB_ARGS[@]}"} --sql -i "$query" --data "$DATA_DIR")"
 
     total_s=$(python3 -c "print(round($total_s + $seconds, 3))")
     cpu_s=$(python3 -c "print(round($cpu_s + $cpu, 3))")
     plan_s=$(python3 -c "print(round($plan_s + $plan, 3))")
     build_s=$(python3 -c "print(round($build_s + $build, 3))")
-    llvm_s=$(python3 -c "print(round($llvm_s + $llvm, 3))")
+    jit_s=$(python3 -c "print(round($jit_s + $jit, 3))")
 
     if [[ $rc -eq 0 ]]; then status="OK"; else status="FAILED"; (( failed++ )) || true; fi
-    printf "%-8s  %-9s  %-9s  %-9s  %-9s  %-9s  %s\n" "$base" "$plan" "$build" "$llvm" "$seconds" "$cpu" "$status"
-    echo "[qdb] $base plan=${plan}s kbuild=${build}s llvm=${llvm}s exec=${seconds}s cpu=${cpu}s $status" >> "$LOG_FILE"
+    printf "%-8s  %-9s  %-9s  %-9s  %-9s  %-9s  %s\n" "$base" "$plan" "$build" "$jit" "$seconds" "$cpu" "$status"
+    echo "[qdb] $base plan=${plan}s kbuild=${build}s jit=${jit}s exec=${seconds}s cpu=${cpu}s $status" >> "$LOG_FILE"
 done
 
 printf "Total (processing): %ss,  Cpu: %ss,  Failed: %s,  Skipped: %s\n" "$total_s" "$cpu_s" "$failed" "$skipped"
-printf "Compile (excluded from processing): plan=%ss  kbuild=%ss  llvm=%ss\n" "$plan_s" "$build_s" "$llvm_s"
+printf "Compile (excluded from processing): plan=%ss  kbuild=%ss  jit=%ss\n" "$plan_s" "$build_s" "$jit_s"
 echo "[qdb] log: $LOG_FILE  results: $RESULT_FILE" >&2
