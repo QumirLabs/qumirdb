@@ -104,6 +104,29 @@ std::string FunctionSignatureKey(const TFunDecl &fun) {
   return key;
 }
 
+// A library function is a clone of the one parse of its .oz file in the query, and no clone
+// is edited differently before the fusion, so its file, name and signature key its text.
+std::string FunctionKey(const NQumir::TIntrusivePtr<TFunDecl> &fun,
+                        const std::string &signature) {
+  if (!fun->Origin) {
+    return PrintDecl(fun);
+  }
+  std::string key = "library:";
+  AppendKeyPart(key, *fun->Origin);
+  AppendKeyPart(key, fun->Name);
+  AppendKeyPart(key, signature);
+  return key;
+}
+
+// A kernel function with the keys that compare it with the functions of the other kernels.
+struct TKeyedFunction {
+  NQumir::TIntrusivePtr<TFunDecl> Fun;
+  std::string Signature;
+  std::string Key;
+};
+
+using TFunctionGroups = std::unordered_map<std::string, std::vector<TKeyedFunction>>;
+
 std::string TypeDeclName(const TTypeDeclStmt &typeDecl) {
   if (auto named = TMaybeType<TNamedType>(typeDecl.Type)) {
     return named.Cast()->Name;
@@ -203,8 +226,7 @@ private:
                        std::unordered_map<std::string, std::string> &renames,
                        std::unordered_set<TExpr *> &includeFunctions) {
     std::vector<std::string> names;
-    std::unordered_map<std::string, std::vector<NQumir::TIntrusivePtr<TFunDecl>>>
-        groups;
+    TFunctionGroups groups;
     for (const auto &stmt : block.Stmts) {
       auto fun = TMaybeNode<TFunDecl>(stmt);
       if (!fun) {
@@ -214,7 +236,10 @@ private:
       if (!groups.contains(name)) {
         names.push_back(name);
       }
-      groups[name].emplace_back(fun.Cast());
+      NQumir::TIntrusivePtr<TFunDecl> decl(fun.Cast());
+      auto signature = FunctionSignatureKey(*decl);
+      auto key = FunctionKey(decl, signature);
+      groups[name].push_back({std::move(decl), std::move(signature), std::move(key)});
     }
 
     auto renameNames = FunctionNamesToRename(names, groups, entrypoints);
@@ -232,7 +257,7 @@ private:
         renames.emplace(name, outputName);
         outputs.emplace(name, std::move(outputName));
         for (const auto &fun : groups.at(name)) {
-          includeFunctions.insert(fun.Get());
+          includeFunctions.insert(fun.Fun.Get());
         }
       }
       RenamedComponents_.emplace(key, std::move(outputs));
@@ -245,14 +270,12 @@ private:
       }
 
       for (const auto &fun : functions) {
-        const std::string signature = FunctionSignatureKey(*fun);
-        const std::string key = PrintDecl(fun);
         auto &knownBySignature = Functions_[name];
-        auto known = knownBySignature.find(signature);
+        auto known = knownBySignature.find(fun.Signature);
         if (known == knownBySignature.end()) {
-          knownBySignature.emplace(signature, key);
-          includeFunctions.insert(fun.Get());
-        } else if (known->second != key) {
+          knownBySignature.emplace(fun.Signature, fun.Key);
+          includeFunctions.insert(fun.Fun.Get());
+        } else if (known->second != fun.Key) {
           throw std::runtime_error("function conflict was not renamed: " +
                                    name);
         }
@@ -261,9 +284,7 @@ private:
   }
 
   std::unordered_set<std::string> FunctionNamesToRename(
-      const std::vector<std::string> &names,
-      const std::unordered_map<std::string,
-                               std::vector<NQumir::TIntrusivePtr<TFunDecl>>> &groups,
+      const std::vector<std::string> &names, const TFunctionGroups &groups,
       const std::vector<std::string> &entrypoints) const {
     std::unordered_set<std::string> localNames(names.begin(), names.end());
     std::unordered_map<std::string, std::unordered_set<std::string>>
@@ -271,7 +292,7 @@ private:
     for (const auto &name : names) {
       auto &calls = callsByName[name];
       for (const auto &fun : groups.at(name)) {
-        CollectLocalCalls(fun, localNames, calls);
+        CollectLocalCalls(fun.Fun, localNames, calls);
       }
     }
 
@@ -308,9 +329,7 @@ private:
   }
 
   std::vector<std::vector<std::string>> RenameComponents(
-      const std::vector<std::string> &names,
-      const std::unordered_map<std::string,
-                               std::vector<NQumir::TIntrusivePtr<TFunDecl>>> &groups,
+      const std::vector<std::string> &names, const TFunctionGroups &groups,
       const std::unordered_set<std::string> &renameNames) const {
     std::unordered_set<std::string> localNames(names.begin(), names.end());
     std::unordered_map<std::string, std::unordered_set<std::string>> adjacent;
@@ -318,7 +337,7 @@ private:
       adjacent[name];
       std::unordered_set<std::string> calls;
       for (const auto &fun : groups.at(name)) {
-        CollectLocalCalls(fun, localNames, calls);
+        CollectLocalCalls(fun.Fun, localNames, calls);
       }
       for (const auto &callee : calls) {
         if (!renameNames.contains(callee)) {
@@ -353,10 +372,8 @@ private:
     return components;
   }
 
-  std::string RenamedComponentKey(
-      const std::vector<std::string> &component,
-      const std::unordered_map<
-          std::string, std::vector<NQumir::TIntrusivePtr<TFunDecl>>> &groups) const {
+  std::string RenamedComponentKey(const std::vector<std::string> &component,
+                                  const TFunctionGroups &groups) const {
     std::string key;
     for (const auto &name : component) {
       AppendKeyPart(key, name);
@@ -364,8 +381,8 @@ private:
       variants.reserve(groups.at(name).size());
       for (const auto &fun : groups.at(name)) {
         std::string variant;
-        AppendKeyPart(variant, FunctionSignatureKey(*fun));
-        AppendKeyPart(variant, PrintDecl(fun));
+        AppendKeyPart(variant, fun.Signature);
+        AppendKeyPart(variant, fun.Key);
         variants.push_back(std::move(variant));
       }
       std::ranges::sort(variants);
@@ -378,24 +395,22 @@ private:
 
   bool MustRenameFunctionGroup(
       const std::string &name,
-      const std::vector<NQumir::TIntrusivePtr<TFunDecl>> &functions) const {
+      const std::vector<TKeyedFunction> &functions) const {
     std::unordered_map<std::string, std::string> local;
     for (const auto &fun : functions) {
-      const std::string signature = FunctionSignatureKey(*fun);
-      const std::string key = PrintDecl(fun);
-      auto localKnown = local.find(signature);
-      if (localKnown != local.end() && localKnown->second != key) {
+      auto localKnown = local.find(fun.Signature);
+      if (localKnown != local.end() && localKnown->second != fun.Key) {
         throw std::runtime_error(
             "one kernel has conflicting overloads for function '" + name + "'");
       }
-      local.emplace(signature, key);
+      local.emplace(fun.Signature, fun.Key);
 
       auto byName = Functions_.find(name);
       if (byName == Functions_.end()) {
         continue;
       }
-      auto bySignature = byName->second.find(signature);
-      if (bySignature != byName->second.end() && bySignature->second != key) {
+      auto bySignature = byName->second.find(fun.Signature);
+      if (bySignature != byName->second.end() && bySignature->second != fun.Key) {
         return true;
       }
     }
@@ -452,9 +467,15 @@ private:
 } // namespace
 
 std::string MakeKernelDedupKey(const TGeneratedKernel &kernel) {
-  std::string key = NCore::PrintAst(kernel.Ast, NCore::TPrintOptions {
-    .Pretty = false
-  });
+  std::string key;
+  for (const auto &stmt : TMaybeNode<TBlockExpr>(kernel.Ast).Cast()->Stmts) {
+    if (auto fun = TMaybeNode<TFunDecl>(stmt)) {
+      NQumir::TIntrusivePtr<TFunDecl> decl(fun.Cast());
+      AppendKeyPart(key, FunctionKey(decl, FunctionSignatureKey(*decl)));
+    } else {
+      AppendKeyPart(key, PrintDecl(stmt));
+    }
+  }
   key += "\n# qdb-kernel-entrypoints\n";
   for (const auto &entrypoint : kernel.Entrypoints) {
     key += std::to_string(entrypoint.size());
