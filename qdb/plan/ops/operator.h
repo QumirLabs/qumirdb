@@ -36,7 +36,9 @@ struct IOperator : NQumir::NAst::TExpr {
     // Type: TFunctionType : (TStructType) -> TStructType
     static constexpr NQumir::NAst::TExprNodeId NodeId{"Rel"};
     TStatsPtr Stats_;
-    IOperator() : NQumir::NAst::TExpr(NodeId) {}
+    IOperator()
+        : NQumir::NAst::TExpr(NodeId)
+    {}
     // The relation yields at most one row: SQL gives a scalar subquery a value
     // only then. Row estimates take it as a bound.
     bool AtMostOneRow = false;
