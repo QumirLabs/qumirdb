@@ -18,8 +18,8 @@ namespace NQdb::NKernel {
 
 // The source modules every query may use, qumirdb.oz and row_group_interval.oz, and the kernel
 // libraries, parsed once into a frozen base factory with QumirDB's named types. A process builds
-// one base and passes it to its queries. The base and its ASTs are used only from the compiling
-// thread: TExpr reference counts are not atomic.
+// one base and passes it to its queries. The base is read without synchronization: TExpr
+// reference counts are not atomic, so queries sharing a base must not compile in parallel threads.
 class TModuleBase {
 public:
     // Nothing in the base changes after it is built.

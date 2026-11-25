@@ -3049,7 +3049,14 @@ int RunPlanExport(int argc, char** argv) {
         return 2;
     }
 
-    auto request = ParseRequest(ReadAllStdin(), std::make_shared<const NKernel::TModuleBase>());
+    std::shared_ptr<const NKernel::TModuleBase> base;
+    try {
+        base = std::make_shared<const NKernel::TModuleBase>();
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << "\n";
+        return 1;
+    }
+    auto request = ParseRequest(ReadAllStdin(), std::move(base));
     if (!request) {
         return PrintError("request", request.error());
     }
