@@ -211,7 +211,7 @@ TEST(QueryCompiler, QueriesShareTheModuleBase) {
     EXPECT_TRUE(NodeStates(base.Ast) == states);
 }
 
-// A query parses each kernel library once and gives every kernel a clone, so compiling the
+// The base parses each kernel library once and every kernel gets a clone, so compiling the
 // kernels leaves the parse unresolved for the next one.
 TEST(QueryCompiler, KernelsCompileClonesOfTheLibraries) {
     TFixture fixture;
@@ -238,26 +238,30 @@ TEST(QueryCompiler, KernelsCompileClonesOfTheLibraries) {
     }
 }
 
-// The next query parses the library again: it never inherits the previous query's clones or cache.
-TEST(QueryCompiler, NextQueryParsesTheLibraryAgain) {
-    TFixture fixture;
-    auto query = fixture.Parse("SELECT value, count(*) FROM items GROUP BY value;");
-    ASSERT_TRUE(query) << query.error().ToString();
-    auto first = fixture.Compiler.Prepare(query->Statements[0]);
-    ASSERT_TRUE(first) << first.error().ToString();
-    ASSERT_TRUE(*first);
-    auto second = fixture.Compiler.Prepare(query->Statements[0]);
-    ASSERT_TRUE(second) << second.error().ToString();
-    ASSERT_TRUE(*second);
-    auto* firstModules = (**first).Annotation.Modules.get();
-    auto* secondModules = (**second).Annotation.Modules.get();
-    ASSERT_NE(firstModules, secondModules);
-    auto a = firstModules->KernelLibrary("aggregation", "swiss_group.oz");
-    auto b = secondModules->KernelLibrary("aggregation", "swiss_group.oz");
-    ASSERT_TRUE(a) << a.error().ToString();
-    ASSERT_TRUE(b) << b.error().ToString();
-    ASSERT_EQ(a->size(), b->size());
-    EXPECT_NE(a->front().Get(), b->front().Get());
+// Every query clones the base's parse of a kernel library instead of parsing it again.
+// runtime_filter.oz declares types of its own, and a parse makes them in the factory it parses
+// into: two queries, each with its own factory, get the same type objects from one parse.
+TEST(QueryCompiler, QueriesCloneOneParseOfALibrary) {
+    TFixture first;
+    TFixture second;
+    std::vector<std::vector<NQumir::NAst::TExprPtr>> libraries;
+    for (auto* fixture : {&first, &second}) {
+        auto query = fixture->Parse("SELECT value, count(*) FROM items GROUP BY value;");
+        ASSERT_TRUE(query) << query.error().ToString();
+        auto prepared = fixture->Compiler.Prepare(query->Statements[0]);
+        ASSERT_TRUE(prepared) << prepared.error().ToString();
+        ASSERT_TRUE(*prepared);
+        auto library = (**prepared).Annotation.Modules->KernelLibrary("join", "runtime_filter.oz");
+        ASSERT_TRUE(library) << library.error().ToString();
+        libraries.push_back(std::move(*library));
+    }
+    const auto& a = libraries[0];
+    const auto& b = libraries[1];
+    ASSERT_EQ(a.size(), b.size());
+    for (size_t i = 0; i < a.size(); ++i) {
+        EXPECT_NE(a[i].Get(), b[i].Get()) << i;
+        EXPECT_EQ(a[i]->Type, b[i]->Type) << i;
+    }
 }
 
 TEST(QueryCompiler, ModuleOutsideTheBaseIsAnError) {
