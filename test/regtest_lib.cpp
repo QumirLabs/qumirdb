@@ -249,7 +249,7 @@ std::pair<TTypePtr, bool> FieldType(const TTypePtr& type) {
 
 std::shared_ptr<arrow::DataType> ArrowType(const TTypePtr& type) {
     if (auto integer = TMaybeType<TIntegerType>(type)) {
-        switch (integer.Cast()->Kind) {
+        switch (integer.Cast()->Width) {
             case TIntegerType::I8: return arrow::int8();
             case TIntegerType::I16: return arrow::int16();
             case TIntegerType::I32: return arrow::int32();
@@ -1120,7 +1120,7 @@ TValue Cell(const TColumn& column, int64_t row, const TTypePtr& type) {
     }
     if (IsDateType(valueType)) return FormatDate(DateCellDays(column.Data, row, valueType));
     if (auto integer = TMaybeType<TIntegerType>(valueType)) {
-        switch (integer.Cast()->Kind) {
+        switch (integer.Cast()->Width) {
             case TIntegerType::I8: return reinterpret_cast<const int8_t*>(column.Data)[row];
             case TIntegerType::I16: return reinterpret_cast<const int16_t*>(column.Data)[row];
             case TIntegerType::I32: return reinterpret_cast<const int32_t*>(column.Data)[row];

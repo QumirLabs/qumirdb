@@ -211,7 +211,7 @@ struct TSqlPrinter {
                 }
                 const std::string& text = it->second;
                 auto& out = p.GetOut();
-                out << "(subquery " << KindName(sub.Kind);
+                out << "(subquery " << KindName(sub.Form);
                 if (sub.Operand) {
                     out << ' ';
                     p.PrintExpr(sub.Operand, false, frame.Level);

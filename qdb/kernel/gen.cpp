@@ -312,7 +312,7 @@ NQumir::NAst::TExprPtr HashKeyValue(
         const std::string name = "key_hash_" + std::to_string(nextTemporary++);
         body.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, name, u64Type));
         auto unsignedType = types.MakeInteger(
-            UnsignedIntegerKind(integer.Cast()->Kind));
+            UnsignedIntegerKind(integer.Cast()->Width));
         auto bits = NQumir::MakeIntrusive<TCastExpr>(
             loc, KeyValueExpr(root, path), std::move(unsignedType));
         assign(name, NQumir::MakeIntrusive<TCastExpr>(loc, std::move(bits), u64Type));
@@ -1169,7 +1169,7 @@ NQumir::NAst::TExprPtr CloneFilterExpr(NQumir::NAst::TTypeFactory& types, const 
     } else {
         throw std::runtime_error(
             "residual filter: cannot clone predicate node '" +
-            std::string(expr->NodeName()) + "'");
+            expr->Kind.ToString() + "'");
     }
     out->Type = expr->Type;
     return out;

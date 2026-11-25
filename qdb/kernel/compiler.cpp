@@ -346,10 +346,10 @@ NQumir::NAst::TTypePtr SortCoreType(NQumir::NAst::TTypeFactory& types, const NQu
     using namespace NQumir::NAst;
     auto valueType = PhysicalValueType(types, type);
     if (auto integer = MaybeIntegerType(valueType)) {
-        return types.MakeInteger(integer.Cast()->Kind);
+        return types.MakeInteger(integer.Cast()->Width);
     }
     if (auto floating = TMaybeType<TFloatType>(valueType)) {
-        return types.MakeFloat(floating.Cast()->Kind);
+        return types.MakeFloat(floating.Cast()->Width);
     }
     return nullptr;
 }

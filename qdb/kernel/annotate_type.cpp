@@ -649,7 +649,7 @@ bool IsNumber(const TTypePtr& type) {
 
 bool IsReal(const TTypePtr& t) {
     auto floating = TMaybeType<TFloatType>(t);
-    return floating && floating.Cast()->Kind == TFloatType::F32;
+    return floating && floating.Cast()->Width == TFloatType::F32;
 }
 
 // One operand REAL and the other another number (value types). PostgreSQL has REAL
@@ -1163,7 +1163,7 @@ TTypePtr DateBinaryValueType(NQumir::NAst::TTypeFactory& types, TOperator op, co
         const auto right = rightMaybe.Cast();
         const bool leftDate = IsDateType(vl);
         const bool rightDate = IsDateType(vr);
-        const auto wider = left->BitWidth() > right->BitWidth() ? left->Kind : right->Kind;
+        const auto wider = left->BitWidth() > right->BitWidth() ? left->Width : right->Width;
         if (leftDate && rightDate && op == "-") {
             return types.MakeInteger(wider);
         }
@@ -1610,7 +1610,7 @@ std::optional<TNumericConstant> NumericConstant(const TExprPtr& e) {
         if (!target || !operand) {
             return std::nullopt;
         }
-        const bool single = target.Cast()->Kind == TFloatType::F32;
+        const bool single = target.Cast()->Width == TFloatType::F32;
         return std::visit([single](auto v) {
             return single ? TNumericConstant{static_cast<float>(v)}
                           : TNumericConstant{static_cast<double>(v)};

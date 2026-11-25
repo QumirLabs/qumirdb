@@ -128,7 +128,7 @@ TExprPtr CloneExpr(const TExprPtr& expr) {
     } else {
         throw NQumir::TError(
             "CloneExpr: unsupported node type " +
-            std::string(expr->NodeName()));
+            expr->Kind.ToString());
     }
     result->Type = expr->Type;
     return result;

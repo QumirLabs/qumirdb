@@ -624,7 +624,7 @@ std::optional<TLocation> FindTooDeep(const TSqlNodePtr& statement, const TLocati
             }
         }
         // The only bridge from an expression back into SQL clauses.
-        if (item.Expr->NodeName() == TSubqueryExpr::NodeId) {
+        if (item.Expr->Kind == TSubqueryExpr::NodeId) {
             const auto& subquery = static_cast<const TSubqueryExpr&>(*item.Expr);
             if (subquery.Query) {
                 stack.push_back({.Clause = subquery.Query.get(), .Depth = depth});

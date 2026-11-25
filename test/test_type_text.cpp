@@ -97,7 +97,7 @@ TEST(TypeText, ParsesQdbTypes) {
 
     const auto* storage = DateStorageType(Parse("<named DATE [i64]>"));
     ASSERT_TRUE(storage);
-    EXPECT_EQ(storage->Kind, TIntegerType::I64);
+    EXPECT_EQ(storage->Width, TIntegerType::I64);
 }
 
 // A kernel compilation completes Nullable [T] with its qumirdb.oz struct; plan text

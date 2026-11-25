@@ -224,7 +224,7 @@ TEST(SqlBinding, FloatTypeNamesFollowPostgreSql) {
         ASSERT_TRUE(cast);
         auto type = NQumir::NAst::TMaybeType<TFloatType>(cast.Cast()->Type);
         ASSERT_TRUE(type);
-        EXPECT_EQ(type.Cast()->Kind, kind);
+        EXPECT_EQ(type.Cast()->Width, kind);
     }
     for (const auto* sql : {
         "SELECT CAST(x AS FLOAT(0)) FROM t", "SELECT CAST(x AS FLOAT(54)) FROM t",

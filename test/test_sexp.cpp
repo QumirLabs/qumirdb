@@ -216,7 +216,7 @@ TEST(SexpParser, Filter) {
     auto expr = Parse(p, "(rel filter (rel source \"data.parquet\") (> x 5))");
     ASSERT_NE(expr, nullptr);
 
-    EXPECT_EQ(expr->NodeName(), IOperator::NodeId);
+    EXPECT_EQ(expr->Kind, IOperator::NodeId);
     EXPECT_EQ(static_cast<IOperator&>(*expr).RelName(), TFilterOperator::OpId);
 
     auto& filt = static_cast<TFilterOperator&>(*expr);

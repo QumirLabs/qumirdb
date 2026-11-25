@@ -46,12 +46,12 @@ bool IsFloatType(const TTypePtr& t) {
 TTypePtr UnifyIntegers(NQumir::NAst::TTypeFactory& types, const TIntegerType& a, const TIntegerType& b) {
     using EKind = TIntegerType::EKind;
     if (a.IsSigned() == b.IsSigned()) {
-        return types.MakeInteger(a.BitWidth() >= b.BitWidth() ? a.Kind : b.Kind);
+        return types.MakeInteger(a.BitWidth() >= b.BitWidth() ? a.Width : b.Width);
     }
     const auto& sig = a.IsSigned() ? a : b;
     const auto& uns = a.IsSigned() ? b : a;
     if (sig.BitWidth() > uns.BitWidth()) {
-        return types.MakeInteger(sig.Kind);
+        return types.MakeInteger(sig.Width);
     }
     switch (uns.BitWidth()) {
         case 8: return types.MakeInteger(EKind::I16);

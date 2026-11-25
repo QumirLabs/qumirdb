@@ -81,7 +81,7 @@ std::map<std::string, TFields> MergedSchemas(TTypeFactory& types) {
 
 std::shared_ptr<arrow::DataType> ArrowType(const TTypePtr& type) {
     if (auto integer = MaybeIntegerType(type)) {
-        switch (integer.Cast()->Kind) {
+        switch (integer.Cast()->Width) {
             case TIntegerType::I8: return arrow::int8();
             case TIntegerType::I16: return arrow::int16();
             case TIntegerType::I32: return arrow::int32();

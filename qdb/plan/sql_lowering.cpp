@@ -124,7 +124,7 @@ bool IsStddevSupportedType(const NAst::TTypePtr& type) {
 bool IsFloatWidth(const NAst::TTypePtr& type, NAst::TFloatType::EKind kind) {
     auto floating = NAst::TMaybeType<NAst::TFloatType>(
         UnwrapNamedValueType(UnwrapNullableType(type)));
-    return floating && floating.Cast()->Kind == kind;
+    return floating && floating.Cast()->Width == kind;
 }
 
 // sum, min and max of REAL are REAL, as in PostgreSQL: the reducers keep an f64 state,
