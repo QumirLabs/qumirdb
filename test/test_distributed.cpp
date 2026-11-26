@@ -849,15 +849,19 @@ private:
 // A port nobody listens on now, as test_qdbd_cli.py picks them.
 int FreePort() {
     const int fd = ::socket(AF_INET6, SOCK_STREAM, 0);
+    if (fd < 0) {
+        throw std::runtime_error("cannot pick a free port");
+    }
     sockaddr_in6 address{};
     address.sin6_family = AF_INET6;
     socklen_t size = sizeof(address);
-    if (fd < 0 || ::bind(fd, reinterpret_cast<sockaddr*>(&address), size) != 0
-        || ::getsockname(fd, reinterpret_cast<sockaddr*>(&address), &size) != 0)
-    {
+    const bool bound =
+        ::bind(fd, reinterpret_cast<sockaddr*>(&address), size) == 0 &&
+        ::getsockname(fd, reinterpret_cast<sockaddr*>(&address), &size) == 0;
+    ::close(fd);
+    if (!bound) {
         throw std::runtime_error("cannot pick a free port");
     }
-    ::close(fd);
     return ntohs(address.sin6_port);
 }
 
@@ -3800,7 +3804,7 @@ struct TQueryCluster {
         }
         const auto deadline = NNet::TClock::now() + std::chrono::seconds(2);
         do {
-            Cluster.Spawn(2);
+            ASSERT_NO_FATAL_FAILURE(Cluster.Spawn(2));
         } while (Cluster.Responses.back().ActorIds.size() < 2 && NNet::TClock::now() < deadline);
         ASSERT_EQ(Cluster.Responses.back().ActorIds.size(), 2u);
         LeaderActors = Cluster.Leader.ActorsSize();
@@ -3981,7 +3985,8 @@ int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     std::vector<std::string> overrides;
     for (int i = 1; i < argc; ++i) {
-        if (!NQdb::NUtils::IsConfigOverride(argv[i])) {
+        // The only engine setting the tests read; any other would be silently ignored.
+        if (!std::string_view(argv[i]).starts_with("--net:io_threads=")) {
             std::cerr << "Unknown argument: " << argv[i] << "\n";
             return 1;
         }

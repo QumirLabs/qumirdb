@@ -202,7 +202,9 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
     }
 
     const auto httpListenAddress = httpListenSocket->LocalAddr()->ToString();
-    const auto actorSysListenAddress = io ? actorSysAddress.ToString() : actorSysListenSocket->LocalAddr()->ToString();
+    const auto actorSysListenAddress = io
+        ? actorSysAddress.ToString()
+        : actorSysListenSocket->LocalAddr()->ToString();
 
     auto logger = [](const std::string& msg) {
         std::cerr << "[QumirDB] " << msg << "\n";
