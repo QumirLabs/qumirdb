@@ -82,7 +82,6 @@ void PrintUsage(std::ostream& out, const char* program)
         << "  --config path         engine config file\n"
         << "  --section:key=value   engine config override\n"
         << "                        --net:poller=name network poller, one of: " << AvailablePollers << " (default auto)\n"
-        << "                        --net:envelope_reader=name inbound frame reader, one of: " << EnvelopeReaderNames << " (default v1)\n"
         << "  --help                print this text\n";
 }
 
@@ -196,12 +195,7 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
     server.Start();
 
     // V2 leaves payloads in its read chunks, so received TDataChunk row sets point into them.
-    const bool v2 = EngineSettings.EnvelopeReader == EEnvelopeReader::V2;
-    if (v2) {
-        sys.Serve<TSocket, TZeroCopyEnvelopeReaderV2>(std::move(*actorSysListenSocket));
-    } else {
-        sys.Serve<TSocket, TZeroCopyEnvelopeReader>(std::move(*actorSysListenSocket));
-    }
+    sys.Serve<TSocket, TZeroCopyEnvelopeReaderV2>(std::move(*actorSysListenSocket));
 
     TTimeSource timeSource;
     sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::Scheduler), IActor::TPtr(CreateSchedulerActor(&timeSource, leaderId, logger)));
@@ -210,7 +204,6 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
     sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::LocalScheduler), IActor::TPtr(CreateLocalScheduler(leaderId, pingPeriodMs, EngineSettings.Scheduler.Scheduler, EngineSettings.Scheduler.Transport, tablesCache)));
 
     std::cerr << "QumirDB poller: " << pollerName << "\n";
-    std::cerr << "QumirDB envelope reader: " << (v2 ? "v2" : "v1") << "\n";
     std::cerr << "QumirDB listening on " << httpListenAddress << ", " << actorSysListenAddress << "\n";
     loop.Loop();
 
