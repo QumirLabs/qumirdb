@@ -9,6 +9,7 @@
 #include <qdbd/actors/local_scheduler.h>
 #include <qdbd/actors/scheduler.h>
 #include <qdbd/http/router.h>
+#include <qdbd/io_threads.h>
 #include <qdbd/partitioner/partitioner.h>
 #include <qdbd/scheduler/remote_task.h>
 #include <qdb/catalog/external_module.h>
@@ -25,6 +26,7 @@
 #include <qdb/scheduler/connections/local.h>
 #include <qdb/scheduler/lowering/plan_lowerer.h>
 #include <qdb/scheduler/spec/graph_spec.h>
+#include <qdb/scheduler/settings/engine_settings.h>
 #include <qdb/scheduler/tasks/cte_spool.h>
 #include <qdb/sql/parser.h>
 
@@ -55,6 +57,10 @@
 #include <vector>
 #include <thread>
 #include <unordered_set>
+
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 namespace {
 
@@ -840,27 +846,54 @@ private:
     std::shared_ptr<TWorkerState> State_;
 };
 
+// A port nobody listens on now, as test_qdbd_cli.py picks them.
+int FreePort() {
+    const int fd = ::socket(AF_INET6, SOCK_STREAM, 0);
+    sockaddr_in6 address{};
+    address.sin6_family = AF_INET6;
+    socklen_t size = sizeof(address);
+    if (fd < 0 || ::bind(fd, reinterpret_cast<sockaddr*>(&address), size) != 0
+        || ::getsockname(fd, reinterpret_cast<sockaddr*>(&address), &size) != 0)
+    {
+        throw std::runtime_error("cannot pick a free port");
+    }
+    ::close(fd);
+    return ntohs(address.sin6_port);
+}
+
+// Set by --net:io_threads=N: the query tests then run over loopback sockets with the
+// transport of qdbd for N, instead of through memory.
+std::optional<uint32_t> QueryIoThreads;
+
 struct TTestCluster {
     NNet::TLoop<NNet::TDefaultPoller> Loop;
     TFakeTimeSource Clock;
     std::vector<TSpawnComputeActorResponse> Responses;
     std::vector<TActorId> Requests;
     std::map<std::string, std::shared_ptr<TWorkerState>> Workers;
+    // The socket transport; the actor systems own its nodes, so they are declared after it.
+    TMessagesFactory Factory;
+    std::optional<NNet::TResolver> Resolver;
+    std::vector<std::unique_ptr<IIoThreads>> IoThreads;
     TActorSystem Leader;
     TActorSystem Follower;
     TActorId LeaderScheduler;
     TActorId FollowerScheduler;
     TActorId Client;
 
-    explicit TTestCluster(TNodeId leaderId = 2)
+    explicit TTestCluster(TNodeId leaderId = 2, std::optional<uint32_t> ioThreads = std::nullopt)
         : Leader(&Loop.Poller(), leaderId)
         , Follower(&Loop.Poller(), leaderId == 1 ? 2 : 1)
     {
         Loop.Poller().SetMaxDuration(std::chrono::milliseconds(0));
-        Leader.AddNode(leaderId == 1 ? 2 : 1, std::make_unique<TMemoryNode>(Follower));
-        Follower.AddNode(leaderId, std::make_unique<TMemoryNode>(Leader));
-        Leader.Serve();
-        Follower.Serve();
+        if (ioThreads) {
+            ConnectBySockets(leaderId, *ioThreads);
+        } else {
+            Leader.AddNode(leaderId == 1 ? 2 : 1, std::make_unique<TMemoryNode>(Follower));
+            Follower.AddNode(leaderId, std::make_unique<TMemoryNode>(Leader));
+            Leader.Serve();
+            Follower.Serve();
+        }
         auto logger = [](const std::string&) {};
         LeaderScheduler = Leader.RegisterWellKnown(
             static_cast<TLocalActorId>(EWellKnownActors::Scheduler),
@@ -869,6 +902,55 @@ struct TTestCluster {
             static_cast<TLocalActorId>(EWellKnownActors::Scheduler),
             std::unique_ptr<IActor>(CreateSchedulerActor(&Clock, leaderId, logger)));
         Client = Follower.Register(std::make_unique<TResponseProbe>(Responses));
+    }
+
+    ~TTestCluster() {
+        // The inbound sides deliver to the actor systems, so they go first.
+        for (auto& io : IoThreads) {
+            io->Stop();
+        }
+    }
+
+    // As qdbd connects its nodes for net:io_threads = `ioThreads`.
+    void ConnectBySockets(TNodeId leaderId, uint32_t ioThreads) {
+        using TSocket = NNet::TDefaultPoller::TSocket;
+        RegisterMessages(Factory);
+        Resolver.emplace(Loop.Poller());
+        const std::array<TActorSystem*, 2> systems{&Leader, &Follower};
+        const std::array<TNodeId, 2> ids{leaderId, static_cast<TNodeId>(leaderId == 1 ? 2 : 1)};
+        const std::array<int, 2> ports{FreePort(), FreePort()};
+        // Both listen before either connects, so no connect waits for the reconnect back-off.
+        std::array<std::optional<TSocket>, 2> listeners;
+        for (size_t i = 0; i < 2; ++i) {
+            const NNet::TAddress address{"::", ports[i]};
+            if (ioThreads == 0) {
+                listeners[i].emplace(Loop.Poller(), address.Domain());
+                listeners[i]->Bind(address);
+                listeners[i]->Listen();
+            } else {
+                IoThreads.emplace_back(MakeIoThreads<NNet::TDefaultPoller>(ioThreads));
+                IoThreads[i]->ServeInbound(*systems[i], ids[i], address);
+            }
+        }
+        for (size_t i = 0; i < 2; ++i) {
+            auto& system = *systems[i];
+            const NNet::THostPort peer("127.0.0.1", ports[1 - i]);
+            if (ioThreads == 0) {
+                system.AddNode(ids[1 - i], std::make_unique<TNode<NNet::TDefaultPoller>>(
+                    Loop.Poller(), Factory, *Resolver,
+                    [this](const NNet::TAddress& addr) {
+                        return TSocket(Loop.Poller(), addr.Domain());
+                    },
+                    peer));
+                system.Serve<TSocket, TZeroCopyEnvelopeReaderV2>(std::move(*listeners[i]));
+            } else {
+                system.AddNode(ids[1 - i], IoThreads[i]->MakeNode(Factory, peer));
+                system.ServeOutbound();
+            }
+        }
+        for (auto& io : IoThreads) {
+            io->Start();
+        }
     }
 
     void Pump() {
@@ -3698,7 +3780,7 @@ namespace {
 // Query actors over the two nodes of a test cluster, one compute actor on each.
 struct TQueryCluster {
     NQdb::NScheduler::TSettings Settings;
-    TTestCluster Cluster;
+    TTestCluster Cluster{2, QueryIoThreads};
     size_t LeaderActors = 0;
 
     TQueryCluster() {
@@ -3739,8 +3821,11 @@ struct TQueryCluster {
         while (!answer && NNet::TClock::now() < deadline) {
             Cluster.Pump();
         }
-        // The query stops its compute actors.
-        Cluster.Pump();
+        // The query stops its compute actors; over sockets the stops take a few steps.
+        const auto stopDeadline = NNet::TClock::now() + std::chrono::seconds(10);
+        do {
+            Cluster.Pump();
+        } while (Cluster.Leader.ActorsSize() != LeaderActors && NNet::TClock::now() < stopDeadline);
         EXPECT_EQ(Cluster.Leader.ActorsSize(), LeaderActors);
         Cluster.Follower.Send<TPoison>(client, client, TPoison{});
         return answer;
@@ -3894,6 +3979,24 @@ TEST(DistributedScheduler, QueryActorRunsCtesAcrossNodes) {
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
+    std::vector<std::string> overrides;
+    for (int i = 1; i < argc; ++i) {
+        if (!NQdb::NUtils::IsConfigOverride(argv[i])) {
+            std::cerr << "Unknown argument: " << argv[i] << "\n";
+            return 1;
+        }
+        overrides.emplace_back(argv[i] + 2);
+    }
+    NQdb::NUtils::TConfig config(NQdb::EngineConfigSchema());
+    if (auto loaded = NQdb::LoadEngineConfig(config, {}, std::nullopt, overrides); !loaded) {
+        std::cerr << loaded.error() << "\n";
+        return 1;
+    }
+    if (config.IsSet("net", "io_threads")) {
+        NQdb::TEngineSettings settings;
+        NQdb::ApplyEngineConfig(config, settings);
+        QueryIoThreads = settings.IoThreads;
+    }
     NQumir::NCodeGen::TLLVMInitializer initializer;
     return RUN_ALL_TESTS();
 }

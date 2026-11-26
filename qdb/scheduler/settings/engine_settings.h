@@ -23,6 +23,7 @@ struct TEngineSettings {
     EArrowMemoryPool ArrowMemoryPool = EArrowMemoryPool::Auto;
     // Read by qdbd only.
     EPollerBackend Poller = EPollerBackend::Auto;
+    uint32_t IoThreads = 0;
 };
 
 // The one table of settings the config accepts: every section and key with its

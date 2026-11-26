@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -57,8 +58,14 @@ public:
 
     // An unsigned field; the bounds are the schema's.
     template <class TAccess>
-    void Size(std::string key, TAccess field, std::string description, int64_t min = 0) {
-        Schema.Int(key, static_cast<int64_t>(field(Defaults_)), std::move(description), min);
+    void Size(
+        std::string key,
+        TAccess field,
+        std::string description,
+        int64_t min = 0,
+        int64_t max = std::numeric_limits<int64_t>::max())
+    {
+        Schema.Int(key, static_cast<int64_t>(field(Defaults_)), std::move(description), min, max);
         Appliers.push_back([section = Section_, key, field](const TConfig& config, TEngineSettings& settings) {
             if (config.IsSet(section, key)) {
                 field(settings) = static_cast<std::remove_reference_t<decltype(field(settings))>>(
@@ -234,6 +241,9 @@ TEngineConfigBuilder BuildEngineConfig() {
     b.Enum("poller", PollerBackendNames, ParsePollerBackend,
         [](auto& s) -> auto& { return s.Poller; },
         "Network poller of qdbd; auto is the platform default. qdbd rejects a backend this platform lacks.");
+    b.Size("io_threads", [](auto& s) -> auto& { return s.IoThreads; },
+        "I/O threads of qdbd's sockets: 0 keeps them on the actor thread; 1 writes and reads on one "
+        "thread; 2 writes on one and reads on the other.", 0, 2);
 
     b.Section("transport");
     b.Size("outbox_row_sets", [](auto& s) -> auto& { return s.Scheduler.Transport.OutboxRowSets; },

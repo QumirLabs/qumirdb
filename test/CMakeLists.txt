@@ -29,6 +29,12 @@ if(QDB_BUILD_DAEMON)
     target_sources(test_distributed PRIVATE test_partitioner.cpp)
     target_link_libraries(test_distributed qumirdb_remote)
     target_compile_definitions(test_distributed PRIVATE QDB_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    # The query tests over loopback sockets, with each transport of qdbd.
+    foreach(io_threads 0 1 2)
+        add_test(NAME test_distributed_io_threads_${io_threads}
+            COMMAND test_distributed --net:io_threads=${io_threads} --gtest_filter=DistributedScheduler.QueryActor*
+                --gtest_output=xml:${CMAKE_CURRENT_BINARY_DIR}/test_distributed_io_threads_${io_threads}.xml)
+    endforeach()
     if(QDB_PYTHON_EXECUTABLE)
         add_test(NAME test_qdbd_cli
             COMMAND ${QDB_PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_qdbd_cli.py $<TARGET_FILE:qdbd> -v)
