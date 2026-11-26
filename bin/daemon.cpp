@@ -103,7 +103,13 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
     const auto& allHosts = options.AllHosts;
 
     TExternalModuleCatalog catalog;
-    const auto base = std::make_shared<const NKernel::TModuleBase>();
+    std::shared_ptr<const NKernel::TModuleBase> base;
+    try {
+        base = std::make_shared<const NKernel::TModuleBase>();
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << "\n";
+        return 1;
+    }
     const auto& EngineSettings = options.Engine;
     const auto& dataDir = options.DataDir;
     // Shared by planning and the compute actors' graphs.

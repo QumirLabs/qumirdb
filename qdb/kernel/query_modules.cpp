@@ -62,6 +62,38 @@ std::optional<NQumir::TError> ResolveInBase(
     return resolver.Resolve(composed->Ast);
 }
 
+// The libraries the kernel generators compose, as (kind, name). The base parses all of them:
+// once frozen, it cannot take the types of a library a query asks for later.
+constexpr std::pair<const char*, const char*> KernelLibraryFiles[] = {
+    {".", "instrumentation.oz"},
+    {".", "row_table.oz"},
+    {"aggregation", "aggregation_finalize_states.oz"},
+    {"aggregation", "aggregation_hashtable_generic.oz"},
+    {"aggregation", "aggregation_rows.oz"},
+    {"aggregation", "aggregation_string_reducer.oz"},
+    {"aggregation", "key_ops_i64.oz"},
+    {"aggregation", "owned_arena_lifecycle.oz"},
+    {"aggregation", "owned_blocks.oz"},
+    {"aggregation", "robin_hood_dual_key.oz"},
+    {"aggregation", "robin_hood_rehash_generic.oz"},
+    {"aggregation", "string_ops.oz"},
+    {"aggregation", "swiss_group.oz"},
+    {"join", "join_cross.oz"},
+    {"join", "join_mark.oz"},
+    {"join", "join_residual_default.oz"},
+    {"join", "join_rows.oz"},
+    {"join", "join_semi_anti.oz"},
+    {"join", "join_table.oz"},
+    {"join", "join_update.oz"},
+    {"join", "materialize.oz"},
+    {"join", "runtime_filter.oz"},
+    {"sort", "heap.oz"},
+    {"sort", "materialize.oz"},
+    {"sort", "radix.oz"},
+    {"sort", "sort_rowids.oz"},
+    {"sort", "window.oz"},
+};
+
 } // namespace
 
 TModuleBase::TModuleBase() {
@@ -82,6 +114,9 @@ TModuleBase::TModuleBase() {
         }
         Modules_.emplace(file, std::move(module));
     }
+    for (const auto& [kind, name] : KernelLibraryFiles) {
+        KernelLibraries_.emplace(std::pair(kind, name), ParseFunctionLibrary(*Types_, ReadKernel(kind, name)));
+    }
     Types_->Freeze();
 }
 
@@ -97,6 +132,20 @@ std::expected<const NQumir::NFrontend::TSourceModule*, NQumir::TError> TModuleBa
         return std::unexpected(NQumir::TError(file + " is not a module of the base"));
     }
     return it->second;
+}
+
+std::expected<const std::vector<NQumir::NAst::TExprPtr>*, NQumir::TError> TModuleBase::KernelLibrary(
+    const std::string& kind,
+    const std::string& name) const
+{
+    auto it = KernelLibraries_.find(std::pair(kind, name));
+    if (it == KernelLibraries_.end()) {
+        return std::unexpected(NQumir::TError(kind + "/" + name + " is not a kernel library of the base"));
+    }
+    if (!it->second) {
+        return std::unexpected(it->second.error());
+    }
+    return &*it->second;
 }
 
 std::shared_ptr<NQumir::NAst::TTypeFactory> MakeQueryTypes(const TModuleBase& base) {
@@ -132,21 +181,15 @@ std::expected<std::monostate, NQumir::TError> TQueryModules::Load(
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError> TQueryModules::KernelLibrary(
     const std::string& kind,
     const std::string& name,
-    const std::unordered_set<std::string>& exclude)
+    const std::unordered_set<std::string>& exclude) const
 {
     using namespace NQumir::NAst;
-    auto key = std::pair(kind, name);
-    auto it = KernelLibraries_.find(key);
-    if (it == KernelLibraries_.end()) {
-        it = KernelLibraries_
-            .emplace(std::move(key), ParseFunctionLibrary(Types_, ReadKernel(kind, name)))
-            .first;
-    }
-    if (!it->second) {
-        return std::unexpected(it->second.error());
+    auto parsed = Base_->KernelLibrary(kind, name);
+    if (!parsed) {
+        return std::unexpected(parsed.error());
     }
     std::vector<TExprPtr> library;
-    for (const auto& stmt : *it->second) {
+    for (const auto& stmt : **parsed) {
         auto fun = TMaybeNode<TFunDecl>(stmt);
         if (!fun || !exclude.contains(fun.Cast()->Name)) {
             // Library code, like a module: the kernel frontends skip what the program does not reach.
