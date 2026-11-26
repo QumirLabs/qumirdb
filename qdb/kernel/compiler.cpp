@@ -1248,17 +1248,53 @@ void AddSortMaterializeLibrary(
     }
 }
 
+// The accumulator of a sum or max window filler: decimal sums and BinInt maxima
+// keep BinInt, integer sums widen to i64 and float sums to f64 (as
+// AggregateResultType); otherwise the argument's own type.
+struct TWindowAccumulator {
+    bool BinInt = false;
+    // The argument as the filler loads it.
+    NQumir::NAst::TTypePtr Arg = nullptr;
+    NQumir::NAst::TTypePtr Acc = nullptr;
+    int64_t Width = 0;
+};
+
+TWindowAccumulator WindowAccumulator(
+    NQumir::NAst::TTypeFactory& types,
+    const NQumir::NAst::TTypePtr& argType,
+    bool sum)
+{
+    if (SortValueIsBinInt(argType) || (sum && IsDecimalType(argType))) {
+        return {
+            .BinInt = true,
+            .Arg = sum ? WindowDecimalArgType(types, argType) : BinIntStorageType(types),
+            .Acc = BinIntStorageType(types),
+            .Width = 16,
+        };
+    }
+    auto arg = SortCoreType(types, argType);
+    const int64_t width = MaterializeFixedWidth(types, argType);
+    if (!arg || width == 0) {
+        throw NQumir::TError("unsupported window argument type " + SqlTypeName(argType));
+    }
+    TWindowAccumulator accumulator{.Arg = arg, .Acc = arg, .Width = width};
+    if (sum && SortValueIsInteger(types, argType)) {
+        accumulator.Acc = types.MakeInteger();
+        accumulator.Width = 8;
+    } else if (sum && NQumir::NAst::TMaybeType<NQumir::NAst::TFloatType>(PhysicalValueType(types, argType))) {
+        accumulator.Acc = types.MakeFloat();
+        accumulator.Width = 8;
+    }
+    return accumulator;
+}
+
 // The state of a running window function carried between key ranges
 // (window_carry.oz): its value in table column Column, its count in Column + 1.
 struct TWindowCarry {
     size_t Func = 0;
     int64_t Column = 0;
     bool Max = false;
-    NQumir::NAst::TTypePtr Acc = nullptr;
-    int64_t Width = 0;
-    // The value one row adds, loaded as its filler loads it.
-    NQumir::NAst::TTypePtr ArgLoad = nullptr;
-    bool WidenDecimal = false;
+    TWindowAccumulator Accumulator;
 };
 
 std::vector<TWindowCarry> WindowCarries(
@@ -1274,28 +1310,13 @@ std::vector<TWindowCarry> WindowCarries(
             continue;
         }
         const auto& argType = inputType.Fields[static_cast<size_t>(funcs[f].ArgColumn)].second;
-        TWindowCarry carry{.Func = f, .Column = column, .Max = !sum};
+        carries.push_back({
+            .Func = f,
+            .Column = column,
+            .Max = !sum,
+            .Accumulator = WindowAccumulator(types, argType, sum),
+        });
         column += 2;
-        // As the fillers of BuildWindowMaterializeWrapperAst: decimal sums and
-        // BinInt maxima keep BinInt, integer sums i64, float sums f64.
-        if (SortValueIsBinInt(argType) || (sum && IsDecimalType(argType))) {
-            carry.Acc = BinIntStorageType(types);
-            carry.Width = 16;
-            carry.ArgLoad = sum ? WindowDecimalArgType(types, argType) : BinIntStorageType(types);
-            carry.WidenDecimal = sum;
-        } else {
-            carry.ArgLoad = SortCoreType(types, argType);
-            carry.Acc = carry.ArgLoad;
-            carry.Width = MaterializeFixedWidth(types, argType);
-            if (sum && SortValueIsInteger(types, argType)) {
-                carry.Acc = types.MakeInteger();
-                carry.Width = 8;
-            } else if (sum && NQumir::NAst::TMaybeType<NQumir::NAst::TFloatType>(PhysicalValueType(types, argType))) {
-                carry.Acc = types.MakeFloat();
-                carry.Width = 8;
-            }
-        }
-        carries.push_back(std::move(carry));
     }
     return carries;
 }
@@ -1309,7 +1330,7 @@ std::vector<int32_t> WindowCarryWidths(
 {
     std::vector<int32_t> widths = {8};
     for (const auto& carry : WindowCarries(types, inputType, funcs)) {
-        widths.push_back(static_cast<int32_t>(carry.Width));
+        widths.push_back(static_cast<int32_t>(carry.Accumulator.Width));
         widths.push_back(8);
     }
     return widths;
@@ -1352,18 +1373,19 @@ NQumir::NAst::TExprPtr BuildWindowTailAddAst(
         .Return(types.Make<TVoidType>());
     builder.Stmt(Oz::Call("window_carry_rows", {Oz::Ident("tails"), Oz::Ident("target"), Int64Literal(types, 1)}));
     for (const auto& carry : WindowCarries(types, inputType, funcs)) {
+        const auto& accumulator = carry.Accumulator;
         const auto argColumn = static_cast<int64_t>(funcs[carry.Func].ArgColumn);
-        auto value = LoadFixed(types, "store", Oz::Ident("row_id"), argColumn, carry.ArgLoad);
-        if (carry.WidenDecimal) {
+        auto value = LoadFixed(types, "store", Oz::Ident("row_id"), argColumn, accumulator.Arg);
+        if (!carry.Max && accumulator.BinInt) {
             value = Oz::Call("qdb_decimal_wide", {std::move(value)});
         } else if (!carry.Max) {
-            value = Cast(std::move(value), carry.Acc);
+            value = Cast(std::move(value), accumulator.Acc);
         }
         builder.Stmt(Oz::If(
             Oz::Call("sr_row_valid", {Oz::Ident("store"), Oz::Ident("row_id"), Int64Literal(types, argColumn)}),
             Oz::Block({Oz::Call(carry.Max ? "window_carry_max" : "window_carry_sum", {
                 Oz::Ident("tails"), Oz::Ident("target"), Int64Literal(types, carry.Column),
-                Cast(Int64Literal(types, 0), Ptr(types, carry.Acc)), std::move(value), Int64Literal(types, 1),
+                Cast(Int64Literal(types, 0), Ptr(types, accumulator.Acc)), std::move(value), Int64Literal(types, 1),
             })})));
     }
     return std::move(builder).Build();
@@ -1400,8 +1422,8 @@ NQumir::NAst::TExprPtr BuildWindowCarryStepAst(
         for (const auto& carry : carries) {
             stmts.push_back(Oz::Call(carry.Max ? "window_carry_max" : "window_carry_sum", {
                 Oz::Ident("carries"), Oz::Ident("next"), Int64Literal(types, carry.Column),
-                Cast(Int64Literal(types, 0), Ptr(types, carry.Acc)),
-                LoadFixed(types, from, Oz::Ident("j"), carry.Column, carry.Acc),
+                Cast(Int64Literal(types, 0), Ptr(types, carry.Accumulator.Acc)),
+                LoadFixed(types, from, Oz::Ident("j"), carry.Column, carry.Accumulator.Acc),
                 LoadFixed(types, from, Oz::Ident("j"), carry.Column + 1, i64Type),
             }));
         }
@@ -1422,7 +1444,8 @@ NQumir::NAst::TExprPtr BuildWindowCarryStepAst(
 NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
     NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& inputType,
-    const std::vector<TWindowFuncInput>& funcs)
+    const std::vector<TWindowFuncInput>& funcs,
+    bool rangeEntries)
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
@@ -1447,34 +1470,49 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
         builder.Var("rows_before", i64Type).Assign("rows_before", Int64Literal(types, 0));
         for (const auto& carry : carries) {
             const auto f = std::to_string(carry.Func);
-            builder.Var("init_acc_" + f, carry.Acc).Assign("init_acc_" + f,
-                carry.Width == 16 ? Oz::Call("qdb_decimal_wide", {Int64Literal(types, 0)})
-                                  : Cast(Int64Literal(types, 0), carry.Acc));
+            const auto& accumulator = carry.Accumulator;
+            builder.Var("init_acc_" + f, accumulator.Acc).Assign("init_acc_" + f,
+                accumulator.BinInt ? Oz::Call("qdb_decimal_wide", {Int64Literal(types, 0)})
+                                   : Cast(Int64Literal(types, 0), accumulator.Acc));
             builder.Var("init_count_" + f, i64Type).Assign("init_count_" + f, Int64Literal(types, 0));
         }
-        std::vector<TExprPtr> fold;
-        fold.push_back(Oz::Var("carry_id", i64Type));
-        fold.push_back(Oz::Assign("carry_id",
-            Oz::Bin(TOperator("<<"), Oz::Ident("carry_b"), Int64Literal(types, 32))));
-        fold.push_back(Oz::Assign("rows_before", Oz::Add(Oz::Ident("rows_before"),
-            LoadFixed(types, "carries", Oz::Ident("carry_id"), 0, i64Type))));
-        for (const auto& carry : carries) {
-            const auto f = std::to_string(carry.Func);
-            auto acc = LoadFixed(types, "carries", Oz::Ident("carry_id"), carry.Column, carry.Acc);
-            auto count = [&] {
-                return LoadFixed(types, "carries", Oz::Ident("carry_id"), carry.Column + 1, i64Type);
-            };
-            fold.push_back(Oz::Assign("init_acc_" + f, carry.Max
-                ? Oz::Call("window_max_merge", {
-                    Oz::Ident("init_acc_" + f), Oz::Ident("init_count_" + f), std::move(acc), count()})
-                : Oz::Add(Oz::Ident("init_acc_" + f), std::move(acc))));
-            fold.push_back(Oz::Assign("init_count_" + f, Oz::Add(Oz::Ident("init_count_" + f), count())));
+        if (rangeEntries) {
+            // Every row of every carries batch is one lane's partial carry.
+            std::vector<TExprPtr> fold;
+            fold.push_back(Oz::Var("carry_id", i64Type));
+            fold.push_back(Oz::Assign("carry_id", Oz::Bin(TOperator("|"),
+                Oz::Bin(TOperator("<<"), Oz::Ident("carry_b"), Int64Literal(types, 32)),
+                Oz::Ident("carry_r"))));
+            fold.push_back(Oz::Assign("rows_before", Oz::Add(Oz::Ident("rows_before"),
+                LoadFixed(types, "carries", Oz::Ident("carry_id"), 0, i64Type))));
+            for (const auto& carry : carries) {
+                const auto f = std::to_string(carry.Func);
+                auto acc = LoadFixed(types, "carries", Oz::Ident("carry_id"), carry.Column, carry.Accumulator.Acc);
+                auto count = [&] {
+                    return LoadFixed(types, "carries", Oz::Ident("carry_id"), carry.Column + 1, i64Type);
+                };
+                fold.push_back(Oz::Assign("init_acc_" + f, carry.Max
+                    ? Oz::Call("window_max_merge", {
+                        Oz::Ident("init_acc_" + f), Oz::Ident("init_count_" + f), std::move(acc), count()})
+                    : Oz::Add(Oz::Ident("init_acc_" + f), std::move(acc))));
+                fold.push_back(Oz::Assign("init_count_" + f, Oz::Add(Oz::Ident("init_count_" + f), count())));
+            }
+            fold.push_back(Oz::Assign("carry_r", Oz::Add(Oz::Ident("carry_r"), Int64Literal(types, 1))));
+            auto rowSetType = QumirDbNamedType(types, "TRowSet");
+            builder.Var("carry_b", i64Type).Assign("carry_b", Int64Literal(types, 0));
+            builder.Stmt(Oz::While(
+                Oz::Bin(TOperator("<"), Oz::Ident("carry_b"), Oz::Ident("carry_count")),
+                Oz::Block({
+                    Oz::Var("carry_set", rowSetType),
+                    Oz::Assign("carry_set", Oz::Index("carries", Oz::Ident("carry_b"))),
+                    Oz::Var("carry_r", i64Type),
+                    Oz::Assign("carry_r", Int64Literal(types, 0)),
+                    Oz::While(
+                        Oz::Bin(TOperator("<"), Oz::Ident("carry_r"), Oz::Field(Oz::Ident("carry_set"), "RowCount")),
+                        Oz::Block(std::move(fold))),
+                    Oz::Assign("carry_b", Oz::Add(Oz::Ident("carry_b"), Int64Literal(types, 1))),
+                })));
         }
-        fold.push_back(Oz::Assign("carry_b", Oz::Add(Oz::Ident("carry_b"), Int64Literal(types, 1))));
-        builder.Var("carry_b", i64Type).Assign("carry_b", Int64Literal(types, 0));
-        builder.Stmt(Oz::While(
-            Oz::Bin(TOperator("<"), Oz::Ident("carry_b"), Oz::Ident("carry_count")),
-            Oz::Block(std::move(fold))));
         auto initArgs = [&](size_t f, std::vector<TExprPtr>& args) {
             if (carryOf(f) != carries.end()) {
                 args.push_back(Oz::Ident("init_acc_" + std::to_string(f)));
@@ -1550,11 +1588,9 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
                 const auto& argType =
                     inputType.Fields[static_cast<size_t>(funcs[f].ArgColumn)].second;
                 const bool isSum = funcs[f].Func != "max_prefix";
-                // A decimal sum accumulates in i128 whatever the argument's storage.
-                const bool binInt = SortValueIsBinInt(argType) ||
-                    (isSum && IsDecimalType(argType));
                 const bool isPrefix = funcs[f].Func != "sum_partition";
-                if (binInt) {
+                const auto accumulator = WindowAccumulator(types, argType, isSum);
+                if (accumulator.BinInt) {
                     const char* filler = funcs[f].Func == "sum_prefix"
                         ? "window_fill_prefix_sum_binint"
                         : funcs[f].Func == "sum_partition"
@@ -1566,7 +1602,7 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
                         Int64Literal(types, static_cast<int64_t>(funcs[f].ArgColumn)),
                     };
                     if (isSum) {
-                        args.push_back(Cast(Int64Literal(types, 0), Ptr(types, WindowDecimalArgType(types, argType))));
+                        args.push_back(Cast(Int64Literal(types, 0), Ptr(types, accumulator.Arg)));
                     }
                     args.insert(args.end(), {
                         column(static_cast<size_t>(inputColumnCount) + f),
@@ -1580,44 +1616,20 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
                     builder.Stmt(Oz::Call(filler, std::move(args)));
                     continue;
                 }
-                auto argCoreType = SortCoreType(types, argType);
-                const int64_t width = MaterializeFixedWidth(types, argType);
-                if (!argCoreType || width == 0) {
-                    throw NQumir::TError(
-                        "BuildWindowMaterializeWrapperAst: unsupported window argument type " +
-                        SqlTypeName(argType));
-                }
                 const char* filler = funcs[f].Func == "sum_prefix"
                     ? "window_fill_prefix_sum_fixed"
                     : funcs[f].Func == "sum_partition"
                         ? "window_fill_partition_sum_fixed"
                         : "window_fill_prefix_max_fixed";
-                const bool integerSum =
-                    (funcs[f].Func == "sum_prefix" || funcs[f].Func == "sum_partition") &&
-                    SortValueIsInteger(types, argType);
                 std::vector<TExprPtr> args = {
                     Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
                     Oz::Ident("n"), Int64Literal(types, static_cast<int64_t>(funcs[f].ArgColumn)),
-                    Cast(Int64Literal(types, 0), Ptr(types, std::move(argCoreType))),
+                    Cast(Int64Literal(types, 0), Ptr(types, accumulator.Arg)),
                 };
-                if (funcs[f].Func == "sum_prefix" || funcs[f].Func == "sum_partition") {
-                    // Integer sums widen to i64 and float sums to f64, as AggregateResultType.
-                    const auto argValueType = PhysicalValueType(types, argType);
-                    const bool floatSum = !integerSum && TMaybeType<TFloatType>(argValueType);
-                    TTypePtr outCoreType = integerSum
-                        ? TTypePtr(types.MakeInteger())
-                        : (floatSum ? TTypePtr(types.MakeFloat()) : SortCoreType(types, argType));
-                    const int64_t outWidth = (integerSum || floatSum) ? 8 : width;
-                    if (!outCoreType || outWidth == 0) {
-                        throw NQumir::TError(
-                            "BuildWindowMaterializeWrapperAst: unsupported window sum result type " +
-                            SqlTypeName(argType));
-                    }
-                    args.push_back(Cast(Int64Literal(types, 0), Ptr(types, std::move(outCoreType))));
-                    args.push_back(Int64Literal(types, outWidth));
-                } else {
-                    args.push_back(Int64Literal(types, width));
+                if (isSum) {
+                    args.push_back(Cast(Int64Literal(types, 0), Ptr(types, accumulator.Acc)));
                 }
+                args.push_back(Int64Literal(types, accumulator.Width));
                 args.push_back(column(static_cast<size_t>(inputColumnCount) + f));
                 args.push_back(Oz::Ident("out_rowset"));
                 args.push_back(Int64Literal(types, dataOwner));
@@ -1978,7 +1990,6 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
     };
     addLibrary("radix.oz", false);
     addLibrary("sort_rowids.oz", true);
-    addLibrary("window_carry.oz", true);
     AddSortMaterializeLibrary(modules, programStmts, "BuildWindowProgramAst");
     programStmts.push_back(BuildWindowKeyComparatorAst(
         types, "window_same_partition", partitionKeys));
@@ -1989,12 +2000,13 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
         // The routing orders rows as the radix sort does, so a range holds
         // whole peer groups (wiki Window-parallelism).
         programStmts.push_back(BuildRowIdLessAst(types, keys, "window_key_less", false, true));
+        addLibrary("window_carry.oz", true);
         programStmts.push_back(BuildWindowTailAddAst(types, inputType, funcs));
         programStmts.push_back(BuildWindowCarryStepAst(types, inputType, funcs));
         addLibrary("window_range.oz", true);
     }
     programStmts.push_back(BuildWindowMaterializeWrapperAst(
-        types, inputType, funcs));
+        types, inputType, funcs, rangeEntries));
     // Nullable keys need the null-aware radix (nulls segregated to FIRST/LAST);
     // the non-nullable variant would bucket NULL rows by raw value bytes and
     // scatter a partition.
