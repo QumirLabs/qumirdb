@@ -1,0 +1,4 @@
+sort [id asc]
+└─ project (id, m, mf)
+   └─ window partition=[big.g] order=[big.s asc nulls-last, big.id asc] fns=[w_0=max, w_1=max]
+      └─ source big AS big (rows≈400 cost≈19.2K)

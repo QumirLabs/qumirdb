@@ -165,6 +165,13 @@ struct TWindowFuncInput {
     bool PeerInclusive = false;
 };
 
+// The column widths of a window's carry tables and carries in the range scheme:
+// the row count, then value and count of each running aggregate.
+std::vector<int32_t> WindowCarryWidths(
+    NQumir::NAst::TTypeFactory& types,
+    const NQumir::NAst::TStructType& inputType,
+    const std::vector<TWindowFuncInput>& funcs);
+
 // Window program (entry qdb_window_run, same ABI as qdb_sort_run): optionally
 // sorts the packed TRowId permutation by `keys`, then materializes the [start,
 // limit) slice into a kernel-owned TRowSet whose columns are the input columns
@@ -522,11 +529,11 @@ public:
         // Groups the rows of store[batch] by range (qdb_window_range_route).
         int64_t Route(
             TRowSet* store, int64_t* splitters, int64_t splitterCount, int64_t batch,
-            int64_t* ranges, int64_t* offsets, int64_t* rowIds, int64_t* tails) const;
-        // A lane's partial carries from its tail counts.
+            int64_t* ranges, int64_t* offsets, int64_t* rowIds, TRowSet* tails) const;
+        // A lane's partial carries from its tails (window_carry.oz tables).
         int64_t Carries(
             TRowSet* store, int64_t* splitters, int64_t splitterCount,
-            int64_t* tails, int64_t* carries) const;
+            TRowSet* tails, TRowSet* carries) const;
         // Materializes the input columns of rowIds[start, start + limit).
         int64_t Gather(
             TRowSet* store, int64_t* rowIds, int64_t start, int64_t limit, TRowSet* output) const;

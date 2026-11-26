@@ -2712,8 +2712,6 @@ private:
         const auto outputType = ComputeWindowOutputType(*Types_, childType, window.Functions());
 
         const auto layouts = RowLayouts(childType);
-        // A carry is one i64: the rows of the range's leading partition before it.
-        const std::vector<TValueLayout> carryLayouts = {{.Width = 8}};
         auto& rowsConn = AddConn<NScheduler::TOneToOneConnection>(lanes, lanes, "window-sample-rows");
         auto& sampleConn = AddConn<NScheduler::TGatherConnection>(lanes, 1, "window-sample");
         auto& splitterConn = AddConn<NScheduler::TBroadcastConnection>(1, lanes, "window-splitters");
@@ -2726,7 +2724,7 @@ private:
             rangeConns.push_back(&AddConn<NScheduler::TGatherConnection>(lanes, 1, "window-range"));
             rangeConns.back()->SetRowLayouts(layouts);
             carryConns.push_back(&AddConn<NScheduler::TGatherConnection>(lanes, 1, "window-range-carry"));
-            carryConns.back()->SetRowLayouts(carryLayouts);
+            carryConns.back()->SetRowLayouts(plan.CarryLayouts);
         }
 
         // About 64 sampled rows per range keep the largest range close to the mean.
@@ -2783,6 +2781,7 @@ private:
                     .Right = PortSpec(Graph_, &rowsConn, p),
                     .Out = std::move(outputs),
                     .Kernel = plan.Kernel,
+                    .CarryLayouts = plan.CarryLayouts,
                 },
             });
             Graph_.AddEdge(sampleSort, node, splitterConn, 0, p);

@@ -2,8 +2,10 @@
 
 #include <qdb/exec/join_exec.h>
 #include <qdb/exec/sort_exec.h>
+#include <qdb/io/rowset_ops.h>
 
 #include <cstdint>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -75,29 +77,36 @@ private:
 // partial carries.
 class TWindowRouteProcessor {
 public:
-    TWindowRouteProcessor(TKernelCompiler::TWindowRangeDispatch kernel, size_t ranges);
+    // carryLayouts: the columns of a carry (TWindowPlanData::CarryLayouts).
+    TWindowRouteProcessor(
+        TKernelCompiler::TWindowRangeDispatch kernel,
+        size_t ranges,
+        std::vector<TValueLayout> carryLayouts);
     ~TWindowRouteProcessor();
 
     // A batch of the sorted sample; the whole sample comes before Route.
     void AddSample(TRowSet& rowSet);
     // Takes rowSet; `out` gets the rows of every range that has some.
     void Route(TRowSet& rowSet, std::vector<std::pair<size_t, TRowSet>>& out);
-    // The lane's partial carry of `range`, after the last Route: one i64 row,
-    // or false when it is zero.
+    // The lane's partial carry of `range`, after the last Route: one row, or
+    // false when no row of the range's leading partition comes before it.
     bool Carry(size_t range, TRowSet& carry);
+
+    struct TCarryTable;
 
 private:
     void PickSplitters();
 
     TKernelCompiler::TWindowRangeDispatch Kernel_;
     size_t Ranges_ = 0;
+    std::vector<TValueLayout> CarryLayouts_;
     // The sample batches, then a slot for the batch being routed.
     std::vector<TRowSet> Store_;
     size_t SampleBatches_ = 0;
     bool Picked_ = false;
     std::vector<int64_t> Splitters_;
-    std::vector<int64_t> Tails_;
-    std::vector<int64_t> Carries_;
+    std::shared_ptr<TCarryTable> Tails_;
+    std::shared_ptr<TCarryTable> Carries_;
 };
 
 } // namespace NQdb

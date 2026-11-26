@@ -1015,11 +1015,17 @@ TWindowPlanData BuildWindowPlanData(
         }
     }
 
-    return TWindowPlanData{
+    TWindowPlanData plan{
         .Keys = std::move(keys),
         .KeyColumns = std::move(keyColumns),
         .Kernel = kernelIndex,
     };
+    if (rangeEntries) {
+        for (const auto width : WindowCarryWidths(types, *inputStruct, funcs)) {
+            plan.CarryLayouts.push_back({.Width = width});
+        }
+    }
+    return plan;
 }
 
 std::optional<uint64_t> EstimateWindowPartitionCount(const TWindowOperator& window)
@@ -1047,8 +1053,9 @@ std::optional<uint64_t> EstimateWindowPartitionCount(const TWindowOperator& wind
 
 bool WindowSupportsRanges(const TWindowOperator& window)
 {
+    // With ORDER BY, sum and max are running aggregates.
     return !window.OrderKeys().empty() && std::ranges::all_of(window.Functions(), [](const TWindowFunc& fn) {
-        return fn.Func == "rank" || fn.Func == "row_number";
+        return fn.Func == "rank" || fn.Func == "row_number" || fn.Func == "sum" || fn.Func == "max";
     });
 }
 
