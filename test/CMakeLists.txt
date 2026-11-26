@@ -103,10 +103,12 @@ foreach(shard RANGE 3)
         ENVIRONMENT "GTEST_TOTAL_SHARDS=4;GTEST_SHARD_INDEX=${shard}")
 endforeach()
 # The window cases over key ranges (wiki Window-parallelism) with seven ranges:
-# the fixtures are too small for auto to choose them. One rowset per queue lane
-# makes a task that holds rows back for a later output block at once.
+# the fixtures are too small for auto to choose them. Four scan tasks give the
+# single scheduler several lanes too. One rowset per queue lane makes a task
+# that holds rows back for a later output block at once.
 add_test(NAME test_reg_window_range COMMAND test_reg ${QDB_REG_ARGS}
-    --window:range_partition=true --shuffle:partitions=7 --queue:depth=1 "--gtest_filter=*window*:*rank*"
+    --window:range_partition=true --shuffle:partitions=7 --scan:max_tasks=4 --queue:depth=1
+    "--gtest_filter=*window*:*rank*"
     --gtest_output=xml:${CMAKE_CURRENT_BINARY_DIR}/test_reg_window_range.xml)
 set_tests_properties(test_reg_window_range PROPERTIES COST 50)
 # The whole suite on the Qumir VM kernel backend against the LLVM goldens (#109),

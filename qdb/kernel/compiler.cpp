@@ -1092,9 +1092,6 @@ NQumir::NAst::TExprPtr BuildSortMaterializeWrapperAst(
     return std::move(builder).Build();
 }
 
-// Builds a `runName` stage entry (sort ABI): optionally sorts the row-ids by
-// `keys`, then materializes the [start, limit) slice via `materializeEntry`.
-// Shared by sort (sort_materialize_row_ids) and window (window_materialize_row_ids).
 // The calls that sort `row_ids` by `keys`, least significant key first.
 std::vector<NQumir::NAst::TExprPtr> BuildRowIdSortStmts(
     NQumir::NAst::TTypeFactory& types,
@@ -1114,6 +1111,9 @@ std::vector<NQumir::NAst::TExprPtr> BuildRowIdSortStmts(
     return sortStmts;
 }
 
+// Builds a `runName` stage entry (sort ABI): optionally sorts the row-ids by
+// `keys`, then materializes the [start, limit) slice via `materializeEntry`.
+// Shared by sort (sort_materialize_row_ids) and window (window_materialize_row_ids).
 NQumir::NAst::TExprPtr BuildSortRunWrapperAst(
     NQumir::NAst::TTypeFactory& types,
     const std::string& runName,
@@ -1759,9 +1759,12 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
         types, "window_same_partition", partitionKeys));
     programStmts.push_back(BuildWindowKeyComparatorAst(
         types, "window_same_order", orderKeys));
-    // The range routing in window.oz orders rows exactly as the radix sort does.
-    programStmts.push_back(BuildRowIdLessAst(types, keys, "window_key_less", false));
     addLibrary("window.oz", true);
+    if (rangeEntries) {
+        // The routing orders rows exactly as the radix sort does.
+        programStmts.push_back(BuildRowIdLessAst(types, keys, "window_key_less", false));
+        addLibrary("window_range.oz", true);
+    }
     programStmts.push_back(BuildWindowMaterializeWrapperAst(
         types, inputType, funcs));
     // Nullable keys need the null-aware radix (nulls segregated to FIRST/LAST);
