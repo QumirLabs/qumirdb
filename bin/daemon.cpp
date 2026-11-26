@@ -237,8 +237,8 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
     }
     loop.Loop();
     // The inbound side delivers to the actor system, so it is destroyed before it.
-    if (io && !io->Stop()) {
-        return 1;
+    if (io) {
+        io->Stop();
     }
 
     return 0;
