@@ -55,6 +55,7 @@ add_library(qumirdb
     plan/passes/cbo/dpccp.cpp
     plan/passes/top_sort.cpp
     plan/passes/push_limit.cpp
+    plan/passes/window_top_k.cpp
     plan/passes/predicate_requirements.cpp
     plan/passes/row_group_predicate.cpp
     plan/passes/runtime_filters.cpp

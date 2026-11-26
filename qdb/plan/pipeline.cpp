@@ -11,6 +11,7 @@
 #include <qdb/plan/passes/cte_reuse.h>
 #include <qdb/plan/passes/top_sort.h>
 #include <qdb/plan/passes/push_limit.h>
+#include <qdb/plan/passes/window_top_k.h>
 #include <qdb/plan/ops/cte_consumer.h>
 #include <qdb/plan/passes/row_group_predicate.h>
 #include <qdb/plan/passes/runtime_filters.h>
@@ -25,7 +26,13 @@ namespace NQdb {
 
 namespace {
 
-void OptimizeOne(NQumir::NAst::TTypeFactory& types, TOperatorPtr& plan, TPlanPassOptions& options, TConstFolder& folder) {
+void OptimizeOne(
+    NQumir::NAst::TTypeFactory& types,
+    TOperatorPtr& plan,
+    TPlanPassOptions& options,
+    TConstFolder& folder,
+    uint32_t& nextTopKId)
+{
     std::ostream* const dump = options.DumpPasses;
     auto stage = [&](const char* name) {
         if (dump) {
@@ -77,6 +84,8 @@ void OptimizeOne(NQumir::NAst::TTypeFactory& types, TOperatorPtr& plan, TPlanPas
     AnnotateTypes(types, plan, options.Annotation); // re-annotate: limit moved below strip projections
     plan = ApplyTopSort(types, plan);
     AnnotateTypes(types, plan, options.Annotation); // re-annotate: top-sort replaces limit(sort(...))
+    ApplyWindowTopK(types, plan, folder, nextTopKId); stage("ApplyWindowTopK");
+    AnnotateTypes(types, plan, options.Annotation); // re-annotate: partial ranking windows sit below windows
     CoerceSetOpBranches(types, plan, options.Annotation); stage("CoerceSetOpBranches");
     AnnotateTypes(types, plan, options.Annotation); // re-annotate: coercion added cast projections on union branches
     ApplyColumnPruning(types, plan); stage("ApplyColumnPruning");
@@ -108,8 +117,9 @@ void ForEachPlan(TOperatorPtr& main, TFn&& fn, bool includeMain = true) {
 
 void ApplyPlanPasses(NQumir::NAst::TTypeFactory& types, TOperatorPtr& plan, TPlanPassOptions options) {
     TConstFolder folder(types, options.Annotation); // one per query: see TConstFolder
+    uint32_t nextTopKId = 0;
     ForEachPlan(plan, [&](TOperatorPtr& current, TCteDefinition* def) {
-        OptimizeOne(types, current, options, folder);
+        OptimizeOne(types, current, options, folder, nextTopKId);
         if (def) {
             def->OutputType = current->OutputColumns();
         }

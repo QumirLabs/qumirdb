@@ -22,7 +22,7 @@ namespace {
 // aggregate reducers (integer sum/max widen to i64, avg is f64 unless decimal),
 // carrying the argument's nullability.
 TTypePtr WindowResultType(NQumir::NAst::TTypeFactory& types, const std::string& func, const TTypePtr& argType) {
-    if (func == "rank" || func == "row_number" || func == "dense_rank") {
+    if (IsRankingWindowFunction(func)) {
         return types.MakeInteger(); // i64, never null
     }
     if (!argType) {
@@ -74,6 +74,10 @@ void AppendBound(std::string& s, const char* tag, const TFrameBound& bound) {
 }
 
 } // namespace
+
+bool IsRankingWindowFunction(std::string_view func) {
+    return func == "rank" || func == "row_number" || func == "dense_rank";
+}
 
 std::string_view WindowFrameModeName(EWindowFrameMode mode) {
     switch (mode) {
@@ -195,6 +199,9 @@ std::unordered_set<std::string> TWindowOperator::RequiredColumnsForChild(
 
 const std::string TWindowOperator::ToString() const {
     std::string s = "(rel window " + Input_->ToString();
+    if (Partial_) {
+        s += " (partial)";
+    }
     if (!PartitionKeys_.empty()) {
         s += " (partition";
         for (const auto& key : PartitionKeys_) {

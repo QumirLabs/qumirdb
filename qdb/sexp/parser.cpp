@@ -635,6 +635,7 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
             std::vector<TSortKey> orderKeys;
             std::optional<TWindowFrame> frame;
             std::vector<TWindowFunc> funcs;
+            bool partial = false;
 
             while (true) {
                 auto tok = h.Next();
@@ -648,7 +649,10 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                     co_return IParseHandle::MakeError(sectionTok, "expected window section name");
                 }
 
-                if (*section == "partition") {
+                if (*section == "partial") {
+                    co_await h.Take(')');
+                    partial = true;
+                } else if (*section == "partition") {
                     while (true) {
                         auto keyTok = h.Next();
                         if (IParseHandle::IsOp(keyTok, ')')) break;
@@ -737,9 +741,11 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                 }
             }
 
-            co_return NQumir::MakeIntrusive<TWindowOperator>(
+            auto window = NQumir::MakeIntrusive<TWindowOperator>(
                 h.Types(), std::move(input), std::move(partitionKeys), std::move(orderKeys),
                 std::move(frame), std::move(funcs));
+            window->MutablePartial() = partial;
+            co_return window;
         }
 
         co_return IParseHandle::MakeError(nameTok, "unknown rel operator: " + *relName);

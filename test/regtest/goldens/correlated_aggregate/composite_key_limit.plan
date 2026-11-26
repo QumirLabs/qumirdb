@@ -5,10 +5,14 @@ project (a, b, low_e, high_e)
    │  └─ project (__corr_0_0__, __corr_0_1__, __scalar_0__)
    │     └─ filter (<= __row_number_0 1)
    │        └─ window partition=[__corr_0_0__, __corr_0_1__] order=[e asc] fns=[__row_number_0=row_number]
-   │           └─ project (__corr_0_0__, __corr_0_1__, e) (rows≈40 cost≈1.9K)
-   │              └─ source v AS v (rows≈40 cost≈960)
+   │           └─ filter (<= __topk_0__ 1)
+   │              └─ window partial partition=[__corr_0_0__, __corr_0_1__] order=[e asc] fns=[__topk_0__=row_number]
+   │                 └─ project (__corr_0_0__, __corr_0_1__, e) (rows≈40 cost≈1.9K)
+   │                    └─ source v AS v (rows≈40 cost≈960)
    └─ project (__corr_1_0__, __corr_1_1__, __scalar_1__)
       └─ filter (<= __row_number_0 1)
          └─ window partition=[__corr_1_0__, __corr_1_1__] order=[e desc] fns=[__row_number_0=row_number]
-            └─ project (__corr_1_0__, __corr_1_1__, e) (rows≈40 cost≈1.9K)
-               └─ source v AS v_1 (rows≈40 cost≈960)
+            └─ filter (<= __topk_1__ 1)
+               └─ window partial partition=[__corr_1_0__, __corr_1_1__] order=[e desc] fns=[__topk_1__=row_number]
+                  └─ project (__corr_1_0__, __corr_1_1__, e) (rows≈40 cost≈1.9K)
+                     └─ source v AS v_1 (rows≈40 cost≈960)

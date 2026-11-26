@@ -129,7 +129,7 @@ std::string SortPlanLabel(
 }
 
 std::string WindowPlanLabel(const TWindowOperator& window) {
-    std::string label = "window";
+    std::string label = window.Partial() ? "window partial" : "window";
     const auto& parts = window.PartitionKeys();
     for (size_t i = 0; i < parts.size(); ++i) {
         label += (i ? ", " : " partition=[") + parts[i];
