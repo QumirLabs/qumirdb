@@ -5,6 +5,7 @@
 #include <coroio/actors/threaded_node.hpp>
 #include <coroio/loop_thread.hpp>
 
+#include <cstdlib>
 #include <exception>
 #include <iostream>
 #include <vector>
@@ -16,6 +17,19 @@ namespace {
 
 using namespace NNet;
 using namespace NNet::NActors;
+
+// A node whose transport died would keep answering HTTP while its queries hang, so a
+// failed I/O loop ends the process and its supervisor restarts the node.
+[[noreturn]] void AbortOnFailure(std::exception_ptr error) {
+    try {
+        std::rethrow_exception(error);
+    } catch (const std::exception& e) {
+        std::cerr << "I/O thread failed: " << e.what() << "\n";
+    } catch (...) {
+        std::cerr << "I/O thread failed with an unknown exception\n";
+    }
+    std::abort();
+}
 
 template <class TPoller>
 class TIoThreads final : public IIoThreads {
@@ -50,27 +64,19 @@ public:
 
     void Start() override {
         for (auto& thread : Threads_) {
-            thread->Start();
+            thread->Start(AbortOnFailure);
         }
     }
 
-    bool Stop() override {
+    void Stop() override {
         for (auto& thread : Threads_) {
             thread->Stop();
         }
-        bool ok = true;
         for (auto& thread : Threads_) {
-            // Join() rethrows the exception that ended the loop; join the rest anyway.
-            try {
-                thread->Join();
-            } catch (const std::exception& e) {
-                std::cerr << "I/O thread failed: " << e.what() << "\n";
-                ok = false;
-            }
+            thread->Join();
         }
         Inbound_.reset();
         Delivery_.reset();
-        return ok;
     }
 
 private:

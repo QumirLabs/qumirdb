@@ -24,10 +24,11 @@ public:
     // throws if it cannot listen.
     virtual void ServeInbound(
         NNet::NActors::TActorSystem& sys, NNet::NActors::TNodeId nodeId, const NNet::TAddress& address) = 0;
+    // A loop that fails aborts the process, see io_threads.cpp.
     virtual void Start() = 0;
     // Stops and joins the threads, then destroys the inbound side while `sys` is alive; the
-    // nodes go with `sys`. False if a loop ended with an exception (logged). Safe without Start().
-    virtual bool Stop() = 0;
+    // nodes go with `sys`. Safe without Start().
+    virtual void Stop() = 0;
 };
 
 // Declare the result before the actor system: its nodes live on these threads.
