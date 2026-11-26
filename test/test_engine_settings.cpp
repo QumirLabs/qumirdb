@@ -47,7 +47,6 @@ TEST(EngineSettings, SchemaDefaultsAreTheDefaultsOfTheSettings) {
     EXPECT_EQ(config.GetString("jit", "cache_dir"), "");
     EXPECT_EQ(config.GetString("kernel", "backend"), "llvm");
     EXPECT_EQ(config.GetString("net", "poller"), "auto");
-    EXPECT_EQ(config.GetString("net", "envelope_reader"), "v1");
 }
 
 TEST(EngineSettings, PollerIsParsed) {
@@ -59,17 +58,6 @@ TEST(EngineSettings, PollerIsParsed) {
     const auto result = config.Override("net:poller=iocp");
     ASSERT_FALSE(result.has_value());
     EXPECT_NE(result.error().find("one of: auto, epoll, uring, kqueue, poll, select"), std::string::npos);
-}
-
-TEST(EngineSettings, EnvelopeReaderIsParsed) {
-    auto config = MakeConfig();
-    TEngineSettings settings;
-    ASSERT_TRUE(config.Override("net:envelope_reader=v2").has_value());
-    ApplyEngineConfig(config, settings);
-    EXPECT_EQ(settings.EnvelopeReader, EEnvelopeReader::V2);
-    const auto result = config.Override("net:envelope_reader=v3");
-    ASSERT_FALSE(result.has_value());
-    EXPECT_NE(result.error().find("one of: v1, v2"), std::string::npos);
 }
 
 TEST(EngineSettings, EveryDefaultSurvivesApplyingTheWholeDump) {

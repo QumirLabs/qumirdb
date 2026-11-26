@@ -234,10 +234,6 @@ TEngineConfigBuilder BuildEngineConfig() {
     b.Enum("poller", PollerBackendNames, ParsePollerBackend,
         [](auto& s) -> auto& { return s.Poller; },
         "Network poller of qdbd; auto is the platform default. qdbd rejects a backend this platform lacks.");
-    b.Enum("envelope_reader", EnvelopeReaderNames, ParseEnvelopeReader,
-        [](auto& s) -> auto& { return s.EnvelopeReader; },
-        "Inbound frame reader of qdbd: v1 copies each payload into its own buffer; v2 reads payloads "
-        "in place from 16 MB chunks (no copy), but row sets hold their chunk while alive.");
 
     b.Section("transport");
     b.Size("outbox_row_sets", [](auto& s) -> auto& { return s.Scheduler.Transport.OutboxRowSets; },
