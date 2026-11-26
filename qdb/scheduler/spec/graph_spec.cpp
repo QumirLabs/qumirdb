@@ -71,6 +71,17 @@ TOutputPort OutputPort(const std::vector<IConnection*>& connections, const TPort
     return TOutputPort{.Connection = &ConnectionAt(connections, port.Connection), .Lane = port.Lane};
 }
 
+std::vector<TOutputPort> OutputPorts(
+    const std::vector<IConnection*>& connections, const std::vector<TPortSpec>& ports)
+{
+    std::vector<TOutputPort> outputs;
+    outputs.reserve(ports.size());
+    for (const auto& port : ports) {
+        outputs.push_back(OutputPort(connections, port));
+    }
+    return outputs;
+}
+
 const std::shared_ptr<TKernelSlot>& SlotAt(const TNodeTaskContext& context, uint32_t kernel)
 {
     if (kernel >= context.Slots.size()) {
@@ -435,6 +446,37 @@ std::unique_ptr<ITask> MakeNodeTask(
                 std::make_shared<NLowering::TWindowBlockingState>(
                     plan.Keys, plan.KeyColumns, std::move(kernel)),
                 InputPort(connections, node.In), OutputPort(connections, node.Out));
+        } else if constexpr (std::is_same_v<TNode, TWindowSampleNode>) {
+            if (node.Out.size() != 2) {
+                Invalid("a window sample has two outputs");
+            }
+            return std::make_unique<TFanOutTask>(
+                NLowering::MakeWindowSampleCode(),
+                std::make_shared<NLowering::TWindowSampleState>(
+                    BindWindowRange(SlotAt(context, node.Kernel)), node.SampleRows),
+                std::vector<TInputPort>{InputPort(connections, node.In)},
+                OutputPorts(connections, node.Out));
+        } else if constexpr (std::is_same_v<TNode, TWindowRouteNode>) {
+            if (node.Out.empty() || node.Out.size() % 2 != 0) {
+                Invalid("a window route has a row and a carry output per range");
+            }
+            return std::make_unique<TFanOutTask>(
+                NLowering::MakeWindowRouteCode(),
+                std::make_shared<NLowering::TWindowRouteState>(
+                    BindWindowRange(SlotAt(context, node.Kernel)), node.Out.size() / 2),
+                std::vector<TInputPort>{
+                    InputPort(connections, node.Left), InputPort(connections, node.Right)},
+                OutputPorts(connections, node.Out));
+        } else if constexpr (std::is_same_v<TNode, TWindowRangeNode>) {
+            const auto& plan = node.Plan;
+            const auto& slot = SlotAt(context, plan.Kernel);
+            return std::make_unique<TBinaryBlockingTask>(
+                NLowering::MakeWindowRangeCode(),
+                std::make_shared<NLowering::TWindowRangeBlockingState>(
+                    plan.Keys, plan.KeyColumns,
+                    MakeWindowKernel(BindSortRadixComposite(slot)), BindWindowRange(slot)),
+                InputPort(connections, node.Left), InputPort(connections, node.Right),
+                OutputPort(connections, node.Out));
         } else if constexpr (std::is_same_v<TNode, TAggregateNode>) {
             return MakeAggregateTask(node, connections, context);
         } else if constexpr (std::is_same_v<TNode, TPartialAggregateNode>) {

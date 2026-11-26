@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace NQdb::NScheduler::NLowering {
@@ -141,6 +142,70 @@ struct TWindowBlockingState : TProcessorTaskState<TWindowBlockingState> {
     TWindowProcessor Processor;
     bool InputFinished = false;
 };
+
+// The task of one key range of a range-partitioned window: rows, then carries.
+struct TWindowRangeBlockingState : TProcessorTaskState<TWindowRangeBlockingState> {
+    TWindowRangeBlockingState(
+        std::vector<TSortKey> keys,
+        std::vector<TSortColumnRef> keyColumns,
+        TSortRadixKernel radixKernel,
+        TKernelCompiler::TWindowRangeDispatch rangeKernel)
+        : Processor(
+            std::move(keys),
+            std::move(keyColumns),
+            std::move(radixKernel),
+            std::move(rangeKernel))
+    {}
+
+    TWindowProcessor Processor;
+    bool RowsFinished = false;
+    bool CarriesFinished = false;
+};
+
+// Binary blocking code for TWindowRangeBlockingState: left carries, right rows.
+std::shared_ptr<const NScheduler::TBinaryBlockingCode> MakeWindowRangeCode();
+
+struct TWindowSampleState : NScheduler::ITaskState {
+    TWindowSampleState(TKernelCompiler::TWindowRangeDispatch kernel, uint64_t sampleRows)
+        : Processor(std::move(kernel), sampleRows)
+    {}
+
+    TWindowSampleProcessor Processor;
+    bool InputFinished = false;
+    bool SampleSent = false;
+    bool SampleFinished = false;
+};
+
+// Fan-out code for TWindowSampleState: input 0 the lane; output 0 its rows,
+// output 1 its sample, finished before the rows are sent.
+std::shared_ptr<const NScheduler::TFanOutCode> MakeWindowSampleCode();
+
+struct TWindowRouteState : NScheduler::ITaskState {
+    TWindowRouteState(TKernelCompiler::TWindowRangeDispatch kernel, size_t ranges)
+        : Processor(std::move(kernel), ranges)
+        , Ranges(ranges)
+    {}
+
+    TWindowRouteProcessor Processor;
+    size_t Ranges = 0;
+    bool SampleFinished = false;
+    bool RowsFinished = false;
+    // Routed pieces not handed out yet, in reverse.
+    std::vector<std::pair<size_t, TRowSet>> Pending;
+    // The next output to finish (rows) or send a carry to (carries).
+    size_t NextRowOutput = 0;
+    size_t NextCarry = 0;
+
+    ~TWindowRouteState() override {
+        for (auto& [range, rowSet] : Pending) {
+            Release(&rowSet);
+        }
+    }
+};
+
+// Fan-out code for TWindowRouteState: input 0 the sorted sample, input 1 the
+// lane's rows; outputs 0..ranges-1 the rows of each range, then the carries.
+std::shared_ptr<const NScheduler::TFanOutCode> MakeWindowRouteCode();
 
 struct TMergeState : TProcessorTaskState<TMergeState> {
     TMergeState(

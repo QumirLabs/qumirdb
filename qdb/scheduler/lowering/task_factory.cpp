@@ -44,6 +44,162 @@ std::shared_ptr<const NScheduler::TBlockingCode> MakePartialAggregateBlockingCod
         });
 }
 
+std::shared_ptr<const NScheduler::TBinaryBlockingCode> MakeWindowRangeCode()
+{
+    auto code = std::make_shared<NScheduler::TBinaryBlockingCode>(
+        [](NScheduler::ITaskState& state,
+           NScheduler::TInputPort& carries,
+           NScheduler::TInputPort& rows,
+           TRowSet& output)
+        {
+            auto* s = &static_cast<TWindowRangeBlockingState&>(state);
+            TRowSet rowSet{};
+            // A route lane sends its carries after all its rows, so read rows first.
+            while (!s->RowsFinished) {
+                auto fetch = rows.Fetch(rowSet);
+                if (fetch == NScheduler::EFetchResult::NO_DATA) {
+                    return NScheduler::ETaskResult::NEED_DATA;
+                }
+                if (fetch == NScheduler::EFetchResult::FINISHED) {
+                    s->RowsFinished = true;
+                    break;
+                }
+                s->Processor.Add(rowSet);
+                rowSet = {};
+            }
+            while (!s->CarriesFinished) {
+                auto fetch = carries.Fetch(rowSet);
+                if (fetch == NScheduler::EFetchResult::NO_DATA) {
+                    return NScheduler::ETaskResult::NEED_DATA;
+                }
+                if (fetch == NScheduler::EFetchResult::FINISHED) {
+                    s->CarriesFinished = true;
+                    break;
+                }
+                s->Processor.AddCarry(rowSet);
+                rowSet = {};
+            }
+            if (s->Processor.Next(output)) {
+                return NScheduler::ETaskResult::OK;
+            }
+            return NScheduler::ETaskResult::FINISHED;
+        });
+    code->RequiredSide = [](NScheduler::ITaskState& state) {
+        return static_cast<TWindowRangeBlockingState&>(state).RowsFinished
+            ? NScheduler::ERequiredSide::Left
+            : NScheduler::ERequiredSide::Right;
+    };
+    return code;
+}
+
+std::shared_ptr<const NScheduler::TFanOutCode> MakeWindowSampleCode()
+{
+    using TEmit = NScheduler::TFanOutCode::TEmit;
+    static constexpr size_t RowsOutput = 0;
+    static constexpr size_t SampleOutput = 1;
+    return std::make_shared<NScheduler::TFanOutCode>(
+        [](NScheduler::ITaskState& state, std::span<NScheduler::TInputPort> inputs, TEmit& emit) {
+            auto* s = &static_cast<TWindowSampleState&>(state);
+            TRowSet rowSet{};
+            while (!s->InputFinished) {
+                auto fetch = inputs[0].Fetch(rowSet);
+                if (fetch == NScheduler::EFetchResult::NO_DATA) {
+                    return NScheduler::ETaskResult::NEED_DATA;
+                }
+                if (fetch == NScheduler::EFetchResult::FINISHED) {
+                    s->InputFinished = true;
+                    break;
+                }
+                s->Processor.Add(rowSet);
+                rowSet = {};
+            }
+            // The sample goes first and its output finishes before any row is
+            // sent: the splitters need every lane's sample, and the route lane
+            // reads the rows only after the splitters.
+            if (!s->SampleSent) {
+                s->SampleSent = true;
+                if (s->Processor.Sample(emit.RowSet)) {
+                    emit.Output = SampleOutput;
+                    return NScheduler::ETaskResult::OK;
+                }
+            }
+            if (!s->SampleFinished) {
+                s->SampleFinished = true;
+                emit.Output = SampleOutput;
+                emit.Finish = true;
+                return NScheduler::ETaskResult::OK;
+            }
+            if (s->Processor.Next(emit.RowSet)) {
+                emit.Output = RowsOutput;
+                return NScheduler::ETaskResult::OK;
+            }
+            return NScheduler::ETaskResult::FINISHED;
+        },
+        [](NScheduler::ITaskState&) -> std::optional<size_t> {
+            return 0;
+        });
+}
+
+std::shared_ptr<const NScheduler::TFanOutCode> MakeWindowRouteCode()
+{
+    using TEmit = NScheduler::TFanOutCode::TEmit;
+    static constexpr size_t SampleInput = 0;
+    static constexpr size_t RowsInput = 1;
+    return std::make_shared<NScheduler::TFanOutCode>(
+        [](NScheduler::ITaskState& state, std::span<NScheduler::TInputPort> inputs, TEmit& emit) {
+            auto* s = &static_cast<TWindowRouteState&>(state);
+            TRowSet rowSet{};
+            while (!s->SampleFinished) {
+                auto fetch = inputs[SampleInput].Fetch(rowSet);
+                if (fetch == NScheduler::EFetchResult::NO_DATA) {
+                    return NScheduler::ETaskResult::NEED_DATA;
+                }
+                if (fetch == NScheduler::EFetchResult::FINISHED) {
+                    s->SampleFinished = true;
+                    break;
+                }
+                s->Processor.AddSample(rowSet);
+                rowSet = {};
+            }
+            while (s->Pending.empty() && !s->RowsFinished) {
+                auto fetch = inputs[RowsInput].Fetch(rowSet);
+                if (fetch == NScheduler::EFetchResult::NO_DATA) {
+                    return NScheduler::ETaskResult::NEED_DATA;
+                }
+                if (fetch == NScheduler::EFetchResult::FINISHED) {
+                    s->RowsFinished = true;
+                    break;
+                }
+                s->Processor.Route(rowSet, s->Pending);
+                std::ranges::reverse(s->Pending);
+            }
+            if (!s->Pending.empty()) {
+                emit.Output = s->Pending.back().first;
+                emit.RowSet = s->Pending.back().second;
+                s->Pending.pop_back();
+                return NScheduler::ETaskResult::OK;
+            }
+            // Every range has all rows of this lane before its carry, so the
+            // range task can read its rows to the end first.
+            if (s->NextRowOutput < s->Ranges) {
+                emit.Output = s->NextRowOutput++;
+                emit.Finish = true;
+                return NScheduler::ETaskResult::OK;
+            }
+            while (s->NextCarry < s->Ranges) {
+                const size_t range = s->NextCarry++;
+                if (s->Processor.Carry(range, emit.RowSet)) {
+                    emit.Output = s->Ranges + range;
+                    return NScheduler::ETaskResult::OK;
+                }
+            }
+            return NScheduler::ETaskResult::FINISHED;
+        },
+        [](NScheduler::ITaskState& state) -> std::optional<size_t> {
+            return static_cast<TWindowRouteState&>(state).SampleFinished ? RowsInput : SampleInput;
+        });
+}
+
 EJoinFetchResult MapJoinFetch(NScheduler::EFetchResult result)
 {
     switch (result) {

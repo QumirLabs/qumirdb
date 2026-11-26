@@ -200,6 +200,14 @@ TEngineConfigBuilder BuildEngineConfig() {
         [](auto& s) -> auto& { return s.Scheduler.Aggregate.Table; },
         "Hash table of a grouped aggregate: swiss, row, or auto, which moves a swiss table to rows once it is large.");
 
+    b.Section("window");
+    b.Enum("range_partition", NScheduler::WindowRangeModeNames, NScheduler::ParseWindowRangeMode,
+        [](auto& s) -> auto& { return s.Scheduler.Window.RangePartition; },
+        "Partition a window by key ranges of its sort key instead of hashing its PARTITION BY keys: "
+        "true, false, or auto, which does when the input has range_min_rows and too few partitions for the tasks.");
+    b.Size("range_min_rows", [](auto& s) -> auto& { return s.Scheduler.Window.RangeMinRows; },
+        "Estimated input rows from which auto partitions a window by key ranges.");
+
     b.Section("instrumentation");
     b.Bool("operators", [](auto& s) -> auto& { return s.Scheduler.Instrumentation.Operators; },
         "Report per-operator statistics to stderr.");

@@ -203,6 +203,58 @@ struct TWindowNode {
     }
 };
 
+// One input lane of a range-partitioned window (wiki Window-parallelism):
+// Out[0] gets the lane's rows, Out[1] its part of the splitter sample.
+struct TWindowSampleNode {
+    TPortSpec In;
+    std::vector<TPortSpec> Out;
+    // The window kernel, with its range entries.
+    uint32_t Kernel = 0;
+    uint64_t SampleRows = 0;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.In);
+        v(self.Out);
+        v(self.Kernel);
+        v(self.SampleRows);
+    }
+};
+
+// Routes one lane of a range-partitioned window by key range: Left is the
+// sorted sample, Right the lane's rows. With R ranges, Out[r] gets the rows of
+// range r and Out[R + r] the lane's partial carry of range r.
+struct TWindowRouteNode {
+    TPortSpec Left;
+    TPortSpec Right;
+    std::vector<TPortSpec> Out;
+    uint32_t Kernel = 0;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Left);
+        v(self.Right);
+        v(self.Out);
+        v(self.Kernel);
+    }
+};
+
+// The window task of one key range: Left the partial carries, Right the rows.
+struct TWindowRangeNode {
+    TPortSpec Left;
+    TPortSpec Right;
+    TPortSpec Out;
+    TWindowPlanData Plan;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Left);
+        v(self.Right);
+        v(self.Out);
+        v(self.Plan);
+    }
+};
+
 // A blocking aggregate over all its input rows.
 struct TAggregateNode {
     TPortSpec In;
@@ -584,7 +636,8 @@ using TNodeBody = std::variant<
     TCrossJoinNode, TLimitNode, TLateLookupNode, TLateMergeNode,
     TCteProducerNode, TCtePublishNode, TCteConsumerNode, TCteSinkNode, TCteSourceNode,
     TPartialAggregateNode, TGroupingSetsAggregateNode, TRuntimeFilterNode,
-    TRuntimeFilterSinkNode, TRuntimeFilterSourceNode>;
+    TRuntimeFilterSinkNode, TRuntimeFilterSourceNode,
+    TWindowSampleNode, TWindowRouteNode, TWindowRangeNode>;
 
 struct TNodeSpec {
     uint64_t ExecStageId = InvalidExecStageId;

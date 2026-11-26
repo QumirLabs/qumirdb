@@ -238,6 +238,11 @@ TBinaryBlockingCode::TBinaryBlockingCode(TProcess process)
     : Process(std::move(process))
 {}
 
+TFanOutCode::TFanOutCode(TProcess process, TRequiredInput requiredInput)
+    : Process(std::move(process))
+    , RequiredInput(std::move(requiredInput))
+{}
+
 TMergeCode::TMergeCode(TProcess process)
     : Process(std::move(process))
 {}
@@ -798,6 +803,72 @@ ETaskResult TMergeTask::Execute() {
         Output_.Finish();
     }
     return result;
+}
+
+TFanOutTask::TFanOutTask(
+    std::shared_ptr<const TFanOutCode> code,
+    std::shared_ptr<ITaskState> state,
+    std::vector<TInputPort> inputs,
+    std::vector<TOutputPort> outputs)
+    : Code_(std::move(code))
+    , State_(std::move(state))
+    , Inputs_(std::move(inputs))
+    , Outputs_(std::move(outputs))
+    , OutputFinished_(Outputs_.size(), false)
+{}
+
+TFanOutTask::~TFanOutTask() {
+    if (HasPending_) {
+        Release(&Pending_.RowSet);
+    }
+}
+
+ETaskResult TFanOutTask::Execute() {
+    if (Finished_) {
+        return ETaskResult::FINISHED;
+    }
+    if (!HasPending_) {
+        auto result = Code_->Process(*State_, Inputs_, Pending_);
+        if (result == ETaskResult::FINISHED) {
+            Finished_ = true;
+            for (size_t i = 0; i < Outputs_.size(); ++i) {
+                if (!OutputFinished_[i]) {
+                    OutputFinished_[i] = true;
+                    Outputs_[i].Finish();
+                }
+            }
+            return result;
+        }
+        if (result != ETaskResult::OK) {
+            return result;
+        }
+        if (Pending_.Finish) {
+            OutputFinished_[Pending_.Output] = true;
+            Outputs_[Pending_.Output].Finish();
+            Pending_ = {};
+            return ETaskResult::OK;
+        }
+        HasPending_ = true;
+    }
+    auto& output = Outputs_[Pending_.Output];
+    if (!output.CanPush() || !output.Push(std::move(Pending_.RowSet))) {
+        return ETaskResult::BLOCKED_OUTPUT;
+    }
+    Pending_ = {};
+    HasPending_ = false;
+    return ETaskResult::OK;
+}
+
+bool TFanOutTask::WantsInput(const TTaskEdge& edge) const noexcept {
+    if (!Code_->RequiredInput) {
+        return true;
+    }
+    const auto input = Code_->RequiredInput(*State_);
+    if (!input) {
+        return true;
+    }
+    const auto& wanted = Inputs_[*input];
+    return edge.Connection == wanted.Connection && edge.DstLane == wanted.Lane;
 }
 
 struct THashShuffleTask::TPendingOutput {
@@ -1386,6 +1457,16 @@ void TBinaryBlockingTask::ConfigureInstrumentation(TTaskInstrumentationSetup& se
     State_->ConfigureInstrumentation(&setup.Counters());
 }
 
+void TFanOutTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup) {
+    for (auto& input : Inputs_) {
+        setup.Input(input);
+    }
+    for (auto& output : Outputs_) {
+        setup.Output(output);
+    }
+    State_->ConfigureInstrumentation(&setup.Counters());
+}
+
 void TMergeTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup) {
     setup.Output(Output_);
     State_->ConfigureInstrumentation(&setup.Counters());
@@ -1425,6 +1506,11 @@ bool TBlockingTask::RebindPort(const TPortRebind& rebind) {
 
 bool TBinaryBlockingTask::RebindPort(const TPortRebind& rebind) {
     return rebind.Apply(Left_) || rebind.Apply(Right_) || rebind.Apply(Output_);
+}
+
+bool TFanOutTask::RebindPort(const TPortRebind& rebind) {
+    return std::ranges::any_of(Inputs_, [&](auto& input) { return rebind.Apply(input); })
+        || std::ranges::any_of(Outputs_, [&](auto& output) { return rebind.Apply(output); });
 }
 
 bool TMergeTask::RebindPort(const TPortRebind& rebind) {

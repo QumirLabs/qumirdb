@@ -128,6 +128,26 @@ struct THashShuffleCode {
     std::vector<uint32_t> Routes;
 };
 
+// A task with several inputs and outputs. Process returns OK with one action
+// in `emit`: push RowSet to Outputs[Output], or finish that output; NEED_DATA
+// when the input it reads has no data; FINISHED when it is done, which finishes
+// the outputs still open.
+struct TFanOutCode {
+    struct TEmit {
+        size_t Output = 0;
+        TRowSet RowSet = {};
+        bool Finish = false;
+    };
+    using TProcess = std::function<ETaskResult(ITaskState&, std::span<TInputPort>, TEmit&)>;
+    // The input Process reads next; empty means any. Gates WantsInput.
+    using TRequiredInput = std::function<std::optional<size_t>(ITaskState&)>;
+
+    explicit TFanOutCode(TProcess process, TRequiredInput requiredInput = {});
+
+    TProcess Process;
+    TRequiredInput RequiredInput;
+};
+
 struct TRuntimeFilterCode {
     THashShuffleCode::THash Hash;
     std::shared_ptr<IRuntimeFilterProbe> Probe;
@@ -393,6 +413,31 @@ private:
     TRowSet CurrentOutput_ = {};
     bool HasOutput_ = false;
     bool OutputFinished_ = false;
+};
+
+class TFanOutTask final : public ITask {
+public:
+    TFanOutTask(
+        std::shared_ptr<const TFanOutCode> code,
+        std::shared_ptr<ITaskState> state,
+        std::vector<TInputPort> inputs,
+        std::vector<TOutputPort> outputs);
+    ~TFanOutTask() override;
+
+    ETaskResult Execute() override;
+    void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
+    bool RebindPort(const TPortRebind& rebind) override;
+    bool WantsInput(const TTaskEdge& edge) const noexcept override;
+
+private:
+    std::shared_ptr<const TFanOutCode> Code_;
+    std::shared_ptr<ITaskState> State_;
+    std::vector<TInputPort> Inputs_;
+    std::vector<TOutputPort> Outputs_;
+    std::vector<bool> OutputFinished_;
+    TFanOutCode::TEmit Pending_;
+    bool HasPending_ = false;
+    bool Finished_ = false;
 };
 
 // Routes each row by its key hash to the output of its partition.

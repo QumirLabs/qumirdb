@@ -102,6 +102,13 @@ foreach(shard RANGE 3)
     set_tests_properties(test_reg_${shard} PROPERTIES COST 100
         ENVIRONMENT "GTEST_TOTAL_SHARDS=4;GTEST_SHARD_INDEX=${shard}")
 endforeach()
+# The window cases over key ranges (wiki Window-parallelism) with seven ranges:
+# the fixtures are too small for auto to choose them. One rowset per queue lane
+# makes a task that holds rows back for a later output block at once.
+add_test(NAME test_reg_window_range COMMAND test_reg ${QDB_REG_ARGS}
+    --window:range_partition=true --shuffle:partitions=7 --queue:depth=1 "--gtest_filter=*window*:*rank*"
+    --gtest_output=xml:${CMAKE_CURRENT_BINARY_DIR}/test_reg_window_range.xml)
+set_tests_properties(test_reg_window_range PROPERTIES COST 50)
 # The whole suite on the Qumir VM kernel backend against the LLVM goldens (#109),
 # except external modules (LLVM only) and runtime error texts (QumirLabs/qumir#192).
 # Disabled: VM coverage will be enabled per suite.
