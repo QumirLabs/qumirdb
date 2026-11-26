@@ -645,7 +645,8 @@ void AppendSortLessBody(
     const std::string& leftRow,
     const std::string& rightColumns,
     const std::string& rightRow,
-    NQumir::NAst::TExprPtr equalResult)
+    NQumir::NAst::TExprPtr equalResult,
+    bool floatTotalOrder = false)
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
@@ -694,6 +695,11 @@ void AppendSortLessBody(
 
         auto leftComparable = ComparableValue(leftValue, i64Type);
         auto rightComparable = ComparableValue(rightValue, i64Type);
+        if (floatTotalOrder && TMaybeType<TFloatType>(UnwrapNamedValueType(leftValue.ValueType))) {
+            // The radix sort's key, with NaN above every number and -0 as +0.
+            leftComparable = Oz::Call("qumir_radix_total_key", {std::move(leftComparable)});
+            rightComparable = Oz::Call("qumir_radix_total_key", {std::move(rightComparable)});
+        }
         builder.Stmt(Oz::If(
             Oz::Bin(TOperator("<"), leftComparable, rightComparable),
             Oz::Block({Oz::Return(BoolConst(types, !key.Desc))})));
@@ -1633,12 +1639,14 @@ namespace {
 
 // `name`(store, left_id, right_id) -> bool: whether the left row comes first by
 // `keys`. Equal keys compare by packed row id when rowIdTieBreak is set, else
-// the left row does not come first.
+// the left row does not come first. floatTotalOrder compares floats as
+// qumir_radix_total_key orders them.
 NQumir::NAst::TExprPtr BuildRowIdLessAst(
     NQumir::NAst::TTypeFactory& types,
     const std::vector<TSortRadixKeyInput>& keys,
     std::string name,
-    bool rowIdTieBreak)
+    bool rowIdTieBreak,
+    bool floatTotalOrder = false)
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
@@ -1679,7 +1687,8 @@ NQumir::NAst::TExprPtr BuildRowIdLessAst(
         "right_cols", "right_row",
         rowIdTieBreak
             ? Oz::Bin(TOperator("<"), Oz::Ident("left_id"), Oz::Ident("right_id"))
-            : Oz::Bool(types, false));
+            : Oz::Bool(types, false),
+        floatTotalOrder);
 
     return std::move(builder).Build();
 }
@@ -1761,8 +1770,9 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
         types, "window_same_order", orderKeys));
     addLibrary("window.oz", true);
     if (rangeEntries) {
-        // The routing orders rows exactly as the radix sort does.
-        programStmts.push_back(BuildRowIdLessAst(types, keys, "window_key_less", false));
+        // The routing orders rows as the radix sort does, so a range holds
+        // whole peer groups (wiki Window-parallelism).
+        programStmts.push_back(BuildRowIdLessAst(types, keys, "window_key_less", false, true));
         addLibrary("window_range.oz", true);
     }
     programStmts.push_back(BuildWindowMaterializeWrapperAst(
