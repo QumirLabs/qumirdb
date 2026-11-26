@@ -1,0 +1,7 @@
+sort [g asc, r asc, id asc]
+└─ project (g, i, id, r, total)
+   └─ project (x.g, x.i, x.id, x.r, x.total)
+      └─ filter (<= w_0 2)
+         └─ window partition=[big.g] fns=[w_1=sum]
+            └─ window partition=[big.g] order=[big.i asc] fns=[w_0=rank]
+               └─ source big AS big (rows≈400 cost≈9.6K)

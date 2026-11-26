@@ -431,6 +431,34 @@ TEST(SexpParser, WindowNoFrameRoundtrip) {
     EXPECT_EQ(printed, input);
 }
 
+TEST(SexpParser, WindowPartialRoundtrip) {
+    NQdb::TMockSource src({"a", "b"});
+    auto sourceOp = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(src));
+
+    const std::string input =
+        "(rel window (rel source \"data.parquet\") (partial) (partition a) "
+        "(order (b asc nulls-default)) (fn w_0 rank))";
+
+    TRelParserOptions opts;
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+        sourceOp = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(src), std::string(path));
+        return sourceOp;
+    };
+    auto p = MakeParser(std::move(opts));
+
+    auto expr = Parse(p, input);
+    ASSERT_NE(expr, nullptr);
+    auto& window = static_cast<TWindowOperator&>(*expr);
+    EXPECT_TRUE(window.Partial());
+    auto clone = CloneOperator(TestTypes(), NQumir::StaticPointerCast<IOperator>(expr));
+    auto* cloned = dynamic_cast<TWindowOperator*>(clone.Get());
+    ASSERT_NE(cloned, nullptr);
+    EXPECT_TRUE(cloned->Partial());
+
+    auto printed = PrintAst(NQumir::StaticPointerCast<TExpr>(expr), MakePrintOpts());
+    EXPECT_EQ(printed, input);
+}
+
 TEST(SexpParser, SortPrintRoundtrip) {
     NQdb::TMockSource src({"x", "y"});
     const std::string input =

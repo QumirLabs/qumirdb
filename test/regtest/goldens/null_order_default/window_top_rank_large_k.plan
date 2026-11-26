@@ -1,0 +1,9 @@
+sort [g asc]
+└─ project (g, n, max_r)
+   └─ aggregate keys=[x.g] aggs=[count_0=count, max_0=max]
+      └─ project (x.g, x.r)
+         └─ filter (<= w_0 1000)
+            └─ window partition=[big.g] order=[big.s asc, big.id asc] fns=[w_0=rank]
+               └─ filter (<= __topk_0__ 1000)
+                  └─ window partial partition=[big.g] order=[big.s asc, big.id asc] fns=[__topk_0__=rank]
+                     └─ source big AS big (rows≈400 cost≈12.8K)

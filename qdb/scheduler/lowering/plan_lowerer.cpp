@@ -352,8 +352,8 @@ public:
         }
         if (auto n = TMaybeOp<TWindowOperator>(op)) {
             const size_t childLanes = OutputLanes(n.Cast()->Input());
-            if (childLanes == 0) {
-                return 0;
+            if (childLanes == 0 || n.Cast()->Partial()) {
+                return childLanes;
             }
             if (!n.Cast()->PartitionKeys().empty() && childLanes > 1) {
                 return JoinPartitions(childLanes);
@@ -2576,6 +2576,21 @@ private:
         const auto execStageId = NewExecStage(
             &window, EExecPlanNodeKind::Window);
         const auto windowGroup = StageLabel("window", execStageId);
+
+        // A partial window ranks the rows of its own lane, before any exchange.
+        if (window.Partial()) {
+            return LowerUnary(
+                window.Input(),
+                "window",
+                windowGroup,
+                execStageId,
+                [&, windowGroup](const NQumir::NAst::TTypePtr& childType) {
+                    return BuildWindowStage(
+                        childType, window, windowGroup, execStageId);
+                },
+                outConn,
+                outLaneOffset);
+        }
 
         if (childLanes <= 1 || window.PartitionKeys().empty()) {
             return LowerBlocking(

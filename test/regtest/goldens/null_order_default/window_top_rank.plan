@@ -1,0 +1,8 @@
+sort [g asc, r asc, id asc]
+└─ project (g, i, id, r)
+   └─ project (x.g, x.i, x.id, x.r)
+      └─ filter (<= w_0 4)
+         └─ window partition=[big.g] order=[big.i asc] fns=[w_0=rank]
+            └─ filter (<= __topk_0__ 4)
+               └─ window partial partition=[big.g] order=[big.i asc] fns=[__topk_0__=rank]
+                  └─ source big AS big (rows≈400 cost≈9.6K)

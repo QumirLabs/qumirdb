@@ -280,6 +280,10 @@ void PrintRelBody(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame fram
         out << "(rel window";
         printer.Separator(frame.Level + 1);
         printer.PrintExpr(window.Input(), frame.AllowTypeWrap, frame.Level + 1);
+        if (window.Partial()) {
+            printer.Separator(frame.Level + 1);
+            out << "(partial)";
+        }
         if (!window.PartitionKeys().empty()) {
             printer.Separator(frame.Level + 1);
             out << "(partition";

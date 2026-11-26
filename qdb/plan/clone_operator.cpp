@@ -155,10 +155,13 @@ TOperatorPtr Reconstruct(NQumir::NAst::TTypeFactory& types, const TOperatorPtr& 
             n.Cast()->LocatorColumn(),
             n.Cast()->Columns());
     }
-    if (auto n = TMaybeOp<TWindowOperator>(op)) {
-        return NQumir::MakeIntrusive<TWindowOperator>(
-            types, StructuralClone(types, n.Cast()->Input()), n.Cast()->PartitionKeys(),
-            n.Cast()->OrderKeys(), n.Cast()->Frame(), n.Cast()->Functions());
+    if (auto maybeWindow = TMaybeOp<TWindowOperator>(op)) {
+        auto window = maybeWindow.Cast();
+        auto clone = NQumir::MakeIntrusive<TWindowOperator>(
+            types, StructuralClone(types, window->Input()), window->PartitionKeys(),
+            window->OrderKeys(), window->Frame(), window->Functions());
+        clone->MutablePartial() = window->Partial();
+        return clone;
     }
     throw std::runtime_error(
         "CloneOperator: unsupported operator: " + std::string(op->RelName()));

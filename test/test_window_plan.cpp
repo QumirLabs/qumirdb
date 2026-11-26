@@ -165,6 +165,28 @@ TEST(WindowPlan, FullPipelineOverJoin) {
     EXPECT_FALSE(join->Keys().empty());
 }
 
+TEST(WindowPlan, RankFilterAddsOnePartialTopK) {
+    NQdb::TMockSource t({"a", "b"});
+    std::map<std::string, ITable*> tables = {{"t", &t}};
+
+    auto plan = BuildSqlPlan(
+        "SELECT * FROM (SELECT a, rank() OVER (PARTITION BY a ORDER BY b) AS r FROM t) x "
+        "WHERE r <= 3", tables);
+    ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+
+    // A second optimization (a sexpr plan taken from EXPLAIN) keeps the one partial window.
+    for (int pass = 0; pass < 2; ++pass) {
+        ApplyPlanPasses(TestTypes(), *plan, {.Annotation = TestAnnotation()});
+        EXPECT_EQ(CountWindows(plan->Get()), 2);
+        auto* window = FindWindow(plan->Get());
+        ASSERT_NE(window, nullptr);
+        EXPECT_FALSE(window->Partial());
+        auto* partial = FindWindow(window->Input().Get());
+        ASSERT_NE(partial, nullptr);
+        EXPECT_TRUE(partial->Partial());
+    }
+}
+
 TEST(WindowPlan, CteWindowAggregateArgsAreIndependentPerInline) {
     NQdb::TMockSource t({"k", "v"});
     std::map<std::string, ITable*> tables = {{"t", &t}};

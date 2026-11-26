@@ -113,6 +113,17 @@ public:
         return Functions_;
     }
 
+    // A partial window computes its functions over each lane's share of the
+    // input, not over whole partitions. Only ApplyWindowTopK creates one, under
+    // a filter whose result does not depend on how the rows are split.
+    bool Partial() const {
+        return Partial_;
+    }
+
+    bool& MutablePartial() {
+        return Partial_;
+    }
+
     std::span<const TOperatorPtr> Inputs() const override {
         return std::span<const TOperatorPtr>(&Input_, 1);
     }
@@ -127,6 +138,7 @@ private:
     std::vector<TSortKey> OrderKeys_;
     std::optional<TWindowFrame> Frame_;
     std::vector<TWindowFunc> Functions_;
+    bool Partial_ = false;
 };
 
 // Output schema = input fields ++ one field per window function (type derived
@@ -148,6 +160,10 @@ inline constexpr int32_t WindowAvgExtraScale = 4;
 NQumir::NAst::TTypePtr ComputeWindowAvgResultType(
     NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TTypePtr& argType);
+
+// rank, dense_rank and row_number: a non-null position in the partition order
+// that takes no argument and ignores the frame.
+bool IsRankingWindowFunction(std::string_view func);
 
 std::string_view WindowFrameModeName(EWindowFrameMode mode);
 std::string_view FrameBoundKindName(EFrameBoundKind kind);
