@@ -20,6 +20,8 @@ struct TRuntimeResources {
     NScheduler::TTransportSettings Transport;
     // Tables opened by the node's earlier queries; null opens every file anew.
     std::shared_ptr<TTableCache> Tables;
+    // net:io_threads > 0: the I/O threads serialize the chunks the compute actors send.
+    bool SerializeOnIoThreads = false;
 };
 
 NNet::NActors::IActor* CreatePinger(

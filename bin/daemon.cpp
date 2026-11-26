@@ -83,8 +83,9 @@ void PrintUsage(std::ostream& out, const char* program)
         << "  --config path         engine config file\n"
         << "  --section:key=value   engine config override\n"
         << "                        --net:poller=name network poller, one of: " << AvailablePollers << " (default auto)\n"
-        << "                        --net:io_threads=n I/O threads of the sockets: 0 on the actor thread, 1 for writes\n"
-        << "                          and reads, 2 for writes on one and reads on the other (default 0)\n"
+        << "                        --net:io_threads=n I/O threads of the sockets, which also serialize and parse the\n"
+        << "                          data chunks: 0 on the actor thread, 1 for writes and reads, 2 for writes on one\n"
+        << "                          and reads on the other (default 0)\n"
         << "  --help                print this text\n";
 }
 
@@ -190,7 +191,7 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
         httpListenSocket->Listen();
 
         if (io) {
-            io->ServeInbound(sys, myNodeId, actorSysAddress);
+            io->ServeInbound(sys, myNodeId, actorSysAddress, factory);
         } else {
             actorSysListenSocket.emplace(loop.Poller(), actorSysAddress.Domain());
             actorSysListenSocket->Bind(actorSysAddress);
@@ -227,7 +228,7 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
     sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::Scheduler), IActor::TPtr(CreateSchedulerActor(&timeSource, leaderId, logger)));
 
     uint64_t pingPeriodMs = 1000;
-    sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::LocalScheduler), IActor::TPtr(CreateLocalScheduler(leaderId, pingPeriodMs, EngineSettings.Scheduler.Scheduler, EngineSettings.Scheduler.Transport, tablesCache)));
+    sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::LocalScheduler), IActor::TPtr(CreateLocalScheduler(leaderId, pingPeriodMs, EngineSettings.Scheduler.Scheduler, EngineSettings.Scheduler.Transport, tablesCache, io != nullptr)));
 
     std::cerr << "QumirDB poller: " << pollerName << "\n";
     std::cerr << "QumirDB I/O threads: " << EngineSettings.IoThreads << "\n";

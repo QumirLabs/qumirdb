@@ -34,9 +34,12 @@
 
 #include <coroio/all.hpp>
 #include <coroio/actors/actorsystem.hpp>
+#include <coroio/actors/threaded_node.hpp>
+#include <coroio/loop_thread.hpp>
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
@@ -933,7 +936,7 @@ struct TTestCluster {
                 listeners[i]->Listen();
             } else {
                 IoThreads.emplace_back(MakeIoThreads<NNet::TDefaultPoller>(ioThreads));
-                IoThreads[i]->ServeInbound(*systems[i], ids[i], address);
+                IoThreads[i]->ServeInbound(*systems[i], ids[i], address, Factory);
             }
         }
         for (size_t i = 0; i < 2; ++i) {
@@ -2954,6 +2957,276 @@ TEST(DistributedScheduler, SelectedRowsCrossNodesCompacted) {
     EXPECT_TRUE(senderIntact.load());
 }
 
+namespace {
+
+// Node 1 of a cluster whose node to node 2 writes on an I/O thread, as qdbd's with
+// net:io_threads: the node is at hand for its Segments().
+struct TIoThreadSender {
+    TIoThreadSender(NNet::TLoop<NNet::TDefaultPoller>& loop, TMessagesFactory& factory, int port)
+        : Resolver(Io.Poller())
+        , System(&loop.Poller(), 1)
+    {
+        auto& poller = Io.Poller();
+        auto node = std::make_unique<TThreadedNode<NNet::TDefaultPoller>>(poller, factory, Resolver,
+            [&poller](const NNet::TAddress& addr) {
+                return NNet::TDefaultPoller::TSocket(poller, addr.Domain());
+            },
+            NNet::THostPort("127.0.0.1", port));
+        Node = node.get();
+        System.AddNode(2, std::move(node));
+        System.ServeOutbound();
+        Io.Start();
+    }
+
+    // The loop stops before the system destroys the node
+    ~TIoThreadSender() {
+        Io.Stop();
+        Io.Join();
+    }
+
+    NNet::TLoopThread<NNet::TDefaultPoller> Io;
+    NNet::TResolver Resolver;
+    TActorSystem System;
+    TThreadedNode<NNet::TDefaultPoller>* Node = nullptr;
+};
+
+// Node 2, which reads its inbound connections as qdbd does with net:io_threads=1; its
+// confirms go to `sender` through memory.
+struct TIoThreadReceiver {
+    TIoThreadReceiver(NNet::TLoop<NNet::TDefaultPoller>& loop, int port, TActorSystem& sender)
+        : Io(MakeIoThreads<NNet::TDefaultPoller>(1))
+        , System(&loop.Poller(), 2)
+    {
+        RegisterMessages(Factory);
+        System.AddNode(1, std::make_unique<TMemoryNode>(sender));
+        Io->ServeInbound(System, 2, NNet::TAddress{"::", port}, Factory);
+        System.ServeOutbound();
+        Io->Start();
+    }
+
+    ~TIoThreadReceiver() {
+        Io->Stop();
+    }
+
+    TMessagesFactory Factory;
+    std::unique_ptr<IIoThreads> Io;
+    TActorSystem System;
+};
+
+} // namespace
+
+// The I/O threads opt TDataChunk in on both sides: its nodes write chunks there, and the
+// inbound parses them there into Near chunks.
+TEST(DistributedScheduler, IoThreadsSerializeAndParseChunks) {
+    NNet::TLoop<NNet::TDefaultPoller> loop;
+    TMessagesFactory factory;
+    RegisterMessages(factory);
+    EXPECT_EQ(factory.PayloadWriter(TDataChunk::MessageId), nullptr);
+    auto io = MakeIoThreads<NNet::TDefaultPoller>(1);
+    TActorSystem system(&loop.Poller(), 1);
+    system.AddNode(2, io->MakeNode(factory, NNet::THostPort("127.0.0.1", FreePort())));
+    EXPECT_NE(factory.PayloadWriter(TDataChunk::MessageId), nullptr);
+    io->ServeInbound(system, 1, NNet::TAddress{"::", FreePort()}, factory);
+
+    std::atomic<bool> intact = false;
+    const std::vector<NQdb::TValueLayout> layouts{{.Width = 8}};
+    auto* chunk = new TDataChunk(2, 1, {SelectedInts({10, 20, 30, 40}, {1, 0, 1, 0}, &intact)}, layouts.data());
+    TBlob near{TBlob::TRawPtr(chunk, TBlobDeleter{[](void* ptr) {
+        delete static_cast<TDataChunk*>(ptr);
+    }}), sizeof(TDataChunk), TBlob::PointerType::Near};
+    auto parsed = factory.DeserializeFar(TDataChunk::MessageId, factory.SerializeFar(TDataChunk::MessageId, std::move(near)));
+    ASSERT_EQ(parsed.Type, TBlob::PointerType::Near);
+    const auto& rowSet = static_cast<const TDataChunk*>(parsed.Data.get())->RowSets.at(0);
+    ASSERT_EQ(rowSet.RowCount, 2);
+    const auto* data = reinterpret_cast<const int64_t*>(rowSet.Columns[0].Data);
+    EXPECT_EQ(data[0], 10);
+    EXPECT_EQ(data[1], 30);
+    EXPECT_TRUE(intact.load());
+    io->Stop();
+}
+
+namespace {
+
+// A compute actor on node 1 sends to Result on node 2 through a node on an I/O thread that
+// cannot connect yet. Once the node holds the first chunk, the actor is stopped, which
+// destroys its graph; only then does node 2 listen and get what was queued.
+struct TChunkQueuedAtStop {
+    TChunkQueuedAtStop() {
+        Loop.Poller().SetMaxDuration(std::chrono::milliseconds(1));
+        RegisterMessages(Factory);
+        Factory.RegisterPayloadWriter<TDataChunk>();
+        Sender = std::make_unique<TIoThreadSender>(Loop, Factory, Port);
+        Resources->Scheduler.WorkerCount = 2;
+        Resources->SerializeOnIoThreads = true;
+        Query = Sender->System.Register(std::make_unique<TReportProbe>(Statuses, Errors));
+        Peer = Sender->System.Register(std::make_unique<TBlackHole>());
+        Actor = Sender->System.Register(std::unique_ptr<IActor>(CreateComputeActor(Resources)));
+    }
+
+    void Stop() {
+        // The chunk is the first message to node 2: a second segment holds it.
+        auto deadline = NNet::TClock::now() + std::chrono::seconds(30);
+        while (Sender->Node->Segments() < 2 && Errors.empty() && NNet::TClock::now() < deadline) {
+            Loop.Step();
+        }
+        ASSERT_GE(Sender->Node->Segments(), 2u);
+        const auto actors = Sender->System.ActorsSize();
+        Sender->System.Send<TPoison>(Query, Actor, TPoison{});
+        deadline = NNet::TClock::now() + std::chrono::seconds(10);
+        while (Sender->System.ActorsSize() == actors && NNet::TClock::now() < deadline) {
+            Loop.Step();
+        }
+        ASSERT_EQ(Sender->System.ActorsSize(), actors - 1);
+    }
+
+    // Node 2 hands the rows it gets to `onRows`. The node connects after its back-off of a
+    // second; what the stopped actor had not queued yet never comes, so after the first rows
+    // the test takes what else arrives within a short while.
+    void Receive(std::function<void(const TRowSet&)> onRows, const std::vector<int64_t>& received) {
+        Receiver = std::make_unique<TIoThreadReceiver>(Loop, Port, Sender->System);
+        Receiver->System.RegisterWellKnown(Result.ActorId(), std::make_unique<TResultProbe>(1, std::move(onRows), Finished));
+        auto deadline = NNet::TClock::now() + std::chrono::seconds(20);
+        while (received.empty() && NNet::TClock::now() < deadline) {
+            Loop.Step();
+        }
+        deadline = NNet::TClock::now() + std::chrono::milliseconds(200);
+        while (!Finished.load() && NNet::TClock::now() < deadline) {
+            Loop.Step();
+        }
+    }
+
+    NNet::TLoop<NNet::TDefaultPoller> Loop;
+    TMessagesFactory Factory;
+    const int Port = FreePort();
+    std::unique_ptr<TIoThreadSender> Sender;
+    std::shared_ptr<TRuntimeResources> Resources = std::make_shared<TRuntimeResources>();
+    std::map<std::string, int> Statuses;
+    std::vector<std::string> Errors;
+    TActorId Query;
+    TActorId Peer;
+    TActorId Actor;
+    const TActorId Result{2, 5, TActorSystem::WellKnownCookie};
+    std::atomic<bool> Finished = false;
+    // Declared last, so it goes first: its node delivers to the sender's system.
+    std::unique_ptr<TIoThreadReceiver> Receiver;
+};
+
+// The lowered `sql`, whose sink sends to node 2 while the actor is stopped. Returns the
+// int column `column` of the rows node 2 got; `width` is its byte width.
+std::vector<int64_t> RunLoweredWithChunkQueuedAtStop(const std::string& sql, size_t width, bool& finished,
+    std::vector<std::string>& errors)
+{
+    const auto fragment = LowerFragment(sql);
+    TChunkQueuedAtStop scenario;
+    std::vector<int64_t> received;
+    scenario.Sender->System.Send<TTaskGraphMessage>(scenario.Query, scenario.Actor, GraphMessage(
+        fragment.Spec, {RelayEndpoints(scenario.Result)[0]}, fragment.KernelImage));
+    EXPECT_NO_FATAL_FAILURE(scenario.Stop());
+    if (::testing::Test::HasFatalFailure()) {
+        return received;
+    }
+    scenario.Receive([&](const TRowSet& rowSet) {
+        const char* data = rowSet.Columns[0].Data;
+        for (int64_t row = 0; row < rowSet.RowCount; ++row) {
+            if (!rowSet.Selection || rowSet.Selection[row]) {
+                int64_t value = 0;
+                if (width == 4) {
+                    int32_t narrow;
+                    std::memcpy(&narrow, data + row * width, width);
+                    value = narrow;
+                } else {
+                    std::memcpy(&value, data + row * width, width);
+                }
+                received.push_back(value);
+            }
+        }
+    }, received);
+    finished = scenario.Finished.load();
+    errors = scenario.Errors;
+    return received;
+}
+
+} // namespace
+
+// A relay's chunk waits for the I/O thread while its compute actor is stopped: the chunk
+// holds its rows and the layouts of the graph that is gone, and node 2 gets it intact.
+TEST(DistributedScheduler, ChunkWaitingForAnIoThreadOutlivesItsComputeActor) {
+    std::atomic<bool> senderIntact = false;
+    std::vector<int64_t> received;
+    TChunkQueuedAtStop scenario;
+    auto& sender = scenario.Sender->System;
+    sender.Send<TTaskGraphMessage>(scenario.Query, scenario.Actor,
+        GraphMessage(RelaySpec(), RelayEndpoints(scenario.Result, scenario.Peer)));
+    sender.Send<TDataChunk>(scenario.Query, scenario.Actor,
+        TDataChunk(2, 1, {SelectedInts({10, 20, 30, 40}, {1, 0, 1, 0}, &senderIntact)}));
+    sender.Send<TFinish>(scenario.Query, scenario.Actor, TFinish{.DstTaskId = 2});
+    ASSERT_NO_FATAL_FAILURE(scenario.Stop());
+    // Not serialized yet: the queued chunk still holds the rows.
+    EXPECT_FALSE(senderIntact.load());
+    scenario.Receive([&](const TRowSet& rowSet) {
+        const auto* data = reinterpret_cast<const int64_t*>(rowSet.Columns[0].Data);
+        for (int64_t row = 0; row < rowSet.RowCount; ++row) {
+            received.push_back(data[row]);
+        }
+    }, received);
+    EXPECT_EQ(scenario.Errors, std::vector<std::string>{});
+    EXPECT_EQ(received, (std::vector<int64_t>{10, 30}));
+    EXPECT_TRUE(senderIntact.load());
+}
+
+// The same with the rows of the engine: adopted kernel output of an aggregate and of a join,
+// and CTE spool views. Each queued row arrives intact; with the finish, all of them.
+TEST(DistributedScheduler, AggregateChunkWaitingForAnIoThreadOutlivesItsComputeActor) {
+    bool finished = false;
+    std::vector<std::string> errors;
+    const auto received = RunLoweredWithChunkQueuedAtStop("SELECT count(*) FROM t GROUP BY id % 4", 8, finished, errors);
+    EXPECT_EQ(errors, std::vector<std::string>{});
+    ASSERT_FALSE(received.empty());
+    EXPECT_LE(received.size(), 4u);
+    for (const auto value : received) {
+        EXPECT_EQ(value, 64);
+    }
+    if (finished) {
+        EXPECT_EQ(received.size(), 4u);
+    }
+}
+
+TEST(DistributedScheduler, JoinChunkWaitingForAnIoThreadOutlivesItsComputeActor) {
+    bool finished = false;
+    std::vector<std::string> errors;
+    auto received = RunLoweredWithChunkQueuedAtStop("SELECT a.id FROM t a JOIN t b ON a.id = b.id", 4, finished, errors);
+    EXPECT_EQ(errors, std::vector<std::string>{});
+    ASSERT_FALSE(received.empty());
+    std::sort(received.begin(), received.end());
+    EXPECT_EQ(std::adjacent_find(received.begin(), received.end()), received.end());
+    EXPECT_GE(received.front(), 0);
+    EXPECT_LT(received.back(), 256);
+    if (finished) {
+        EXPECT_EQ(received.size(), 256u);
+    }
+}
+
+TEST(DistributedScheduler, CteChunkWaitingForAnIoThreadOutlivesItsComputeActor) {
+    bool finished = false;
+    std::vector<std::string> errors;
+    const auto received = RunLoweredWithChunkQueuedAtStop(
+        "WITH c AS (SELECT id FROM t WHERE id < 8) SELECT id FROM c UNION ALL SELECT id FROM c", 4, finished, errors);
+    EXPECT_EQ(errors, std::vector<std::string>{});
+    ASSERT_FALSE(received.empty());
+    std::map<int64_t, int> counts;
+    for (const auto value : received) {
+        EXPECT_GE(value, 0);
+        EXPECT_LT(value, 8);
+        ++counts[value];
+    }
+    for (const auto& [value, count] : counts) {
+        EXPECT_LE(count, 2) << value;
+    }
+    if (finished) {
+        EXPECT_EQ(received.size(), 16u);
+    }
+}
+
 // The relay's sink sends to a probe on its own node: the probe gets the sink's
 // row set, selection included, and the rows stay alive while it reads them.
 TEST(DistributedScheduler, RemoteSinkHandsItsRowsToAPeerOnItsNode) {
@@ -3800,7 +4073,8 @@ struct TQueryCluster {
         for (auto* system : {&Cluster.Leader, &Cluster.Follower}) {
             system->RegisterWellKnown(
                 static_cast<TLocalActorId>(EWellKnownActors::LocalScheduler),
-                std::unique_ptr<IActor>(CreateLocalScheduler(leaderId, 1, Settings.Scheduler)));
+                std::unique_ptr<IActor>(CreateLocalScheduler(leaderId, 1, Settings.Scheduler, {}, nullptr,
+                    QueryIoThreads.value_or(0) > 0)));
         }
         const auto deadline = NNet::TClock::now() + std::chrono::seconds(2);
         do {

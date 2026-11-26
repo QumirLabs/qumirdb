@@ -242,8 +242,8 @@ TEngineConfigBuilder BuildEngineConfig() {
         [](auto& s) -> auto& { return s.Poller; },
         "Network poller of qdbd; auto is the platform default. qdbd rejects a backend this platform lacks.");
     b.Size("io_threads", [](auto& s) -> auto& { return s.IoThreads; },
-        "I/O threads of qdbd's sockets: 0 keeps them on the actor thread; 1 writes and reads on one "
-        "thread; 2 writes on one and reads on the other.", 0, 2);
+        "I/O threads of qdbd's sockets, which also serialize and parse the data chunks: 0 keeps them on "
+        "the actor thread; 1 writes and reads on one thread; 2 writes on one and reads on the other.", 0, 2);
 
     b.Section("transport");
     b.Size("outbox_row_sets", [](auto& s) -> auto& { return s.Scheduler.Transport.OutboxRowSets; },

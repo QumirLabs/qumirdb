@@ -15,7 +15,9 @@ NNet::NActors::IActor* CreateLocalScheduler(NNet::NActors::TNodeId leader,
     const NScheduler::TSchedulerSettings& scheduler = {},
     const NScheduler::TTransportSettings& transport = {},
     // Compute actors open their scans' files through it.
-    std::shared_ptr<TTableCache> tables = nullptr);
+    std::shared_ptr<TTableCache> tables = nullptr,
+    // See TRuntimeResources::SerializeOnIoThreads.
+    bool serializeOnIoThreads = false);
 
 } // NRemote
 } // NQdb

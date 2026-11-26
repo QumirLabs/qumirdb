@@ -1,5 +1,8 @@
 #include "io_threads.h"
 
+#include <qdbd/messages.h>
+#include <qdbd/serialization.h>
+
 #include <coroio/all.hpp>
 #include <coroio/actors/threaded_inbound.hpp>
 #include <coroio/actors/threaded_node.hpp>
@@ -8,6 +11,7 @@
 #include <cstdlib>
 #include <exception>
 #include <iostream>
+#include <string>
 #include <vector>
 
 namespace NQdb {
@@ -44,6 +48,7 @@ public:
     }
 
     std::unique_ptr<INode> MakeNode(TMessagesFactory& factory, const THostPort& hostPort) override {
+        factory.RegisterPayloadWriter<TDataChunk>();
         auto& poller = Threads_.front()->Poller();
         return std::make_unique<TThreadedNode<TPoller>>(poller, factory, *Resolver_,
             [&poller](const TAddress& addr) {
@@ -52,14 +57,19 @@ public:
             hostPort);
     }
 
-    void ServeInbound(TActorSystem& sys, TNodeId nodeId, const TAddress& address) override {
+    void ServeInbound(TActorSystem& sys, TNodeId nodeId, const TAddress& address, TMessagesFactory& factory) override {
         auto& poller = Threads_.back()->Poller();
         TSocket listener(poller, address.Domain());
         listener.Bind(address);
         listener.Listen();
+        factory.RegisterDeserializer<TDataChunk>();
         Delivery_ = std::make_unique<TQueuedDelivery>(sys);
         // V2 leaves payloads in its read chunks, so received TDataChunk row sets point into them.
-        Inbound_ = std::make_unique<TInbound>(poller, std::move(listener), nodeId, *Delivery_);
+        // A chunk that does not parse is logged and dropped, as the actor system does.
+        Inbound_ = std::make_unique<TInbound>(poller, std::move(listener), nodeId, *Delivery_, factory,
+            [](const std::string& message) {
+                std::cerr << "[QumirDB] " << message << "\n";
+            });
     }
 
     void Start() override {

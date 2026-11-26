@@ -76,6 +76,7 @@ struct TComputeActor : public IBehaviorActor {
         if (Resources) {
             SchedulerSettings = Resources->Scheduler;
             Limits = NScheduler::TRemoteStreamLimits::From(Resources->Transport);
+            Limits.SerializeOnIoThreads = Resources->SerializeOnIoThreads;
             Resources->UsedSlots.fetch_add(1, std::memory_order_relaxed);
         }
         Become(&Behavior);
