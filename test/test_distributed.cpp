@@ -3014,6 +3014,36 @@ struct TIoThreadReceiver {
 
 } // namespace
 
+// The I/O threads opt TDataChunk in on both sides: its nodes write chunks there, and the
+// inbound parses them there into Near chunks.
+TEST(DistributedScheduler, IoThreadsSerializeAndParseChunks) {
+    NNet::TLoop<NNet::TDefaultPoller> loop;
+    TMessagesFactory factory;
+    RegisterMessages(factory);
+    EXPECT_EQ(factory.PayloadWriter(TDataChunk::MessageId), nullptr);
+    auto io = MakeIoThreads<NNet::TDefaultPoller>(1);
+    TActorSystem system(&loop.Poller(), 1);
+    system.AddNode(2, io->MakeNode(factory, NNet::THostPort("127.0.0.1", FreePort())));
+    EXPECT_NE(factory.PayloadWriter(TDataChunk::MessageId), nullptr);
+    io->ServeInbound(system, 1, NNet::TAddress{"::", FreePort()}, factory);
+
+    std::atomic<bool> intact = false;
+    const std::vector<NQdb::TValueLayout> layouts{{.Width = 8}};
+    auto* chunk = new TDataChunk(2, 1, {SelectedInts({10, 20, 30, 40}, {1, 0, 1, 0}, &intact)}, layouts.data());
+    TBlob near{TBlob::TRawPtr(chunk, TBlobDeleter{[](void* ptr) {
+        delete static_cast<TDataChunk*>(ptr);
+    }}), sizeof(TDataChunk), TBlob::PointerType::Near};
+    auto parsed = factory.DeserializeFar(TDataChunk::MessageId, factory.SerializeFar(TDataChunk::MessageId, std::move(near)));
+    ASSERT_EQ(parsed.Type, TBlob::PointerType::Near);
+    const auto& rowSet = static_cast<const TDataChunk*>(parsed.Data.get())->RowSets.at(0);
+    ASSERT_EQ(rowSet.RowCount, 2);
+    const auto* data = reinterpret_cast<const int64_t*>(rowSet.Columns[0].Data);
+    EXPECT_EQ(data[0], 10);
+    EXPECT_EQ(data[1], 30);
+    EXPECT_TRUE(intact.load());
+    io->Stop();
+}
+
 // A compute actor is stopped while the chunk it sent waits for an I/O thread: the node
 // cannot connect yet. The chunk holds its rows and the layouts of the graph that is gone,
 // and node 2 gets it intact once it listens.
