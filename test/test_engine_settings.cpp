@@ -47,6 +47,7 @@ TEST(EngineSettings, SchemaDefaultsAreTheDefaultsOfTheSettings) {
     EXPECT_EQ(config.GetString("jit", "cache_dir"), "");
     EXPECT_EQ(config.GetString("kernel", "backend"), "llvm");
     EXPECT_EQ(config.GetString("net", "poller"), "auto");
+    EXPECT_EQ(config.GetInt("net", "io_threads"), 0);
 }
 
 TEST(EngineSettings, PollerIsParsed) {
@@ -58,6 +59,17 @@ TEST(EngineSettings, PollerIsParsed) {
     const auto result = config.Override("net:poller=iocp");
     ASSERT_FALSE(result.has_value());
     EXPECT_NE(result.error().find("one of: auto, epoll, uring, kqueue, poll, select"), std::string::npos);
+}
+
+TEST(EngineSettings, IoThreadsIsBounded) {
+    auto config = MakeConfig();
+    TEngineSettings settings;
+    ASSERT_TRUE(config.Override("net:io_threads=2").has_value());
+    ApplyEngineConfig(config, settings);
+    EXPECT_EQ(settings.IoThreads, 2u);
+    const auto result = config.Override("net:io_threads=3");
+    ASSERT_FALSE(result.has_value());
+    EXPECT_NE(result.error().find("an integer in 0..2"), std::string::npos);
 }
 
 TEST(EngineSettings, EveryDefaultSurvivesApplyingTheWholeDump) {

@@ -10,6 +10,7 @@
 #include <qdbd/actors/scheduler.h>
 #include <qdbd/actors/local_scheduler.h>
 #include <qdbd/actors.h>
+#include <qdbd/io_threads.h>
 #include <qdbd/messages.h>
 #include <qdbd/serialization.h>
 #include <qdbd/time_source.h>
@@ -82,6 +83,8 @@ void PrintUsage(std::ostream& out, const char* program)
         << "  --config path         engine config file\n"
         << "  --section:key=value   engine config override\n"
         << "                        --net:poller=name network poller, one of: " << AvailablePollers << " (default auto)\n"
+        << "                        --net:io_threads=n I/O threads of the sockets: 0 on the actor thread, 1 for writes\n"
+        << "                          and reads, 2 for writes on one and reads on the other (default 0)\n"
         << "  --help                print this text\n";
 }
 
@@ -132,35 +135,42 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
     TAddress httpAddress{"::", httpPort};
 
     using TSocket = typename TPoller::TSocket;
-    std::vector<std::tuple<int, std::unique_ptr<TNode<TPoller>>>> nodes;
     TLoop<TPoller> loop;
     TResolver resolver(loop.Poller());
 
     TMessagesFactory factory;
     RegisterMessages(factory);
 
-    for (const auto& [host, nodePort, nodeId] : allHosts) {
-        nodes.emplace_back(nodeId, std::make_unique<TNode<TPoller>>(
+    // Declared before the actor system: it destroys its nodes first.
+    std::unique_ptr<IIoThreads> io;
+    if (EngineSettings.IoThreads > 0) {
+        io = MakeIoThreads<TPoller>(EngineSettings.IoThreads);
+    }
+    auto makeNode = [&](const THostPort& hostPort) -> std::unique_ptr<INode> {
+        if (io) {
+            return io->MakeNode(factory, hostPort);
+        }
+        return std::make_unique<TNode<TPoller>>(
             loop.Poller(),
             factory,
             resolver,
             [&](const TAddress& addr) {
                 return typename TPoller::TSocket(loop.Poller(), addr.Domain());
             },
-            THostPort(host, nodePort)
-        ));
-    }
+            hostPort
+        );
+    };
 
     // This node listens on the port of its own --node entry.
     int port = 0;
     std::vector<TNodeId> nodeIds;
     TActorSystem sys(&loop.Poller(), myNodeId);
-    for (auto&& [nodeId, node] : nodes) {
+    for (const auto& [host, nodePort, nodeId] : allHosts) {
         if (nodeId != myNodeId) {
             std::cerr << "Adding node with id: " << nodeId << "\n";
-            sys.AddNode(nodeId, std::move(node));
+            sys.AddNode(nodeId, makeNode(THostPort(host, nodePort)));
         } else {
-            port = node->GetHostPort().GetPort();
+            port = nodePort;
         }
         nodeIds.push_back(nodeId);
     }
@@ -179,16 +189,20 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
         httpListenSocket->Bind(httpAddress);
         httpListenSocket->Listen();
 
-        actorSysListenSocket.emplace(loop.Poller(), actorSysAddress.Domain());
-        actorSysListenSocket->Bind(actorSysAddress);
-        actorSysListenSocket->Listen();
+        if (io) {
+            io->ServeInbound(sys, myNodeId, actorSysAddress);
+        } else {
+            actorSysListenSocket.emplace(loop.Poller(), actorSysAddress.Domain());
+            actorSysListenSocket->Bind(actorSysAddress);
+            actorSysListenSocket->Listen();
+        }
     } catch (const std::exception& e) {
         std::cerr << "Cannot listen on http port " << httpPort << " and actor port " << port << ": " << e.what() << "\n";
         return 1;
     }
 
     const auto httpListenAddress = httpListenSocket->LocalAddr()->ToString();
-    const auto actorSysListenAddress = actorSysListenSocket->LocalAddr()->ToString();
+    const auto actorSysListenAddress = io ? actorSysAddress.ToString() : actorSysListenSocket->LocalAddr()->ToString();
 
     auto logger = [](const std::string& msg) {
         std::cerr << "[QumirDB] " << msg << "\n";
@@ -200,8 +214,12 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
     TWebServer<TSocket> server(std::move(*httpListenSocket), *router, logger);
     server.Start();
 
-    // V2 leaves payloads in its read chunks, so received TDataChunk row sets point into them.
-    sys.Serve<TSocket, TZeroCopyEnvelopeReaderV2>(std::move(*actorSysListenSocket));
+    if (io) {
+        sys.ServeOutbound();
+    } else {
+        // V2 leaves payloads in its read chunks, so received TDataChunk row sets point into them.
+        sys.Serve<TSocket, TZeroCopyEnvelopeReaderV2>(std::move(*actorSysListenSocket));
+    }
 
     TTimeSource timeSource;
     sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::Scheduler), IActor::TPtr(CreateSchedulerActor(&timeSource, leaderId, logger)));
@@ -210,8 +228,16 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
     sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::LocalScheduler), IActor::TPtr(CreateLocalScheduler(leaderId, pingPeriodMs, EngineSettings.Scheduler.Scheduler, EngineSettings.Scheduler.Transport, tablesCache)));
 
     std::cerr << "QumirDB poller: " << pollerName << "\n";
+    std::cerr << "QumirDB I/O threads: " << EngineSettings.IoThreads << "\n";
     std::cerr << "QumirDB listening on " << httpListenAddress << ", " << actorSysListenAddress << "\n";
+    if (io) {
+        io->Start();
+    }
     loop.Loop();
+    // The inbound side delivers to the actor system, so it is destroyed before it.
+    if (io && !io->Stop()) {
+        return 1;
+    }
 
     return 0;
 }

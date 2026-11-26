@@ -1,3 +1,4 @@
+import itertools
 import os
 import re
 import shutil
@@ -166,10 +167,10 @@ class TestQdbdCli(unittest.TestCase):
                 p.kill()
                 p.wait()
 
-    def test_every_poller_serves_a_query(self):
+    def test_every_poller_and_io_threads_mode_serves_a_query(self):
         pollers = re.search(r"--net:poller=name .*one of: ([^(]*)", run("--help").stdout).group(1)
-        for poller in [p.strip() for p in pollers.split(",")]:
-            with self.subTest(poller=poller):
+        for poller, io_threads in itertools.product([p.strip() for p in pollers.split(",")], (0, 1, 2)):
+            with self.subTest(poller=poller, io_threads=io_threads):
                 ports = [free_port() for _ in range(4)]
                 nodes = [f"127.0.0.1:{ports[0]}:1", f"127.0.0.1:{ports[1]}:2"]
                 procs = []
@@ -177,7 +178,7 @@ class TestQdbdCli(unittest.TestCase):
                     for node_id, http_port in ((1, ports[2]), (2, ports[3])):
                         args = [QDBD, "--node", nodes[0], "--node", nodes[1], "--node-id", str(node_id),
                                 "--leader-id", "1", "--http-port", str(http_port), "--data", TABLES,
-                                f"--net:poller={poller}"]
+                                f"--net:poller={poller}", f"--net:io_threads={io_threads}"]
                         procs.append(subprocess.Popen(args, stderr=subprocess.DEVNULL))
                     for port in ports:
                         self.assertTrue(listens(port))
@@ -212,6 +213,7 @@ class TestQdbdCli(unittest.TestCase):
             (["--config"], "--config requires a value"),
             (["--transport:window_chunks=0"], "an integer >= 1"),
             (["--net:poller=iocp"], "one of: auto"),
+            (["--net:io_threads=3"], "an integer in 0..2"),
         ):
             with self.subTest(args=args):
                 r = run(*args)
@@ -223,9 +225,16 @@ class TestQdbdCli(unittest.TestCase):
             busy.bind(("::", 0))
             busy.listen()
             busy_port = busy.getsockname()[1]
-            r = run("--node", f"127.0.0.1:{free_port()}:1", "--http-port", str(busy_port))
-        self.assertEqual(r.returncode, 1, r.stderr)
-        self.assertIn("Cannot listen", r.stderr)
+            for args in (
+                ["--node", f"127.0.0.1:{free_port()}:1", "--http-port", str(busy_port)],
+                # The actor port, bound on an I/O thread, with a node to a peer on it.
+                ["--node", f"127.0.0.1:{busy_port}:1", "--node", f"127.0.0.1:{free_port()}:2",
+                 "--http-port", str(free_port()), "--net:io_threads=2"],
+            ):
+                with self.subTest(args=args):
+                    r = run(*args)
+                    self.assertEqual(r.returncode, 1, r.stderr)
+                    self.assertIn("Cannot listen", r.stderr)
 
     def test_help_lists_every_option(self):
         r = run("--help")
@@ -235,6 +244,7 @@ class TestQdbdCli(unittest.TestCase):
                 self.assertRegex(r.stdout, rf"(?m)^\s*{flag}(\s|$)")
         self.assertIn("required", r.stdout)
         self.assertIn("--net:poller", r.stdout)
+        self.assertIn("--net:io_threads", r.stdout)
 
     def test_unregistered_node_id_exits_with_one(self):
         for args in ([], ["--node", f"127.0.0.1:{free_port()}:2"]):

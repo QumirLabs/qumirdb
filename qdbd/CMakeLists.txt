@@ -1,5 +1,6 @@
 add_library(qumirdb_remote
     serialization.cpp
+    io_threads.cpp
     actors/collector.cpp
     actors/compute.cpp
     actors/gateway.cpp
