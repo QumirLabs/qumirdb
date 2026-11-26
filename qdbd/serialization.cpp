@@ -1,6 +1,7 @@
 #include "serialization.h"
 
 #include <bit>
+#include <cassert>
 #include <concepts>
 #include <cstring>
 #include <limits>
@@ -363,7 +364,7 @@ size_t PartSize(const TRowSet& rowSet, const TValueLayout* descriptor) {
         if (rows != 0 && !IsStringLayout(layout) && !column.Data) {
             Invalid(layout.Bitmap ? "missing bitmap" : "missing buffer");
         }
-        // As WriteBits checks it: the write may run on an I/O thread, where it must not fail.
+        // Checked here and not by the writer: the write may run on an I/O thread, where it must not fail.
         if (rows != 0 && ((layout.Bitmap && column.DataBitOffset < 0) || (column.Mask && column.MaskBitOffset < 0))) {
             Invalid("negative bitmap offset");
         }
@@ -399,9 +400,6 @@ void WriteBits(char* out, const void* source, int32_t bitOffset, const uint8_t* 
     const size_t bytes = BitmapSize(rows);
     if (bytes == 0) {
         return;
-    }
-    if (bitOffset < 0) {
-        Invalid("negative bitmap offset");
     }
     auto* target = reinterpret_cast<uint8_t*>(out);
     const auto* bits = static_cast<const uint8_t*>(source);
@@ -565,9 +563,7 @@ void WriteChunk(const TDataChunk& message, std::span<char> out) {
     for (size_t i = 0; i < message.RowSets.size(); ++i) {
         pos += WritePart(base + pos, message.RowSets[i], message.Segment(i), message.Descriptor);
     }
-    if (pos != out.size()) {
-        Invalid("payload does not match its size");
-    }
+    assert(pos == out.size());
 }
 
 bool Flag(uint64_t value) {
