@@ -15,8 +15,9 @@ using namespace NQumir::NAst::NLiterals;
 
 namespace {
 
-// `conjunct` with `rank` renamed to `local` when it is `rank <= K`, `rank < K`,
-// `K >= rank` or `K > rank` for a constant K; otherwise null.
+// The partial filter for `conjunct`, or null. It bounds `local` from above by K
+// when the conjunct is `rank <= K`, `rank < K`, `K >= rank`, `K > rank` or
+// `rank = K` (which keeps `local <= K`) for a constant K.
 TExprPtr LocalRankBound(
     const TExprPtr& conjunct,
     const std::string& rank,
@@ -28,27 +29,32 @@ TExprPtr LocalRankBound(
         return nullptr;
     }
     auto binary = maybeBinary.Cast();
-    const bool upper = binary->Operator == "<="_op || binary->Operator == "<"_op;
-    const bool lower = binary->Operator == ">="_op || binary->Operator == ">"_op;
-    if (!upper && !lower) {
-        return nullptr;
-    }
-    auto maybeColumn = TMaybeNode<TIdentExpr>(upper ? binary->Left() : binary->Right());
-    const auto& bound = upper ? binary->Right() : binary->Left();
-    if (!maybeColumn || maybeColumn.Cast()->Name != rank || !folder.FoldNumber(bound)) {
-        return nullptr;
-    }
+    auto isRank = [&](const TExprPtr& expr) {
+        auto maybeIdent = TMaybeNode<TIdentExpr>(expr);
+        return maybeIdent && maybeIdent.Cast()->Name == rank;
+    };
+    const auto op = binary->Operator;
     TExprPtr column = NQumir::MakeIntrusive<TIdentExpr>(binary->Location, local);
-    auto value = CloneExpr(bound);
-    return NQumir::MakeIntrusive<TBinaryExpr>(
-        binary->Location, binary->Operator,
-        upper ? column : value,
-        upper ? value : column);
+    TExprPtr bound;
+    TExprPtr predicate;
+    if ((op == "<="_op || op == "<"_op) && isRank(binary->Left())) {
+        bound = CloneExpr(binary->Right());
+        predicate = NQumir::MakeIntrusive<TBinaryExpr>(binary->Location, op, column, bound);
+    } else if ((op == ">="_op || op == ">"_op) && isRank(binary->Right())) {
+        bound = CloneExpr(binary->Left());
+        predicate = NQumir::MakeIntrusive<TBinaryExpr>(binary->Location, op, bound, column);
+    } else if (op == "=="_op && (isRank(binary->Left()) || isRank(binary->Right()))) {
+        bound = CloneExpr(isRank(binary->Left()) ? binary->Right() : binary->Left());
+        predicate = NQumir::MakeIntrusive<TBinaryExpr>(binary->Location, "<="_op, column, bound);
+    }
+    if (!predicate || !folder.FoldNumber(bound)) {
+        return nullptr;
+    }
+    return predicate;
 }
 
 // A plan optimized before (a sexpr query pasted from EXPLAIN) already has one.
-bool HasPartialTopK(const TWindowOperator& window)
-{
+bool HasPartialTopK(const TWindowOperator& window) {
     auto maybeFilter = TMaybeOp<TFilterOperator>(window.Input());
     if (!maybeFilter) {
         return false;

@@ -55,6 +55,7 @@
     "window_top_rank_lt.sql": {"order": "ordered"},
     "window_top_rank_ge.sql": {"order": "ordered"},
     "window_top_rank_gt.sql": {"order": "ordered"},
+    "window_top_rank_eq.sql": {"order": "ordered"},
     "window_top_rank_zero.sql": {"order": "ordered"},
     "window_top_rank_one.sql": {"order": "ordered"},
     "window_top_rank_large_k.sql": {"order": "ordered"},

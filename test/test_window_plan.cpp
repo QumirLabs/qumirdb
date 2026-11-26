@@ -7,9 +7,13 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/window.h>
 #include <qdb/plan/pipeline.h>
+#include <qdb/sexp/parser.h>
+#include <qdb/sexp/printer.h>
 #include <qdb/sql/parser.h>
 
 #include <qumir/parser/ast.h>
+#include <qumir/parser/core/lexer.h>
+#include <qumir/parser/core/parser.h>
 
 #include <algorithm>
 #include <expected>
@@ -174,11 +178,31 @@ TEST(WindowPlan, RankFilterAddsOnePartialTopK) {
         "WHERE r <= 3", tables);
     ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
 
-    // A second optimization (a sexpr plan taken from EXPLAIN) keeps the one partial window.
+    // Optimizing the sexpr plan EXPLAIN prints keeps the one partial window.
+    TOperatorPtr current = *plan;
     for (int pass = 0; pass < 2; ++pass) {
-        ApplyPlanPasses(TestTypes(), *plan, {.Annotation = TestAnnotation()});
-        EXPECT_EQ(CountWindows(plan->Get()), 2);
-        auto* window = FindWindow(plan->Get());
+        if (pass > 0) {
+            std::ostringstream printed;
+            NSexp::PrintRelPlan(printed, current);
+            NSexp::TRelParserOptions options;
+            options.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+                return NQumir::MakeIntrusive<TSourceOperator>(
+                    TestTypes(), Borrow(t), std::string(path));
+            };
+            NQumir::NAst::NCore::TParser parser(TestTypes());
+            for (auto& [key, value] : NSexp::MakeRelParsers(std::move(options))) {
+                parser.NodeParsers[key] = std::move(value);
+            }
+            std::istringstream in(printed.str());
+            NQumir::NAst::NCore::TTokenStream tokens(in);
+            auto parsed = parser.Parse(tokens);
+            ASSERT_TRUE(parsed.has_value()) << printed.str();
+            ASSERT_NE(printed.str().find("(partial)"), std::string::npos) << printed.str();
+            current = NQumir::StaticPointerCast<IOperator>(*parsed);
+        }
+        ApplyPlanPasses(TestTypes(), current, {.Annotation = TestAnnotation()});
+        EXPECT_EQ(CountWindows(current.Get()), 2);
+        auto* window = FindWindow(current.Get());
         ASSERT_NE(window, nullptr);
         EXPECT_FALSE(window->Partial());
         auto* partial = FindWindow(window->Input().Get());

@@ -7,13 +7,9 @@
 
 namespace NQdb {
 
-// Rewrites `filter(window(x), rank <= K && rest)`, where the window computes
-// only ranking functions and K is a constant, to
-// `filter(window(filter(window-partial(x), local <= K)), rank <= K && rest)`.
-// The partial window ranks each lane's rows on their own, before the exchange
-// into the window. A row's local rank is at most its global rank, so every row
-// the original filter keeps survives the partial one and keeps its rank.
-// `nextId` numbers the local rank columns across the query.
+// Adds a partial top-K below a ranking window that a filter bounds by a constant
+// rank, so each lane drops the rows that cannot pass before the exchange into the
+// window. `nextId` numbers the local rank columns across the query.
 void ApplyWindowTopK(
     NQumir::NAst::TTypeFactory& types,
     const TOperatorPtr& root,

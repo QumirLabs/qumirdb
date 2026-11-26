@@ -114,8 +114,8 @@ public:
     }
 
     // A partial window computes its functions over each lane's share of the
-    // input, not over whole partitions. Only ApplyWindowTopK creates one, under
-    // a filter whose result does not depend on how the rows are split.
+    // input, so its own result depends on the lane split. It is meaningful only
+    // under the top-K filter and window that ApplyWindowTopK puts above it.
     bool Partial() const {
         return Partial_;
     }
