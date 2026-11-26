@@ -13,6 +13,7 @@
   "cases": {
     "types.sql": {"order": "ordered"},
     "window_rank_nan.sql": {"order": "ordered"},
+    "window_running_nan_key.sql": {"order": "ordered"},
     "float_precision_error.sql": {"execute": false, "expect_error": true},
     "arithmetic.sql": {"order": "ordered"},
     "compare.sql": {"order": "ordered"},
