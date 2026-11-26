@@ -34,6 +34,8 @@
 
 #include <coroio/all.hpp>
 #include <coroio/actors/actorsystem.hpp>
+#include <coroio/actors/threaded_node.hpp>
+#include <coroio/loop_thread.hpp>
 
 #include <gtest/gtest.h>
 
@@ -933,7 +935,7 @@ struct TTestCluster {
                 listeners[i]->Listen();
             } else {
                 IoThreads.emplace_back(MakeIoThreads<NNet::TDefaultPoller>(ioThreads));
-                IoThreads[i]->ServeInbound(*systems[i], ids[i], address);
+                IoThreads[i]->ServeInbound(*systems[i], ids[i], address, Factory);
             }
         }
         for (size_t i = 0; i < 2; ++i) {
@@ -2954,6 +2956,125 @@ TEST(DistributedScheduler, SelectedRowsCrossNodesCompacted) {
     EXPECT_TRUE(senderIntact.load());
 }
 
+namespace {
+
+// Node 1 of a cluster whose node to node 2 writes on an I/O thread, as qdbd's with
+// net:io_threads: the node is at hand for its Segments().
+struct TIoThreadSender {
+    TIoThreadSender(NNet::TLoop<NNet::TDefaultPoller>& loop, TMessagesFactory& factory, int port)
+        : Resolver(Io.Poller())
+        , System(&loop.Poller(), 1)
+    {
+        auto& poller = Io.Poller();
+        auto node = std::make_unique<TThreadedNode<NNet::TDefaultPoller>>(poller, factory, Resolver,
+            [&poller](const NNet::TAddress& addr) {
+                return NNet::TDefaultPoller::TSocket(poller, addr.Domain());
+            },
+            NNet::THostPort("127.0.0.1", port));
+        Node = node.get();
+        System.AddNode(2, std::move(node));
+        System.ServeOutbound();
+        Io.Start();
+    }
+
+    // The loop stops before the system destroys the node
+    ~TIoThreadSender() {
+        Io.Stop();
+        Io.Join();
+    }
+
+    NNet::TLoopThread<NNet::TDefaultPoller> Io;
+    NNet::TResolver Resolver;
+    TActorSystem System;
+    TThreadedNode<NNet::TDefaultPoller>* Node = nullptr;
+};
+
+// Node 2, which reads its inbound connections as qdbd does with net:io_threads=1; its
+// confirms go to `sender` through memory.
+struct TIoThreadReceiver {
+    TIoThreadReceiver(NNet::TLoop<NNet::TDefaultPoller>& loop, int port, TActorSystem& sender)
+        : Io(MakeIoThreads<NNet::TDefaultPoller>(1))
+        , System(&loop.Poller(), 2)
+    {
+        RegisterMessages(Factory);
+        System.AddNode(1, std::make_unique<TMemoryNode>(sender));
+        Io->ServeInbound(System, 2, NNet::TAddress{"::", port}, Factory);
+        System.ServeOutbound();
+        Io->Start();
+    }
+
+    ~TIoThreadReceiver() {
+        Io->Stop();
+    }
+
+    TMessagesFactory Factory;
+    std::unique_ptr<IIoThreads> Io;
+    TActorSystem System;
+};
+
+} // namespace
+
+// A compute actor is stopped while the chunk it sent waits for an I/O thread: the node
+// cannot connect yet. The chunk holds its rows and the layouts of the graph that is gone,
+// and node 2 gets it intact once it listens.
+TEST(DistributedScheduler, ChunkWaitingForAnIoThreadOutlivesItsComputeActor) {
+    using namespace NQdb::NScheduler;
+    std::atomic<bool> senderIntact = false;
+    std::vector<int64_t> received;
+    std::atomic<bool> finished = false;
+    NNet::TLoop<NNet::TDefaultPoller> loop;
+    loop.Poller().SetMaxDuration(std::chrono::milliseconds(1));
+    TMessagesFactory factory;
+    RegisterMessages(factory);
+    factory.RegisterPayloadWriter<TDataChunk>();
+    const int port = FreePort();
+    TIoThreadSender sender(loop, factory, port);
+    auto resources = std::make_shared<TRuntimeResources>();
+    resources->Scheduler.WorkerCount = 2;
+    resources->SerializeOnIoThreads = true;
+    std::map<std::string, int> statuses;
+    std::vector<std::string> errors;
+    const auto query = sender.System.Register(std::make_unique<TReportProbe>(statuses, errors));
+    const auto peer = sender.System.Register(std::make_unique<TBlackHole>());
+    const auto actor = sender.System.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+    const TActorId result{2, 5, TActorSystem::WellKnownCookie};
+    sender.System.Send<TTaskGraphMessage>(query, actor, GraphMessage(RelaySpec(), RelayEndpoints(result, peer)));
+    sender.System.Send<TDataChunk>(query, actor,
+        TDataChunk(2, 1, {SelectedInts({10, 20, 30, 40}, {1, 0, 1, 0}, &senderIntact)}));
+    sender.System.Send<TFinish>(query, actor, TFinish{.DstTaskId = 2});
+    // The chunk is the first message to node 2: a second segment holds it.
+    auto deadline = NNet::TClock::now() + std::chrono::seconds(10);
+    while (sender.Node->Segments() < 2 && errors.empty() && NNet::TClock::now() < deadline) {
+        loop.Step();
+    }
+    ASSERT_GE(sender.Node->Segments(), 2u);
+    const auto actors = sender.System.ActorsSize();
+    sender.System.Send<TPoison>(query, actor, TPoison{});
+    deadline = NNet::TClock::now() + std::chrono::seconds(10);
+    while (sender.System.ActorsSize() == actors && NNet::TClock::now() < deadline) {
+        loop.Step();
+    }
+    ASSERT_EQ(sender.System.ActorsSize(), actors - 1);
+    // Not serialized yet: the queued chunk still holds the rows.
+    EXPECT_FALSE(senderIntact.load());
+
+    TIoThreadReceiver receiver(loop, port, sender.System);
+    receiver.System.RegisterWellKnown(result.ActorId(), std::make_unique<TResultProbe>(1, [&](const TRowSet& rowSet) {
+        const auto* data = reinterpret_cast<const int64_t*>(rowSet.Columns[0].Data);
+        for (int64_t row = 0; row < rowSet.RowCount; ++row) {
+            received.push_back(data[row]);
+        }
+    }, finished));
+    // The node connects after its back-off of a second.
+    deadline = NNet::TClock::now() + std::chrono::seconds(20);
+    while (received.size() < 2 && NNet::TClock::now() < deadline) {
+        loop.Step();
+    }
+    EXPECT_EQ(errors, std::vector<std::string>{});
+    EXPECT_EQ(received, (std::vector<int64_t>{10, 30}));
+    EXPECT_TRUE(senderIntact.load());
+}
+
 // The relay's sink sends to a probe on its own node: the probe gets the sink's
 // row set, selection included, and the rows stay alive while it reads them.
 TEST(DistributedScheduler, RemoteSinkHandsItsRowsToAPeerOnItsNode) {
@@ -3800,7 +3921,8 @@ struct TQueryCluster {
         for (auto* system : {&Cluster.Leader, &Cluster.Follower}) {
             system->RegisterWellKnown(
                 static_cast<TLocalActorId>(EWellKnownActors::LocalScheduler),
-                std::unique_ptr<IActor>(CreateLocalScheduler(leaderId, 1, Settings.Scheduler)));
+                std::unique_ptr<IActor>(CreateLocalScheduler(leaderId, 1, Settings.Scheduler, {}, nullptr,
+                    QueryIoThreads.value_or(0) > 0)));
         }
         const auto deadline = NNet::TClock::now() + std::chrono::seconds(2);
         do {

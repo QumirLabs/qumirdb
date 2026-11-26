@@ -363,6 +363,10 @@ size_t PartSize(const TRowSet& rowSet, const TValueLayout* descriptor) {
         if (rows != 0 && !IsStringLayout(layout) && !column.Data) {
             Invalid(layout.Bitmap ? "missing bitmap" : "missing buffer");
         }
+        // As WriteBits checks it: the write may run on an I/O thread, where it must not fail.
+        if (rows != 0 && ((layout.Bitmap && column.DataBitOffset < 0) || (column.Mask && column.MaskBitOffset < 0))) {
+            Invalid("negative bitmap offset");
+        }
     }
     return PartLayoutSize(rowSet, descriptor, rows, [&](const TColumn& column) {
         return StringBytes(column, rowSet);

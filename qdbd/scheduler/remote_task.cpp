@@ -3,6 +3,7 @@
 
 #include <qdbd/messages.h>
 #include <qdbd/serialization.h>
+#include <qdbd/scheduler/io_thread_chunk.h>
 
 #include <coroio/actors/actorsystem.hpp>
 
@@ -29,7 +30,11 @@ TRemoteSinkState::TRemoteSinkState(
     , ActorChannel(actorChannel)
     , Limits(limits)
     , Outbox(limits.OutboxCapacity)
-{ }
+{
+    if (limits.SerializeOnIoThreads) {
+        OwnedDescriptor = std::make_shared<const std::vector<TValueLayout>>(descriptor.begin(), descriptor.end());
+    }
+}
 
 TRemoteSinkState::~TRemoteSinkState() {
     TQueued queued;
@@ -108,6 +113,10 @@ void TRemoteSinkState::SendChunk(NNet::NActors::TActorContext::TPtr& ctx, TDataC
         if (static_cast<size_t>(rowSet.ColumnCount) != Descriptor.size()) {
             throw std::runtime_error("remote sink " + std::to_string(Id) + ": row set columns do not match layouts");
         }
+    }
+    if (Limits.SerializeOnIoThreads) {
+        SendToIoThread(*ctx, ActorId, std::move(chunk), OwnedDescriptor);
+        return;
     }
     ctx->Send<TDataChunk>(ActorId, std::move(chunk));
 }

@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cassert>
 #include <deque>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
@@ -99,6 +100,8 @@ struct TRemoteStreamLimits {
     // Send a partial chunk only when the outbox is full or the input has
     // finished: for a stream its receiver reads after the finish (a CTE spool).
     bool FullChunks = false;
+    // Hand each chunk to the node as an object that its I/O thread serializes.
+    bool SerializeOnIoThreads = false;
 
     static TRemoteStreamLimits From(const TTransportSettings& settings) {
         return {
@@ -214,6 +217,9 @@ struct TRemoteSinkState {
     uint64_t InFlightBytes = 0;
     bool Parked = false;
     bool FinishSent = false;
+    // With SerializeOnIoThreads: a copy of Descriptor that the chunks keep until the I/O
+    // thread has written them, which may be after the task is gone.
+    std::shared_ptr<const std::vector<TValueLayout>> OwnedDescriptor;
 
 private:
     // A full chunk; the outbox may hold less than ChunkBytes.
