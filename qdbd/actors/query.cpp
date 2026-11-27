@@ -85,15 +85,16 @@ struct TBaseBehavior {
     void Complete(const std::expected<std::string, NQumir::TError>& res, TActorContext::TPtr& ctx, bool unavailable = false,
         std::optional<TQueryTiming> timing = std::nullopt)
     {
-        for (const auto actor : State->ComputeActors) {
-            ctx->Send<TPoison>(actor, TPoison{});
-        }
-        State->ComputeActors.clear();
+        // The reply goes first; the stops to other nodes leave with the network drain after this pass.
         ctx->Send<TExecuteQueryResponse>(State->RespondTo, TExecuteQueryResponse {
             .Response = res,
             .Unavailable = unavailable,
             .Timing = timing
         });
+        for (const auto actor : State->ComputeActors) {
+            ctx->Send<TPoison>(actor, TPoison{});
+        }
+        State->ComputeActors.clear();
         ctx->Send<TPoison>(ctx->Self(), TPoison{});
     }
 

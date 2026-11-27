@@ -9,6 +9,7 @@
 #include <qdbd/actors/gateway.h>
 #include <qdbd/actors/scheduler.h>
 #include <qdbd/actors/local_scheduler.h>
+#include <qdbd/actors/pinger.h>
 #include <qdbd/actors.h>
 #include <qdbd/io_threads.h>
 #include <qdbd/messages.h>
@@ -118,6 +119,14 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
     const auto& dataDir = options.DataDir;
     // Shared by planning and the compute actors' graphs.
     auto tablesCache = std::make_shared<TTableCache>();
+    // What the node shares with its compute actors; declared before the actor system, so it outlives them.
+    auto resources = std::make_shared<TRuntimeResources>();
+    resources->Scheduler = EngineSettings.Scheduler.Scheduler;
+    resources->Transport = EngineSettings.Scheduler.Transport;
+    resources->Tables = tablesCache;
+    resources->SerializeOnIoThreads = EngineSettings.IoThreads > 0;
+    // Frees the graphs of finished queries off the actor thread; at most two wait for it.
+    resources->GraphCleaner = std::make_shared<NScheduler::TGraphCleaner>(2);
     auto compilerFactory = [&]() {
         auto tableFactory = [&dataDir, tablesCache](NQumir::NAst::TTypeFactory& types, std::string_view table)
             -> std::expected<NQdb::TOperatorPtr, NQumir::TError>
@@ -228,7 +237,7 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
     sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::Scheduler), IActor::TPtr(CreateSchedulerActor(&timeSource, leaderId, logger)));
 
     uint64_t pingPeriodMs = 1000;
-    sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::LocalScheduler), IActor::TPtr(CreateLocalScheduler(leaderId, pingPeriodMs, EngineSettings.Scheduler.Scheduler, EngineSettings.Scheduler.Transport, tablesCache, io != nullptr)));
+    sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::LocalScheduler), IActor::TPtr(CreateLocalScheduler(leaderId, pingPeriodMs, resources)));
 
     std::cerr << "QumirDB poller: " << pollerName << "\n";
     std::cerr << "QumirDB I/O threads: " << EngineSettings.IoThreads << "\n";

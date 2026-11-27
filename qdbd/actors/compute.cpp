@@ -30,6 +30,21 @@ using namespace NNet::NActors;
 
 namespace {
 
+// The remote state of each external task by its id, with the task's node.
+template <class TState>
+using TStates = std::unordered_map<uint64_t, std::tuple<std::shared_ptr<TState>, NScheduler::TTaskNode*>>;
+
+// A stopped graph with its scheduler and remote states, which point into it and die first.
+// It outlives its actor: the states keep the actor's ActorChannel and the CTE sink wake captures
+// the actor, so nothing may call them once the scheduler thread is joined.
+struct TRetiredGraph {
+    std::unique_ptr<NScheduler::TTaskGraph> OwnedGraph;
+    std::unique_ptr<NScheduler::TThreadedScheduler> Scheduler;
+    TStates<NScheduler::TRemoteSourceState> SourceStates;
+    TStates<NScheduler::TRemoteSinkState> SinkStates;
+    TStates<NScheduler::TRuntimeFilterSourceState> FilterSourceStates;
+};
+
 struct TComputeActor : public IBehaviorActor {
     struct TDefaultBehavior : public TBehavior<TDefaultBehavior, TTaskGraphMessage, TDataChunk, TDataConfirm, TFinish,
         TFilterPartial, TWakeUp>
@@ -164,6 +179,7 @@ struct TComputeActor : public IBehaviorActor {
     void ReleaseSlot() {
         StopScheduler();
         if (Resources) {
+            RetireGraph();
             Resources->UsedSlots.fetch_sub(1, std::memory_order_relaxed);
             Resources.reset();
         }
@@ -172,6 +188,20 @@ struct TComputeActor : public IBehaviorActor {
             NotificationTask.destroy();
             NotificationTask = {};
         }
+    }
+
+    // Freeing a large graph takes seconds: the actor thread only hands it to the node's cleaner.
+    void RetireGraph() {
+        if (!OwnedGraph || !Resources->GraphCleaner) {
+            return;
+        }
+        Resources->GraphCleaner->Retire(std::make_shared<TRetiredGraph>(TRetiredGraph{
+            .OwnedGraph = std::move(OwnedGraph),
+            .Scheduler = std::move(Scheduler),
+            .SourceStates = std::move(SourceStates),
+            .SinkStates = std::move(SinkStates),
+            .FilterSourceStates = std::move(FilterSourceStates),
+        }));
     }
 
     void StartGraph(TTaskGraphMessage&& message, TActorContext::TPtr ctx) {
@@ -420,10 +450,9 @@ struct TComputeActor : public IBehaviorActor {
     std::unique_ptr<NScheduler::TActorNotificationChannel> ActorChannel;
     std::unique_ptr<NScheduler::TSchedulerChannel> SchedulerChannel;
     std::unique_ptr<NScheduler::TThreadedScheduler> Scheduler;
-    std::unordered_map<uint64_t, std::tuple<std::shared_ptr<NScheduler::TRemoteSourceState>, NScheduler::TTaskNode*>> SourceStates;
-    std::unordered_map<uint64_t, std::tuple<std::shared_ptr<NScheduler::TRemoteSinkState>, NScheduler::TTaskNode*>> SinkStates;
-    std::unordered_map<uint64_t, std::tuple<std::shared_ptr<NScheduler::TRuntimeFilterSourceState>, NScheduler::TTaskNode*>>
-        FilterSourceStates;
+    TStates<NScheduler::TRemoteSourceState> SourceStates;
+    TStates<NScheduler::TRemoteSinkState> SinkStates;
+    TStates<NScheduler::TRuntimeFilterSourceState> FilterSourceStates;
     std::thread SchedulerThread;
     TVoidSuspendedTask NotificationTask;
     TActorId QueryActorId;

@@ -18,22 +18,11 @@ namespace {
 
 struct TLocalSchedulerActor : public IBehaviorActor {
     struct TDefaultBehavior : public TBehavior<TDefaultBehavior, TSpawnComputeActor> {
-        TDefaultBehavior(
-            TNodeId leader,
-            uint64_t pingPeriodMs,
-            const NScheduler::TSchedulerSettings& scheduler,
-            const NScheduler::TTransportSettings& transport,
-            std::shared_ptr<TTableCache> tables,
-            bool serializeOnIoThreads)
+        TDefaultBehavior(TNodeId leader, uint64_t pingPeriodMs, std::shared_ptr<TRuntimeResources> resources)
             : Leader(leader)
             , PingPeriodMs(pingPeriodMs)
-            , Resources(std::make_shared<TRuntimeResources>())
-        {
-            Resources->Scheduler = scheduler;
-            Resources->Transport = transport;
-            Resources->Tables = std::move(tables);
-            Resources->SerializeOnIoThreads = serializeOnIoThreads;
-        }
+            , Resources(std::move(resources))
+        { }
 
         void Receive(TSpawnComputeActor&& request, TBlob, TActorContext::TPtr ctx)
         {
@@ -74,14 +63,8 @@ struct TLocalSchedulerActor : public IBehaviorActor {
         TActorId PingerActorId;
     };
 
-    TLocalSchedulerActor(
-        TNodeId leader,
-        uint64_t pingPeriodMs,
-        const NScheduler::TSchedulerSettings& scheduler,
-        const NScheduler::TTransportSettings& transport,
-        std::shared_ptr<TTableCache> tables,
-        bool serializeOnIoThreads)
-        : Behavior(leader, pingPeriodMs, scheduler, transport, std::move(tables), serializeOnIoThreads)
+    TLocalSchedulerActor(TNodeId leader, uint64_t pingPeriodMs, std::shared_ptr<TRuntimeResources> resources)
+        : Behavior(leader, pingPeriodMs, std::move(resources))
     {
         Become(&Behavior);
     }
@@ -102,12 +85,9 @@ struct TLocalSchedulerActor : public IBehaviorActor {
 NNet::NActors::IActor* CreateLocalScheduler(
     TNodeId leader,
     uint64_t pingPeriodMs,
-    const NScheduler::TSchedulerSettings& scheduler,
-    const NScheduler::TTransportSettings& transport,
-    std::shared_ptr<TTableCache> tables,
-    bool serializeOnIoThreads)
+    std::shared_ptr<TRuntimeResources> resources)
 {
-    return new TLocalSchedulerActor(leader, pingPeriodMs, scheduler, transport, std::move(tables), serializeOnIoThreads);
+    return new TLocalSchedulerActor(leader, pingPeriodMs, std::move(resources));
 }
 
 } // namespace NRemote

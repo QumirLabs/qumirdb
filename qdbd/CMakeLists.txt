@@ -9,6 +9,7 @@ add_library(qumirdb_remote
     actors/query.cpp
     actors/scheduler.cpp
     partitioner/partitioner.cpp
+    scheduler/graph_cleaner.cpp
     scheduler/io_thread_chunk.cpp
     scheduler/remote_task.cpp
     http/router.cpp

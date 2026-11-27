@@ -11,6 +11,7 @@
 #include <qdbd/http/router.h>
 #include <qdbd/io_threads.h>
 #include <qdbd/partitioner/partitioner.h>
+#include <qdbd/scheduler/graph_cleaner.h>
 #include <qdbd/scheduler/remote_task.h>
 #include <qdb/catalog/external_module.h>
 #include <qdb/compiler/query.h>
@@ -48,6 +49,7 @@
 #include <deque>
 #include <expected>
 #include <functional>
+#include <future>
 #include <limits>
 #include <optional>
 #include <map>
@@ -1170,10 +1172,10 @@ TEST(DistributedScheduler, HeartbeatsAdvertiseLocalSchedulersAndAllowAllocation)
         cluster.Loop.Poller().SetMaxDuration(std::chrono::milliseconds(1));
         const auto first = cluster.Leader.RegisterWellKnown(
             static_cast<TLocalActorId>(EWellKnownActors::LocalScheduler),
-            std::unique_ptr<IActor>(CreateLocalScheduler(leaderId, 1)));
+            std::unique_ptr<IActor>(CreateLocalScheduler(leaderId, 1, std::make_shared<TRuntimeResources>())));
         const auto second = cluster.Follower.RegisterWellKnown(
             static_cast<TLocalActorId>(EWellKnownActors::LocalScheduler),
-            std::unique_ptr<IActor>(CreateLocalScheduler(leaderId, 1)));
+            std::unique_ptr<IActor>(CreateLocalScheduler(leaderId, 1, std::make_shared<TRuntimeResources>())));
         const auto leaderActors = cluster.Leader.ActorsSize();
         const auto followerActors = cluster.Follower.ActorsSize();
         const auto deadline = NNet::TClock::now() + std::chrono::seconds(2);
@@ -1216,7 +1218,7 @@ TEST(DistributedScheduler, LocalSchedulerCreatesIndependentActors) {
     const auto local = cluster.Follower.RegisterWellKnown(
         static_cast<TLocalActorId>(EWellKnownActors::LocalScheduler),
         std::unique_ptr<IActor>(CreateLocalScheduler(
-            cluster.LeaderScheduler.NodeId(), 1000)));
+            cluster.LeaderScheduler.NodeId(), 1000, std::make_shared<TRuntimeResources>())));
     const auto before = cluster.Follower.ActorsSize();
     for (uint32_t count : {0, 1, 3}) {
         SCOPED_TRACE(count);
@@ -1505,7 +1507,7 @@ TEST(DistributedAllocation, LocalSchedulerAllowsOversubscription) {
     const auto local = cluster.Follower.RegisterWellKnown(
         static_cast<TLocalActorId>(EWellKnownActors::LocalScheduler),
         std::unique_ptr<IActor>(CreateLocalScheduler(
-            cluster.LeaderScheduler.NodeId(), 1000)));
+            cluster.LeaderScheduler.NodeId(), 1000, std::make_shared<TRuntimeResources>())));
     const auto before = cluster.Follower.ActorsSize();
     cluster.Spawn(32, local);
     ASSERT_EQ(cluster.Responses.size(), 1);
@@ -4059,6 +4061,9 @@ struct TQueryCluster {
     NQdb::NScheduler::TSettings Settings;
     TTestCluster Cluster{2, QueryIoThreads};
     size_t LeaderActors = 0;
+    // As in qdbd, each node destroys the graphs of finished queries on its cleaner's thread.
+    size_t RetiredGraphs = 2;
+    std::vector<std::shared_ptr<NQdb::NScheduler::TGraphCleaner>> Cleaners;
 
     TQueryCluster() {
         using namespace NQdb::NScheduler;
@@ -4071,10 +4076,14 @@ struct TQueryCluster {
         Cluster.Loop.Poller().SetMaxDuration(std::chrono::milliseconds(1));
         const auto leaderId = Cluster.LeaderScheduler.NodeId();
         for (auto* system : {&Cluster.Leader, &Cluster.Follower}) {
+            Cleaners.push_back(std::make_shared<NQdb::NScheduler::TGraphCleaner>(RetiredGraphs));
+            auto resources = std::make_shared<TRuntimeResources>();
+            resources->Scheduler = Settings.Scheduler;
+            resources->SerializeOnIoThreads = QueryIoThreads.value_or(0) > 0;
+            resources->GraphCleaner = Cleaners.back();
             system->RegisterWellKnown(
                 static_cast<TLocalActorId>(EWellKnownActors::LocalScheduler),
-                std::unique_ptr<IActor>(CreateLocalScheduler(leaderId, 1, Settings.Scheduler, {}, nullptr,
-                    QueryIoThreads.value_or(0) > 0)));
+                std::unique_ptr<IActor>(CreateLocalScheduler(leaderId, 1, std::move(resources))));
         }
         const auto deadline = NNet::TClock::now() + std::chrono::seconds(2);
         do {
@@ -4147,6 +4156,117 @@ TEST(DistributedScheduler, QueryActorRunsAQueryOnEveryNode) {
         EXPECT_EQ(static_cast<int64_t>(answer->Timing->Rows), std::ranges::count(expected, '\n') - 1);
         EXPECT_GT(answer->Timing->Execute, 0);
     }
+}
+
+namespace {
+
+// A retired graph whose teardown waits until it is released.
+struct THeldTeardown {
+    std::shared_future<void> Released;
+
+    ~THeldTeardown()
+    {
+        Released.wait();
+    }
+};
+
+// Keeps each cleaner busy with a held teardown while in scope.
+class THeldCleaners {
+public:
+    explicit THeldCleaners(const std::vector<std::shared_ptr<NQdb::NScheduler::TGraphCleaner>>& cleaners)
+    {
+        for (const auto& cleaner : cleaners) {
+            cleaner->Retire(std::make_shared<THeldTeardown>(Released_));
+        }
+    }
+
+    ~THeldCleaners()
+    {
+        Release_.set_value();
+    }
+
+private:
+    std::promise<void> Release_;
+    std::shared_future<void> Released_ = Release_.get_future().share();
+};
+
+} // namespace
+
+// While each node's teardown is held, a query gets its answer and the next one
+// runs: their graphs wait in the cleaners, which then hold a further one back.
+TEST(DistributedScheduler, QueryActorRepliesBeforeItsGraphsAreDestroyed) {
+    TQueryCluster cluster;
+    // The held teardown and the graphs of both queries.
+    cluster.RetiredGraphs = 3;
+    ASSERT_NO_FATAL_FAILURE(cluster.Start());
+    TDecimalsCompiler compiler;
+    const std::string sql = "SELECT a.id, b.s, b.d38 FROM t a JOIN t b ON a.id = b.id WHERE a.id % 5 = 0 ORDER BY a.id";
+    const auto expected = RunLocally(sql, cluster.Settings);
+    std::atomic<bool> fourthRetired = false;
+    std::thread fourth;
+    {
+        THeldCleaners held(cluster.Cleaners);
+        for (int query = 0; query < 2; ++query) {
+            SCOPED_TRACE(query);
+            std::vector<std::string> log;
+            const auto answer = cluster.Run(compiler, sql, std::nullopt, log);
+            ASSERT_TRUE(answer);
+            ASSERT_TRUE(answer->Response) << answer->Response.error().ToString();
+            EXPECT_TRUE(std::ranges::contains(log, std::string("Query: started 2 fragments")));
+            EXPECT_EQ(*answer->Response, expected);
+        }
+        fourth = std::thread([&] {
+            cluster.Cleaners.front()->Retire(std::make_shared<int>());
+            fourthRetired = true;
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        EXPECT_FALSE(fourthRetired.load());
+    }
+    fourth.join();
+    EXPECT_TRUE(fourthRetired.load());
+}
+
+// A graph still running when its actor stops: the peer never confirms, so its sink waits
+// with rows queued. The cleaner takes it as it is and frees those rows only when it gets to it.
+TEST(DistributedScheduler, CleanerTakesAGraphStoppedWhileItRuns) {
+    using namespace NQdb::NScheduler;
+    std::atomic<int> destroyed = 0;
+    // As in RemoteSinkReleasesItsOutboxOnTeardown: each row set alone fills the sink's window.
+    constexpr int produced = 8;
+    auto cleaner = std::make_shared<TGraphCleaner>(2);
+    {
+        THeldCleaners held({cleaner});
+        auto resources = std::make_shared<TRuntimeResources>();
+        resources->Scheduler.WorkerCount = 2;
+        resources->GraphCleaner = cleaner;
+        TTestCluster cluster;
+        std::map<std::string, int> statuses;
+        std::vector<std::string> errors;
+        const auto query = cluster.Follower.Register(std::make_unique<TReportProbe>(statuses, errors));
+        const auto peer = cluster.Follower.Register(std::make_unique<TBlackHole>());
+        const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+        cluster.Follower.Send<TTaskGraphMessage>(query, actor, GraphMessage(RelaySpec(), RelayEndpoints(peer, peer)));
+        for (uint64_t seq = 1; seq <= produced; ++seq) {
+            cluster.Follower.Send<TDataChunk>(query, actor, TDataChunk(2, seq, {CountedRows(1 << 20, &destroyed)}));
+        }
+        const auto until = NNet::TClock::now() + std::chrono::milliseconds(200);
+        while (NNet::TClock::now() < until) {
+            cluster.Pump();
+        }
+        EXPECT_EQ(errors, std::vector<std::string>{});
+        const int released = destroyed.load();
+        EXPECT_LT(released, produced);
+        const auto actors = cluster.Follower.ActorsSize();
+        cluster.Follower.Send<TPoison>(query, actor, TPoison{});
+        cluster.Pump();
+        EXPECT_EQ(cluster.Follower.ActorsSize(), actors - 1);
+        EXPECT_EQ(destroyed.load(), released);
+    }
+    const auto deadline = NNet::TClock::now() + std::chrono::seconds(10);
+    while (destroyed.load() < produced && NNet::TClock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_EQ(destroyed.load(), produced);
 }
 
 // Joins whose build lanes and probes the split puts on both nodes: each node's
