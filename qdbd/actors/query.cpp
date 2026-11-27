@@ -85,15 +85,20 @@ struct TBaseBehavior {
     void Complete(const std::expected<std::string, NQumir::TError>& res, TActorContext::TPtr& ctx, bool unavailable = false,
         std::optional<TQueryTiming> timing = std::nullopt)
     {
-        for (const auto actor : State->ComputeActors) {
-            ctx->Send<TPoison>(actor, TPoison{});
-        }
-        State->ComputeActors.clear();
+        // The reply does not wait for the stops; remote nodes get theirs before the local one.
         ctx->Send<TExecuteQueryResponse>(State->RespondTo, TExecuteQueryResponse {
             .Response = res,
             .Unavailable = unavailable,
             .Timing = timing
         });
+        for (const bool remote : {true, false}) {
+            for (const auto actor : State->ComputeActors) {
+                if ((actor.NodeId() != ctx->Self().NodeId()) == remote) {
+                    ctx->Send<TPoison>(actor, TPoison{});
+                }
+            }
+        }
+        State->ComputeActors.clear();
         ctx->Send<TPoison>(ctx->Self(), TPoison{});
     }
 

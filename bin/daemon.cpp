@@ -118,6 +118,8 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
     const auto& dataDir = options.DataDir;
     // Shared by planning and the compute actors' graphs.
     auto tablesCache = std::make_shared<TTableCache>();
+    // Frees the graphs of finished queries off the actor thread; at most two wait for it.
+    auto graphCleaner = std::make_shared<NScheduler::TGraphCleaner>(2);
     auto compilerFactory = [&]() {
         auto tableFactory = [&dataDir, tablesCache](NQumir::NAst::TTypeFactory& types, std::string_view table)
             -> std::expected<NQdb::TOperatorPtr, NQumir::TError>
@@ -228,7 +230,7 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
     sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::Scheduler), IActor::TPtr(CreateSchedulerActor(&timeSource, leaderId, logger)));
 
     uint64_t pingPeriodMs = 1000;
-    sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::LocalScheduler), IActor::TPtr(CreateLocalScheduler(leaderId, pingPeriodMs, EngineSettings.Scheduler.Scheduler, EngineSettings.Scheduler.Transport, tablesCache, io != nullptr)));
+    sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::LocalScheduler), IActor::TPtr(CreateLocalScheduler(leaderId, pingPeriodMs, EngineSettings.Scheduler.Scheduler, EngineSettings.Scheduler.Transport, tablesCache, io != nullptr, graphCleaner)));
 
     std::cerr << "QumirDB poller: " << pollerName << "\n";
     std::cerr << "QumirDB I/O threads: " << EngineSettings.IoThreads << "\n";

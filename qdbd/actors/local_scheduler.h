@@ -4,6 +4,7 @@
 
 #include <qdb/io/parquet/table_cache.h>
 #include <qdb/scheduler/settings/settings.h>
+#include <qdbd/scheduler/graph_cleaner.h>
 
 #include <coroio/actors/actor.hpp>
 
@@ -17,7 +18,9 @@ NNet::NActors::IActor* CreateLocalScheduler(NNet::NActors::TNodeId leader,
     // Compute actors open their scans' files through it.
     std::shared_ptr<TTableCache> tables = nullptr,
     // See TRuntimeResources::SerializeOnIoThreads.
-    bool serializeOnIoThreads = false);
+    bool serializeOnIoThreads = false,
+    // See TRuntimeResources::GraphCleaner.
+    std::shared_ptr<NScheduler::TGraphCleaner> graphCleaner = nullptr);
 
 } // NRemote
 } // NQdb

@@ -24,7 +24,8 @@ struct TLocalSchedulerActor : public IBehaviorActor {
             const NScheduler::TSchedulerSettings& scheduler,
             const NScheduler::TTransportSettings& transport,
             std::shared_ptr<TTableCache> tables,
-            bool serializeOnIoThreads)
+            bool serializeOnIoThreads,
+            std::shared_ptr<NScheduler::TGraphCleaner> graphCleaner)
             : Leader(leader)
             , PingPeriodMs(pingPeriodMs)
             , Resources(std::make_shared<TRuntimeResources>())
@@ -33,6 +34,7 @@ struct TLocalSchedulerActor : public IBehaviorActor {
             Resources->Transport = transport;
             Resources->Tables = std::move(tables);
             Resources->SerializeOnIoThreads = serializeOnIoThreads;
+            Resources->GraphCleaner = std::move(graphCleaner);
         }
 
         void Receive(TSpawnComputeActor&& request, TBlob, TActorContext::TPtr ctx)
@@ -80,8 +82,10 @@ struct TLocalSchedulerActor : public IBehaviorActor {
         const NScheduler::TSchedulerSettings& scheduler,
         const NScheduler::TTransportSettings& transport,
         std::shared_ptr<TTableCache> tables,
-        bool serializeOnIoThreads)
-        : Behavior(leader, pingPeriodMs, scheduler, transport, std::move(tables), serializeOnIoThreads)
+        bool serializeOnIoThreads,
+        std::shared_ptr<NScheduler::TGraphCleaner> graphCleaner)
+        : Behavior(leader, pingPeriodMs, scheduler, transport, std::move(tables), serializeOnIoThreads,
+            std::move(graphCleaner))
     {
         Become(&Behavior);
     }
@@ -105,9 +109,11 @@ NNet::NActors::IActor* CreateLocalScheduler(
     const NScheduler::TSchedulerSettings& scheduler,
     const NScheduler::TTransportSettings& transport,
     std::shared_ptr<TTableCache> tables,
-    bool serializeOnIoThreads)
+    bool serializeOnIoThreads,
+    std::shared_ptr<NScheduler::TGraphCleaner> graphCleaner)
 {
-    return new TLocalSchedulerActor(leader, pingPeriodMs, scheduler, transport, std::move(tables), serializeOnIoThreads);
+    return new TLocalSchedulerActor(
+        leader, pingPeriodMs, scheduler, transport, std::move(tables), serializeOnIoThreads, std::move(graphCleaner));
 }
 
 } // namespace NRemote
