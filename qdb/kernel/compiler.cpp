@@ -227,7 +227,7 @@ constexpr const char* CacheSchemaVersion = "v1";
 // row_group_interval.oz gains f32 operand intervals.
 // qumirdb.oz gains the sorted-table lookups of long IN lists (qdb_in_sorted_*).
 // qdb_decimal_from_f32 returns right after an overflow, which returns while row errors are deferred.
-// qumir_radix_key maps every NaN above +inf and -0 to +0; sort comparators compare floats by it.
+// qumir_radix_key maps every NaN above +inf and -0 to +0; sort comparators order NaN the same way.
 constexpr const char* KernelLibVersion = "70";
 } // namespace
 
@@ -695,17 +695,25 @@ void AppendSortLessBody(
 
         auto leftComparable = ComparableValue(leftValue, i64Type);
         auto rightComparable = ComparableValue(rightValue, i64Type);
-        if (TMaybeType<TFloatType>(UnwrapNamedValueType(leftValue.ValueType))) {
-            // The radix sort's key: `<` would make NaN a peer of every value.
-            leftComparable = Oz::Call("qumir_radix_key", {std::move(leftComparable)});
-            rightComparable = Oz::Call("qumir_radix_key", {std::move(rightComparable)});
-        }
         builder.Stmt(Oz::If(
             Oz::Bin(TOperator("<"), leftComparable, rightComparable),
             Oz::Block({Oz::Return(BoolConst(types, !key.Desc))})));
         builder.Stmt(Oz::If(
             Oz::Bin(TOperator("<"), rightComparable, leftComparable),
             Oz::Block({Oz::Return(BoolConst(types, key.Desc))})));
+        if (TMaybeType<TFloatType>(UnwrapNamedValueType(leftValue.ValueType))) {
+            // Neither is less: equal (-0 and +0 too) or a NaN, which sorts above
+            // every number as in qumir_radix_key. `<` first keeps top-N fast.
+            auto isNan = [](const NQumir::NAst::TExprPtr& value) {
+                return Oz::Bin(TOperator("!="), value, value);
+            };
+            builder.Stmt(Oz::If(
+                Oz::Bin(TOperator("&&"), isNan(leftComparable), Unary("!", isNan(rightComparable))),
+                Oz::Block({Oz::Return(BoolConst(types, key.Desc))})));
+            builder.Stmt(Oz::If(
+                Oz::Bin(TOperator("&&"), Unary("!", isNan(leftComparable)), isNan(rightComparable)),
+                Oz::Block({Oz::Return(BoolConst(types, !key.Desc))})));
+        }
     }
 
     builder.Stmt(Oz::Return(std::move(equalResult)));
@@ -1942,17 +1950,15 @@ NQumir::NAst::TExprPtr BuildHeapTopKProgramAst(
         throw NQumir::TError("BuildHeapTopKProgramAst: empty key list");
     }
 
-    // radix.oz holds the float key that heap_less compares by.
+    auto library = modules.KernelLibrary("sort", "heap.oz");
+    if (!library) {
+        throw NQumir::TError(
+            "BuildHeapTopKProgramAst: " + library.error().ToString());
+    }
+
     std::vector<TExprPtr> programStmts;
-    for (const char* name : {"radix.oz", "heap.oz"}) {
-        auto library = modules.KernelLibrary("sort", name);
-        if (!library) {
-            throw NQumir::TError(
-                "BuildHeapTopKProgramAst: " + library.error().ToString());
-        }
-        for (auto& stmt : *library) {
-            programStmts.push_back(std::move(stmt));
-        }
+    for (auto& stmt : *library) {
+        programStmts.push_back(std::move(stmt));
     }
     programStmts.push_back(BuildSortRowIdLessAst(types, keys));
     programStmts.push_back(BuildHeapTopKEntryAst(types));

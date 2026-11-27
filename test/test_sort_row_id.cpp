@@ -45,16 +45,14 @@ struct TCompiledRowIdSort {
 TCompiledRowIdSort
 CompileRowIdSort(const std::vector<NQdb::TSortRadixKeyInput>& keys) {
     std::vector<NQumir::NAst::TExprPtr> statements;
-    for (const char* name : {"radix.oz", "heap.oz"}) {
-        auto library = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
-            NQdb::NKernel::ReadKernel("sort", name));
-        if (!library) {
-            ADD_FAILURE() << library.error().ToString();
-            return {};
-        }
-        for (auto& statement : *library) {
-            statements.push_back(std::move(statement));
-        }
+    auto heap = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
+        NQdb::NKernel::ReadKernel("sort", "heap.oz"));
+    if (!heap) {
+        ADD_FAILURE() << heap.error().ToString();
+        return {};
+    }
+    for (auto& statement : *heap) {
+        statements.push_back(std::move(statement));
     }
     statements.push_back(NQdb::BuildSortRowIdLessAst(NQdb::TestTypes(), keys));
 

@@ -134,8 +134,9 @@ int CompareScalar(T lhs, T rhs) {
     return 0;
 }
 
-// The order of qumir_radix_key, which sorted the runs: NaN equals NaN and is
-// above every number, and -0 equals +0, as in PostgreSQL.
+// The order of the kernel sort: NaN equals NaN and is above every number, and
+// -0 equals +0, as in PostgreSQL.
+// TODO(#759): a second copy of that order until the merge is a kernel.
 template <class T>
 int CompareFloat(T lhs, T rhs)
 {

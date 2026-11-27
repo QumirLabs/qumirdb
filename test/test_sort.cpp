@@ -748,15 +748,24 @@ TEST(SortRadixOz, NumericKeysMatchPrototype) {
     auto f64Runner = CompileRadixOperation("test_radix_key_f64", f64Entry);
     ASSERT_NE(f64Entry, nullptr);
     auto f64Key = reinterpret_cast<uint64_t(*)(double)>(f64Entry);
-    const double inf = std::numeric_limits<double>::infinity();
-    const double nan = std::numeric_limits<double>::quiet_NaN();
-    const double negNan = std::bit_cast<double>(0xfff8000000000001ULL);
-    for (double value : {-inf, -2345.6, -0.0, 0.0, 1.2, 555.99, inf, nan, negNan}) {
-        EXPECT_EQ(f64Key(value), RadixKey(value));
+    // Subnormals and DBL_MAX are the neighbours of the zeros and of the infinities.
+    using TLimits = std::numeric_limits<double>;
+    const double inf = TLimits::infinity();
+    const double nan = TLimits::quiet_NaN();
+    const double maxSubnormal = std::nextafter(TLimits::min(), 0.0);
+    const std::vector<double> ascending = {
+        -inf, -TLimits::max(), -2345.6, -TLimits::min(), -maxSubnormal, -TLimits::denorm_min(),
+        0.0, TLimits::denorm_min(), maxSubnormal, TLimits::min(), 1.2, 555.99, TLimits::max(), inf, nan};
+    for (size_t i = 0; i < ascending.size(); ++i) {
+        EXPECT_EQ(f64Key(ascending[i]), RadixKey(ascending[i])) << i;
+        if (i > 0) {
+            EXPECT_LT(f64Key(ascending[i - 1]), f64Key(ascending[i])) << i;
+        }
     }
     EXPECT_EQ(f64Key(-0.0), f64Key(0.0));
+    const double negNan = std::bit_cast<double>(0xfff8000000000001ULL);
+    EXPECT_EQ(f64Key(negNan), RadixKey(negNan));
     EXPECT_EQ(f64Key(negNan), f64Key(nan));
-    EXPECT_LT(f64Key(inf), f64Key(nan));
 }
 
 TEST(SortRadixOz, F32KeyMatchesPrototypeAndKeepsFloatOrder) {
