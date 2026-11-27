@@ -19,7 +19,7 @@
 #include <qdb/scheduler/spec/graph_spec.h>
 
 #include "compute.h"
-#include "pinger.h"
+#include "runtime_resources.h"
 
 
 namespace NQdb {

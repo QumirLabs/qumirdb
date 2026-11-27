@@ -9,7 +9,7 @@
 #include <qdbd/actors/gateway.h>
 #include <qdbd/actors/scheduler.h>
 #include <qdbd/actors/local_scheduler.h>
-#include <qdbd/actors/pinger.h>
+#include <qdbd/actors/runtime_resources.h>
 #include <qdbd/actors.h>
 #include <qdbd/io_threads.h>
 #include <qdbd/messages.h>

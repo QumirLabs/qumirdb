@@ -3,12 +3,12 @@
 #include <atomic>
 #include <memory>
 
+#include <qdbd/actors/runtime_resources.h>
+
 #include <coroio/actors/actor.hpp>
 
 namespace NQdb {
 namespace NRemote {
-
-struct TRuntimeResources;
 
 NNet::NActors::IActor* CreateComputeActor(std::shared_ptr<TRuntimeResources> resources = {});
 

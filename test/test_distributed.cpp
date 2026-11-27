@@ -4,7 +4,7 @@
 #include <qdbd/actors.h>
 #include <qdbd/actors/compute.h>
 #include <qdbd/actors/collector.h>
-#include <qdbd/actors/pinger.h>
+#include <qdbd/actors/runtime_resources.h>
 #include <qdbd/actors/query.h>
 #include <qdbd/actors/local_scheduler.h>
 #include <qdbd/actors/scheduler.h>
