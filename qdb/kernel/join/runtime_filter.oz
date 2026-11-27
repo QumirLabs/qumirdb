@@ -49,15 +49,17 @@
     (BloomWords i64)>)
 
   ;; Storage and result of a merge; mirrors TRuntimeFilterPublishState.
-  ;; Keys and SortKeys hold every partial key, SortOrder twice as many
-  ;; entries plus 256. Table is zeroed and fits min(keys, MaxKeys) keys.
+  ;; Keys holds min(keys, MaxKeys + 1) entries, and the set of SetCapacity
+  ;; entries stays at most half full with as many. Table is zeroed and fits
+  ;; min(keys, MaxKeys) keys.
   ;; Bloom is zeroed, or with BloomSeeded already holds one fragment, which
   ;; makes the result a Bloom filter. Kind: 0 cannot answer, 1 exact, 2 Bloom.
   (type RuntimeFilterPublish <struct
     (MaxKeys i64)
     (Keys <ptr u64>)
-    (SortOrder <ptr u32>)
-    (SortKeys <ptr u64>)
+    (SetCtrl <ptr u8>)
+    (SetSlots <ptr u64>)
+    (SetCapacity i64)
     (Table <ptr u64>)
     (Bloom <ptr u64>)
     (BloomWords i64)
@@ -507,43 +509,34 @@
       (var bloom_words = (field state BloomWords))
       (var no_selection = (cast (: 0 i64) <ptr u8>))
       (field_assign state Kind 0)
-      (if (!= (field state BloomSeeded) 0)
+      (if (== (field state BloomSeeded) 0)
         (block
-          (var block_mask = (call rf_bloom_block_mask bloom_words))
-          (var i = 0)
-          (while (< i partial_count)
-            (block
-              (var partial = (index partials i))
-              (call rf_bloom_or bloom (field partial Bloom)
-                (field partial BloomWords))
-              (call rf_bloom_add bloom block_mask (field partial Keys)
-                no_selection (field partial KeyCount))
-              (= i (+ i 1))))
-          (field_assign state Kind 2))
-        (block
+          ;; Distinct keys are counted only up to the first one over MaxKeys,
+          ;; which makes the filter a Bloom filter whatever the other keys are.
+          (var max_keys = (field state MaxKeys))
           (var keys = (field state Keys))
-          (var total = 0)
+          (var ctrl = (field state SetCtrl))
+          (var slots = (field state SetSlots))
+          (var capacity = (field state SetCapacity))
+          (call rf_set_fill ctrl slots capacity keys 0)
+          (var distinct = 0)
           (var i = 0)
-          (while (< i partial_count)
+          (while (&& (< i partial_count) (<= distinct max_keys))
             (block
               (var partial = (index partials i))
               (var partial_keys = (field partial Keys))
               (var partial_key_count = (field partial KeyCount))
               (var k = 0)
-              (while (< k partial_key_count)
+              (while (&& (< k partial_key_count) (<= distinct max_keys))
                 (block
-                  (= keys [total] (index partial_keys k))
-                  (= total (+ total 1))
+                  (var hash = (index partial_keys k))
+                  (if (call rf_set_insert ctrl slots capacity hash)
+                    (block
+                      (= keys [distinct] hash)
+                      (= distinct (+ distinct 1))))
                   (= k (+ k 1))))
               (= i (+ i 1))))
-          ;; Sort once, after all producers finish, including duplicates
-          ;; across lanes.
-          (var order = (field state SortOrder))
-          (var order_work = (cast (+ (cast order i64) (* total 4)) <ptr u32>))
-          (var counts = (cast (+ (cast order i64) (* total 8)) <ptr u32>))
-          (var distinct = (call rf_keys_sort_unique keys total order order_work
-                            counts (field state SortKeys)))
-          (if (<= distinct (field state MaxKeys))
+          (if (<= distinct max_keys)
             (block
               (var size = 8)
               (while (< size (* distinct 2))
@@ -552,18 +545,23 @@
                 keys distinct)
               (field_assign state TableSize size)
               (field_assign state ExactKeys distinct)
-              (field_assign state Kind 1))
-            (block
-              (if (> bloom_words 0)
-                (block
-                  (call rf_bloom_add bloom
-                    (call rf_bloom_block_mask bloom_words) keys no_selection
-                    distinct)
-                  (field_assign state Kind 2)))))))
-      (if (== (field state Kind) 2)
+              (field_assign state Kind 1)
+              (return)))
+          (if (== bloom_words 0)
+            (block (return)))))
+      (var block_mask = (call rf_bloom_block_mask bloom_words))
+      (var p = 0)
+      (while (< p partial_count)
         (block
-          (field_assign state BloomSetBits
-            (call rf_bloom_popcount bloom bloom_words))))))
+          (var partial = (index partials p))
+          (call rf_bloom_or bloom (field partial Bloom)
+            (field partial BloomWords))
+          (call rf_bloom_add bloom block_mask (field partial Keys)
+            no_selection (field partial KeyCount))
+          (= p (+ p 1))))
+      (field_assign state Kind 2)
+      (field_assign state BloomSetBits
+        (call rf_bloom_popcount bloom bloom_words))))
 
   ;; Tests the selected hashes. A Bloom filter is probed four hashes at a
   ;; time when vectorized is nonzero; selected_hashes and selected_output

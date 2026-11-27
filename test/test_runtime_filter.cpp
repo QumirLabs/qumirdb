@@ -552,6 +552,27 @@ TEST_F(RuntimeFilter, CapIsEnforcedAcrossBuildersAtPublication) {
     ExpectContainsAll(filter, allKeys);
 }
 
+// The merge stops counting distinct keys at the first one over the cap; the
+// keys after it, in that partial and in later ones, still reach the Bloom.
+TEST_F(RuntimeFilter, KeysAfterTheCapAtPublicationReachTheBloom) {
+    constexpr size_t Cap = 8;
+    TRuntimeFilter filter(Context_, Cap, /*bloomBytes=*/4096);
+    filter.SetProducerCount(3);
+    std::vector<uint64_t> allKeys;
+    for (uint64_t producer = 0; producer < 3; ++producer) {
+        auto keys = Hashes(Cap + 4, producer + 60);
+        allKeys.insert(allKeys.end(), keys.begin(), keys.end());
+        auto builder = filter.MakeBuilder();
+        builder.Add(keys);
+        EXPECT_FALSE(builder.Overflowed());
+        filter.FinishProducer(std::move(builder).TakePartial());
+    }
+
+    ASSERT_TRUE(filter.UsesBloom());
+    EXPECT_EQ(filter.StatsSnapshot().ExactKeys, 0u);
+    ExpectContainsAll(filter, allKeys);
+}
+
 TEST_F(RuntimeFilter, BloomFragmentsMergeFromSeveralProducers) {
     constexpr size_t Producers = 4;
     TRuntimeFilter filter(Context_, /*maxKeys=*/32, /*bloomBytes=*/4096);
