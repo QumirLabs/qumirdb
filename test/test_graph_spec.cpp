@@ -1,16 +1,21 @@
 #include <gtest/gtest.h>
 
+#include <qdb/io/parquet/source.h>
 #include <qdb/io/parquet/table_cache.h>
 #include <qdb/scheduler/connections/local.h>
 #include <qdb/scheduler/impl/single_threaded_scheduler.h>
 #include <qdb/scheduler/lowering/plan_lowerer.h>
 #include <qdb/scheduler/spec/graph_spec.h>
 #include <qdb/scheduler/tasks/runtime_adapter.h>
+#include <qdb/scheduler/tasks/scan_morsels.h>
 
+#include <algorithm>
 #include <filesystem>
+#include <initializer_list>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -174,6 +179,9 @@ TEST(GraphSpec, ScanFilterProjectRecordsRoundTrip)
             .Columns = std::vector<std::string>{"a", "b"}, .RowGroups = rowGroups}));
     }
     spec.Nodes.push_back(Node("source", "u", TParquetScanNode{.Path = "/data/u.parquet"}));
+    spec.Nodes.push_back(Node("source", "t", TParquetScanNode{
+        .Path = "/data/t.parquet", .RowGroups = std::vector<int32_t>{4, 5, 6},
+        .Morsels = TScanMorselsSpec{.Queue = 7, .Ends = {1, 3}}}));
     spec.Nodes.push_back(Node("filter", "", TFilterNode{.In = {0, 2}, .Out = {1, 2}, .Plan = {.Kernel = 2}}));
     spec.Nodes.push_back(Node("filter", "", TFilterNode{
         .Plan = {.Kernel = 3, .KeptInputColumns = std::vector<int32_t>{2, 0}}}));
@@ -195,7 +203,7 @@ TEST(GraphSpec, ScanFilterProjectRecordsRoundTrip)
             std::runtime_error) << size;
     }
 
-    ASSERT_EQ(back.Nodes.size(), 8u);
+    ASSERT_EQ(back.Nodes.size(), 9u);
     EXPECT_FALSE(std::get<TParquetScanNode>(back.Nodes[0].Body).RowGroups);
     EXPECT_EQ(std::get<TParquetScanNode>(back.Nodes[1].Body).RowGroups, TRowGroups{std::vector<int32_t>{}});
     const auto& scan = std::get<TParquetScanNode>(back.Nodes[2].Body);
@@ -203,14 +211,19 @@ TEST(GraphSpec, ScanFilterProjectRecordsRoundTrip)
     EXPECT_EQ(scan.Path, "/data/t.parquet");
     EXPECT_EQ(scan.Columns, (std::vector<std::string>{"a", "b"}));
     EXPECT_EQ(scan.Out.Lane, 2u);
+    EXPECT_FALSE(scan.Morsels);
     EXPECT_FALSE(std::get<TParquetScanNode>(back.Nodes[3].Body).Columns);
+    const auto& morsels = std::get<TParquetScanNode>(back.Nodes[4].Body).Morsels;
+    ASSERT_TRUE(morsels);
+    EXPECT_EQ(morsels->Queue, 7u);
+    EXPECT_EQ(morsels->Ends, (std::vector<uint32_t>{1, 3}));
 
-    EXPECT_EQ(std::get<TFilterNode>(back.Nodes[4].Body).Plan.Kernel, 2u);
-    EXPECT_FALSE(std::get<TFilterNode>(back.Nodes[4].Body).Plan.KeptInputColumns);
-    EXPECT_EQ(std::get<TFilterNode>(back.Nodes[5].Body).Plan.KeptInputColumns,
+    EXPECT_EQ(std::get<TFilterNode>(back.Nodes[5].Body).Plan.Kernel, 2u);
+    EXPECT_FALSE(std::get<TFilterNode>(back.Nodes[5].Body).Plan.KeptInputColumns);
+    EXPECT_EQ(std::get<TFilterNode>(back.Nodes[6].Body).Plan.KeptInputColumns,
         (std::vector<int32_t>{2, 0}));
 
-    const auto& project = std::get<TProjectNode>(back.Nodes[6].Body).Plan;
+    const auto& project = std::get<TProjectNode>(back.Nodes[7].Body).Plan;
     EXPECT_EQ(project.Kernel, 4u);
     ASSERT_EQ(project.Columns.size(), 3u);
     EXPECT_FALSE(project.Columns[0].Computed);
@@ -220,7 +233,7 @@ TEST(GraphSpec, ScanFilterProjectRecordsRoundTrip)
     EXPECT_EQ(project.ComputedWidths, (std::vector<size_t>{16, 8}));
     EXPECT_EQ(project.ComputedIsString, (std::vector<bool>{true, false}));
     EXPECT_EQ(project.ComputedIsNullable, (std::vector<bool>{false, true}));
-    EXPECT_FALSE(std::get<TProjectNode>(back.Nodes[7].Body).Plan.Kernel);
+    EXPECT_FALSE(std::get<TProjectNode>(back.Nodes[8].Body).Plan.Kernel);
 
     ASSERT_EQ(back.Regexes.size(), 2u);
     EXPECT_EQ(back.Regexes[1].Pattern, "^x");
@@ -1058,6 +1071,120 @@ TEST(GraphSpec, ForwardChainRunsRows)
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
     EXPECT_EQ(sink.Rows, 10 + 11 + 12);
+}
+
+namespace {
+
+// 16 row groups of 16 rows; row group g holds the ids 16 * g to 16 * g + 15.
+constexpr const char* DecimalsPath = QDB_TEST_DATA_DIR "/regtest/cases/decimal_parquet/tables/decimals.parquet";
+
+std::vector<int32_t> RowGroupIds(std::initializer_list<int32_t> rowGroups)
+{
+    std::vector<int32_t> ids;
+    for (const auto rowGroup : rowGroups) {
+        for (int32_t row = 0; row < 16; ++row) {
+            ids.push_back(16 * rowGroup + row);
+        }
+    }
+    return ids;
+}
+
+// Appends the ids of a batch whose column 0 is the int32 id.
+void AppendIds(const TRowSet& rowSet, std::vector<int32_t>& ids)
+{
+    const auto* data = reinterpret_cast<const int32_t*>(rowSet.Columns[0].Data);
+    ids.insert(ids.end(), data, data + rowSet.RowCount);
+}
+
+struct TIdSink : ISink {
+    void Write(const TRowSet& rowSet) override
+    {
+        AppendIds(rowSet, Ids);
+    }
+
+    std::vector<int32_t> Ids;
+};
+
+TNodeSpec MorselLane(uint32_t lane, std::vector<int32_t> rowGroups, std::vector<uint32_t> ends)
+{
+    return Node("source", "t", TParquetScanNode{
+        .Out = {0, lane}, .Path = DecimalsPath, .Columns = std::vector<std::string>{"d9", "id"},
+        .RowGroups = std::move(rowGroups),
+        .Morsels = TScanMorselsSpec{.Queue = 3, .Ends = std::move(ends)}});
+}
+
+} // namespace
+
+// A lane that runs alone takes the morsels another lane put into the queue,
+// and that lane then finds nothing left; each morsel is read once.
+TEST(GraphSpec, ScanLanesShareTheMorselsOfTheirScan)
+{
+    auto table = std::make_shared<TParquetFile>(DecimalsPath);
+    auto queue = std::make_shared<TScanMorselQueue>();
+    queue->Add({{0, 1}, {2}});
+    queue->Add({{7}, {9}});
+    auto lane = [&] {
+        return TMorselSourceState{
+            .Table = table, .Columns = std::unordered_set<std::string>{"id"}, .Queue = queue};
+    };
+    auto fast = lane();
+    auto slow = lane();
+    const auto code = MakeMorselSourceCode();
+    auto read = [&](TMorselSourceState& state, std::vector<int32_t>& ids) {
+        TRowSet rowSet{};
+        const auto result = code->Next(&state, rowSet);
+        if (result == ETaskResult::OK) {
+            AppendIds(rowSet, ids);
+            Release(&rowSet);
+        }
+        return result;
+    };
+
+    std::vector<int32_t> slowIds;
+    ASSERT_EQ(read(slow, slowIds), ETaskResult::OK);
+    EXPECT_EQ(slowIds, RowGroupIds({0, 1}));
+    std::vector<int32_t> fastIds;
+    while (read(fast, fastIds) == ETaskResult::OK) {
+    }
+    EXPECT_EQ(fastIds, RowGroupIds({2, 7, 9}));
+    EXPECT_EQ(read(slow, slowIds), ETaskResult::FINISHED);
+    EXPECT_EQ(slowIds, RowGroupIds({0, 1}));
+}
+
+// The lanes of one scan in a materialized graph fill one queue: together they
+// read each of their row groups once.
+TEST(GraphSpec, MaterializedScanLanesFillOneMorselQueue)
+{
+    TGraphSpec spec;
+    spec.Connections = {{.Kind = EConnectionKind::Gather, .Capacity = 2, .SrcCount = 2, .DstCount = 1}};
+    spec.Nodes = {
+        MorselLane(0, {0, 1, 2, 5}, {2, 3, 4}),
+        MorselLane(1, {7, 9}, {1, 2}),
+        Node("sink", "out", TSinkWriterNode{.In = {0, 0}}),
+    };
+    spec.Edges = {
+        {.Src = 0, .Dst = 2, .Connection = 0, .SrcLane = 0, .DstLane = 0},
+        {.Src = 1, .Dst = 2, .Connection = 0, .SrcLane = 1, .DstLane = 0, .ExecInput = 1},
+    };
+
+    TIdSink sink;
+    auto graph = MaterializeGraph(DeserializeGraphSpec(SerializeGraphSpec(spec)), &sink);
+    const auto sealed = graph->Seal();
+    ASSERT_TRUE(sealed);
+    TSingleThreadedScheduler scheduler(sealed);
+    std::string error;
+    ASSERT_TRUE(scheduler.Run(&error)) << error;
+    std::ranges::sort(sink.Ids);
+    EXPECT_EQ(sink.Ids, RowGroupIds({0, 1, 2, 5, 7, 9}));
+
+    // The morsels tile the lane's row groups in order.
+    for (const auto& ends : {std::vector<uint32_t>{2, 2, 4}, {1, 3}, {1, 5}, {}}) {
+        spec.Nodes[0] = MorselLane(0, {0, 1, 2, 5}, ends);
+        EXPECT_THROW(MaterializeGraph(spec, &sink), std::runtime_error);
+    }
+    spec.Nodes[0] = MorselLane(0, {0, 1, 2, 5}, {2, 3, 4});
+    std::get<TParquetScanNode>(spec.Nodes[0].Body).RowGroups.reset();
+    EXPECT_THROW(MaterializeGraph(spec, &sink), std::runtime_error);
 }
 
 TEST(GraphSpec, MaterializationsReuseCachedTableUntilFileIdentityChanges)

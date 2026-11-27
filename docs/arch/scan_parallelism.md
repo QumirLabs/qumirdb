@@ -31,10 +31,31 @@ These are initial heuristics, not a claim of optimality for every query.
 `--verbose` prints each automatic cap, actual task count, remaining rows,
 row groups and projected bytes.
 
-Splits retain the existing contiguous row-group ranges. For a cap `M`, each
-range contains at most `ceil(G / M)` groups, so the actual lane count can be
-less than `M`. For example, 59 groups capped at 18 produce 15 lanes. Uneven
-row-group sizes can still cause uneven work.
+Splits are contiguous row-group ranges. For a cap `M`, each range contains at
+most `ceil(G / M)` groups, so the actual lane count can be less than `M`. For
+example, 59 groups capped at 18 produce 15 lanes.
+
+## Morsels
+
+Equal ranges of row groups are not equal work: row groups differ in size, and a
+lane falls behind when its consumer is slow or its worker runs other tasks. The
+lanes of a split scan therefore share their work, as in morsel-driven
+parallelism ([Leis et al., SIGMOD 2014](https://doi.org/10.1145/2588555.2610507)).
+Lowering cuts each split into morsels: runs of the split's row groups with at
+least `[scan] morsel_rows` rows, 262,144 by default (one batch of the Parquet
+reader), the last one possibly shorter. A morsel holds whole row groups because
+a reader cannot start inside one without decoding the rows before it.
+
+The lanes of one scan in one graph put their morsels into a shared queue while
+the graph is built. A lane takes the next morsel whenever it has read the last
+one, so a lane that is slow or starts late leaves the rest to the others, and
+the lanes finish within about one morsel of each other. Pruning, the lane count
+and the operators above each lane do not change; only which lane reads a row
+group is decided at run time. `morsel_rows = 0` keeps every range on its lane.
+
+On several nodes each fragment's queue holds the morsels of its own lanes, so
+the work is balanced within a node, and the share of a node is still the
+static ranges of its lanes.
 
 ## Scan lanes and join partitions
 

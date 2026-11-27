@@ -155,6 +155,8 @@ TEngineConfigBuilder BuildEngineConfig() {
         "Bytes a scan task aims to read.", 1);
     b.Size("tiny_input_rows", [](auto& s) -> auto& { return s.Scheduler.ScanSplit.TinyInputRowsThreshold; },
         "Scans of at most this many rows are not split; 0 splits every scan.");
+    b.Size("morsel_rows", [](auto& s) -> auto& { return s.Scheduler.ScanSplit.MorselRows; },
+        "Least rows of a morsel that the lanes of a split scan take in turn; 0 keeps static ranges.");
 
     b.Section("join");
     b.Enum("table", NScheduler::JoinTableKindNames, NScheduler::ParseJoinTableKind,

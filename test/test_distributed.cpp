@@ -3629,6 +3629,54 @@ TEST(DistributedScheduler, SplitsALoweredPlanIntoFragmentSpecs) {
     EXPECT_EQ(externals, 2 * cuts.size());
 }
 
+// The lanes of a scan with morsels keep their row groups in their fragment, so
+// each fragment's queue holds its own lanes' row groups and no other's.
+TEST(DistributedScheduler, SplitsTheMorselsOfAScanByFragment) {
+    using namespace NQdb::NScheduler;
+    TParquetFile source(DecimalsPath);
+    TSettings settings;
+    settings.ScanSplit.Strategy = EScanSplitStrategy::RowGroupRange;
+    settings.ScanSplit.MaxScanTasks = 4;
+    settings.ScanSplit.MorselRows = 1;
+    auto lowered = LowerSql("SELECT a.id, b.id AS bid FROM t a JOIN t b ON a.id = b.id WHERE a.id % 5 = 0",
+        source, settings);
+    TNoSink sink;
+    AttachSink(lowered, sink);
+    TPartitioner partitioner(lowered.Graph->Seal(), 3);
+    partitioner.Do();
+    ApplySplit(lowered, partitioner.TakePlan());
+    const auto fragments = ExtractFragmentSpecs(lowered);
+    ASSERT_EQ(fragments.size(), 3u);
+
+    // Row groups by queue, then by fragment.
+    std::map<uint32_t, std::map<size_t, std::vector<int32_t>>> queues;
+    for (size_t fragment = 0; fragment < fragments.size(); ++fragment) {
+        for (const auto& node : fragments[fragment].Nodes) {
+            const auto* scan = std::get_if<TParquetScanNode>(&node.Body);
+            if (!scan) {
+                continue;
+            }
+            ASSERT_TRUE(scan->Morsels && scan->RowGroups);
+            // One row group per morsel.
+            EXPECT_EQ(scan->Morsels->Ends.size(), scan->RowGroups->size());
+            auto& rowGroups = queues[scan->Morsels->Queue][fragment];
+            rowGroups.insert(rowGroups.end(), scan->RowGroups->begin(), scan->RowGroups->end());
+        }
+    }
+    ASSERT_EQ(queues.size(), 2u);
+    for (const auto& [queue, byFragment] : queues) {
+        EXPECT_GT(byFragment.size(), 1u) << "queue " << queue;
+        std::vector<int32_t> all;
+        for (const auto& [fragment, rowGroups] : byFragment) {
+            all.insert(all.end(), rowGroups.begin(), rowGroups.end());
+        }
+        std::ranges::sort(all);
+        std::vector<int32_t> expected(16);
+        std::iota(expected.begin(), expected.end(), 0);
+        EXPECT_EQ(all, expected) << "queue " << queue;
+    }
+}
+
 // The partitions of one shuffle lane in another fragment cross in one stream:
 // the lane routes them to one sink, and a relay there routes them to their
 // consumers by the same hash and partition count.
@@ -4287,6 +4335,33 @@ TEST(DistributedScheduler, QueryActorRunsRuntimeFiltersAcrossNodes) {
             ASSERT_TRUE(answer->Response) << answer->Response.error().ToString();
             EXPECT_TRUE(std::ranges::contains(log, std::string("Query: started 2 fragments")));
             EXPECT_EQ(*answer->Response, RunLocally(sql, cluster.Settings));
+        }
+    }
+}
+
+// Morsels of one row group: the scan lanes on each node take the row groups
+// of each other's ranges, and the rows are those of static ranges.
+TEST(DistributedScheduler, QueryActorRunsScanMorselsOnEveryNode) {
+    TQueryCluster cluster;
+    cluster.Settings.ScanSplit.MorselRows = 1;
+    ASSERT_NO_FATAL_FAILURE(cluster.Start());
+    auto staticRanges = cluster.Settings;
+    staticRanges.ScanSplit.MorselRows = 0;
+    TDecimalsCompiler compiler(WithRuntimeFilters);
+    for (const std::string sql : {
+             std::string("SELECT id % 7 AS k, COUNT(*) AS n, SUM(d15) AS total, MIN(s) AS lo FROM t "
+                 "WHERE id % 3 <> 0 GROUP BY id % 7 ORDER BY k"),
+             std::string(RuntimeFilterJoinSql),
+             std::string(LateLookupSql),
+         }) {
+        for (const std::optional<size_t> width : {std::optional<size_t>(), std::optional<size_t>(4)}) {
+            SCOPED_TRACE(sql + " width " + std::to_string(width.value_or(2)));
+            std::vector<std::string> log;
+            const auto answer = cluster.Run(compiler, sql, width, log);
+            ASSERT_TRUE(answer);
+            ASSERT_TRUE(answer->Response) << answer->Response.error().ToString();
+            EXPECT_TRUE(std::ranges::contains(log, std::string("Query: started 2 fragments")));
+            EXPECT_EQ(*answer->Response, RunLocally(sql, staticRanges));
         }
     }
 }

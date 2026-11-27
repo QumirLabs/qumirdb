@@ -31,6 +31,7 @@ namespace NScheduler {
 
 class TCteConsumerState;
 class TCteSpool;
+class TScanMorselQueue;
 
 // Plain-data description of a task graph. Connections, nodes and edges are
 // referenced by their position, which is also the order they are built in.
@@ -108,6 +109,21 @@ struct TSinkWriterNode {
     }
 };
 
+// The lanes of one scan that run in one graph put their morsels into one
+// queue, and each lane reads the morsels it takes from there.
+struct TScanMorselsSpec {
+    // Query-scoped: the lanes of one scan share it.
+    uint32_t Queue = 0;
+    // Morsel i of the lane is RowGroups[Ends[i - 1], Ends[i]).
+    std::vector<uint32_t> Ends;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Queue);
+        v(self.Ends);
+    }
+};
+
 // Path names the same file wherever the graph runs.
 struct TParquetScanNode {
     TPortSpec Out;
@@ -116,6 +132,8 @@ struct TParquetScanNode {
     std::optional<std::vector<std::string>> Columns;
     // nullopt reads the whole file; an empty list is a proven-empty scan.
     std::optional<std::vector<int32_t>> RowGroups;
+    // Requires RowGroups; nullopt reads them on this lane.
+    std::optional<TScanMorselsSpec> Morsels;
 
     void Fields(this auto& self, auto& v)
     {
@@ -123,6 +141,7 @@ struct TParquetScanNode {
         v(self.Path);
         v(self.Columns);
         v(self.RowGroups);
+        v(self.Morsels);
     }
 };
 
@@ -749,6 +768,8 @@ struct TNodeTaskContext {
     // By filter index: the producer of the build lanes of a filter that runtime
     // filter sinks send, else null.
     std::vector<std::shared_ptr<TRuntimeFilterExport>> RuntimeFilterExports;
+    // By TScanMorselsSpec::Queue: filled by the scan lanes as they are built.
+    std::unordered_map<uint32_t, std::shared_ptr<TScanMorselQueue>> ScanMorselQueues;
 };
 
 // Builds the CTE spools and consumer states of the tables past those the

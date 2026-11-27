@@ -927,12 +927,17 @@ private:
                 rows += group.RowCount;
                 bytes += group.ByteSize;
             }
+            size_t morsels = 0;
+            for (const auto& split : splits) {
+                morsels += split.MorselEnds.size();
+            }
             *Diagnostics_ << "scan split: source="
                 << (src.GetAlias().empty() ? src.SourcePath() : src.GetAlias())
                 << " scan_tasks=auto max_tasks=" << splitSettings.MaxScanTasks
                 << " tasks=" << splits.size()
                 << " row_groups=" << rowGroups.size()
-                << " rows=" << rows << " bytes=" << bytes << '\n';
+                << " rows=" << rows << " bytes=" << bytes
+                << " morsels=" << morsels << '\n';
         }
         // An engaged empty value is reserved for a proven empty scan. If a
         // future strategy declines a non-empty input by returning {}, use the
@@ -1038,6 +1043,7 @@ private:
 
         const size_t lanes = std::max<size_t>(
             splitPlan ? splitPlan->size() : 0, 1);
+        const auto morselQueue = ScanMorselQueues_++;
         TLoweredOutput result;
         result.OutputType = std::move(outputType);
         result.Producers.reserve(lanes);
@@ -1051,6 +1057,13 @@ private:
             } else if (splitPlan && splitPlan->empty()) {
                 rowGroups.emplace();
             }
+            std::optional<NScheduler::TScanMorselsSpec> morsels;
+            if (split && !split->MorselEnds.empty()) {
+                morsels.emplace(NScheduler::TScanMorselsSpec{
+                    .Queue = morselQueue,
+                    .Ends = {split->MorselEnds.begin(), split->MorselEnds.end()},
+                });
+            }
             auto& node = AddNode({
                 .ExecStageId = execStageId,
                 .TaskGroupId = execStageId,
@@ -1061,6 +1074,7 @@ private:
                     .Path = table->Path(),
                     .Columns = columns,
                     .RowGroups = std::move(rowGroups),
+                    .Morsels = std::move(morsels),
                 },
             });
             result.Producers.push_back(&node);
@@ -3036,6 +3050,8 @@ private:
     std::vector<NScheduler::TCteSpoolSpec> CteSpools_;
     std::vector<NScheduler::TCteConsumerStateSpec> CteConsumerStates_;
     std::vector<NScheduler::TRuntimeFilterBindingSpec> FilterBindingSpecs_;
+    // The next TScanMorselsSpec::Queue: one per lowered source.
+    uint32_t ScanMorselQueues_ = 0;
     std::vector<TLoweredExecStage> ExecStages_;
     std::vector<NScheduler::TRuntimeFilterDiagnostic> RuntimeFilters_;
     NScheduler::TTaskGroupId LastTaskGroupId_ =
