@@ -19,7 +19,9 @@
     "exists_or_correlation.sql": {"order": "unordered"},
     "left_join_non_equality.sql": {"order": "unordered"},
     "right_join_non_equality.sql": {"order": "unordered"},
+    "right_join_inequality.sql": {"order": "unordered"},
     "full_join_non_equality.sql": {"order": "unordered"},
+    "full_join_inequality.sql": {"order": "unordered"},
     "full_join_empty_right.sql": {"order": "unordered"},
     "full_join_empty_left.sql": {"order": "unordered"}
   }

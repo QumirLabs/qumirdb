@@ -1,0 +1,8 @@
+project (k, k2) (rows≈1 cost≈4.6K)
+└─ join inner [__join_key_0__ = __join_key_1__] (rows≈1 cost≈4.6K)
+   ├─ project (sa.k, __join_key_0__) (rows≈4 cost≈144)
+   │  └─ project (sa.k, __join_expr_0__) (rows≈4 cost≈80)
+   │     └─ source sa AS sa (rows≈4 cost≈32)
+   └─ project (sb.k, __join_key_1__) (rows≈6 cost≈240)
+      └─ project (sb.k, __join_expr_1__) (rows≈6 cost≈144)
+         └─ source sb AS sb (rows≈6 cost≈48)

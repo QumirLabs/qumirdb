@@ -20,6 +20,8 @@
 #include "const_fold.h"
 
 #include <algorithm>
+#include <iterator>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <unordered_map>
@@ -29,6 +31,7 @@
 namespace NQdb {
 
 using namespace NQumir::NAst;
+using namespace NQumir::NAst::NLiterals;
 
 namespace {
 
@@ -834,6 +837,127 @@ TOperatorPtr Process(NQumir::NAst::TTypeFactory& types, TOperatorPtr node, TCont
     return Materialize(types, node, ctx.Conjucts);
 }
 
+// The operands of `conjunct`, left input first, when it equates an expression
+// over one input with an expression over the other and at least one of them is
+// not a plain column (column pairs are keyed through equivalence classes).
+std::optional<std::pair<TExprPtr, TExprPtr>> SplitEquality(
+    const TExprPtr& conjunct,
+    const std::unordered_set<std::string>& leftCols,
+    const std::unordered_set<std::string>& rightCols)
+{
+    auto maybeBinary = TMaybeNode<TBinaryExpr>(conjunct);
+    if (!maybeBinary) {
+        return std::nullopt;
+    }
+    auto binary = maybeBinary.Cast();
+    if (binary->Operator != "=="_op
+        || (TMaybeNode<TIdentExpr>(binary->Left()) && TMaybeNode<TIdentExpr>(binary->Right())))
+    {
+        return std::nullopt;
+    }
+    const auto lhs = FindUnboundVars(binary->Left());
+    const auto rhs = FindUnboundVars(binary->Right());
+    auto only = [](const auto& vars, const auto& side, const auto& other) {
+        return !vars.empty() && Covers(vars, side) && !Covers(vars, other);
+    };
+    if (only(lhs, leftCols, rightCols) && only(rhs, rightCols, leftCols)) {
+        return std::pair{binary->Left(), binary->Right()};
+    }
+    if (only(lhs, rightCols, leftCols) && only(rhs, leftCols, rightCols)) {
+        return std::pair{binary->Right(), binary->Left()};
+    }
+    return std::nullopt;
+}
+
+// The key column of operand `expr`: the column itself, or a new column of the
+// input that computes it.
+std::string KeyColumn(const TExprPtr& expr, std::vector<TProjectionSpec>& computed, size_t& aliasCounter) {
+    if (auto ident = TMaybeNode<TIdentExpr>(expr)) {
+        return ident.Cast()->Name;
+    }
+    auto name = "__join_expr_" + std::to_string(aliasCounter++) + "__";
+    computed.push_back({.Name = name, .Expression = expr});
+    return name;
+}
+
+// `input` with the `computed` columns added after all of its own.
+TOperatorPtr AddComputedColumns(
+    NQumir::NAst::TTypeFactory& types,
+    const TOperatorPtr& input,
+    std::vector<TProjectionSpec> computed)
+{
+    if (computed.empty()) {
+        return input;
+    }
+    std::vector<TProjectionSpec> projections;
+    for (const auto& [name, _] : input->OutputColumns()->Fields) {
+        projections.push_back({
+            .Name = name,
+            .Expression = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, name),
+        });
+    }
+    std::ranges::move(computed, std::back_inserter(projections));
+    return NQumir::MakeIntrusive<TProjectOperator>(types, input, std::move(projections));
+}
+
+// Turns the residual equalities between an expression over one input and an
+// expression over the other into hash keys: a projection below the join
+// computes each expression on its own input, which avoids a nested loop over
+// all pairs.
+void KeyExpressionEqualities(NQumir::NAst::TTypeFactory& types, TOperatorPtr& root, size_t& aliasCounter) {
+    for (auto& input : root->MutableInputs()) {
+        KeyExpressionEqualities(types, input, aliasCounter);
+    }
+    auto maybeJoin = TMaybeOp<TJoinOperator>(root);
+    if (!maybeJoin || !maybeJoin.Cast()->Filter()) {
+        return;
+    }
+    auto join = maybeJoin.Cast();
+    const auto leftCols = JoinColumns(0, join);
+    const auto rightCols = JoinColumns(1, join);
+    std::vector<TExprPtr> conjuncts;
+    FactorConjuncts(join->Filter(), conjuncts);
+    std::vector<TExprPtr> residual;
+    std::vector<TProjectionSpec> leftComputed;
+    std::vector<TProjectionSpec> rightComputed;
+    for (const auto& conjunct : conjuncts) {
+        auto operands = SplitEquality(conjunct, leftCols, rightCols);
+        if (!operands) {
+            residual.push_back(conjunct);
+            continue;
+        }
+        join->MutableKeys().push_back({
+            KeyColumn(operands->first, leftComputed, aliasCounter),
+            KeyColumn(operands->second, rightComputed, aliasCounter),
+        });
+    }
+    if (residual.size() == conjuncts.size()) {
+        return;
+    }
+    join->MutableFilter() = Combine(residual, "&&"_op);
+
+    // A semi or anti join outputs one input as is; project the computed key
+    // columns away again when they were added to that input.
+    const auto type = join->JoinType();
+    const bool outputChanged =
+        ((type == EJoinType::LeftSemi || type == EJoinType::LeftAnti) && !leftComputed.empty())
+        || ((type == EJoinType::RightSemi || type == EJoinType::RightAnti) && !rightComputed.empty());
+    std::vector<TProjectionSpec> restored;
+    if (outputChanged) {
+        for (const auto& [name, _] : join->OutputColumns()->Fields) {
+            restored.push_back({
+                .Name = name,
+                .Expression = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, name),
+            });
+        }
+    }
+    join->MutableLeft() = AddComputedColumns(types, join->Left(), std::move(leftComputed));
+    join->MutableRight() = AddComputedColumns(types, join->Right(), std::move(rightComputed));
+    if (outputChanged) {
+        root = NQumir::MakeIntrusive<TProjectOperator>(types, root, std::move(restored));
+    }
+}
+
 bool IsNullJoinKey(
     const TConjuct& conjunct,
     const TJoinOperator& join,
@@ -927,7 +1051,10 @@ TOperatorPtr PushDownPredicates(TOperatorPtr root, TConstFolder& folder) {
 }
 
 TOperatorPtr ExtractEquiJoins(TOperatorPtr root, TConstFolder& folder) {
-    return Process(folder.Types(), root, {{}, EMode::ExtractKeys, folder});
+    root = Process(folder.Types(), root, {{}, EMode::ExtractKeys, folder});
+    size_t aliasCounter = 0;
+    KeyExpressionEqualities(folder.Types(), root, aliasCounter);
+    return root;
 }
 
 bool RewriteOuterJoinAsAnti(NQumir::NAst::TTypeFactory& types, TOperatorPtr& root) {

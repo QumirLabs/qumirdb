@@ -27,6 +27,7 @@
     "error_case_nullable.sql": {"expect_error": true},
     "error_join_residual.sql": {"expect_error": true},
     "error_join_residual_nullable.sql": {"expect_error": true},
+    "error_join_residual_inequality.sql": {"expect_error": true},
     "error_not_exists.sql": {"expect_error": true},
     "error_not_exists_nullable.sql": {"expect_error": true}
   }

@@ -1,4 +1,2 @@
-project (k) (rows≈1 cost≈4.2K)
-└─ join inner [sb.k = sa.k] residual (== (call nosuchfn |sa.k|) (call nosuchfn |sb.k|)) (rows≈1 cost≈4.2K)
-   ├─ source sb AS sb (rows≈3 cost≈12)
-   └─ source sa AS sa (rows≈3 cost≈12)
+Error: unknown function: nosuchfn @ Line: 1, Byte: 65, Column: 65
+

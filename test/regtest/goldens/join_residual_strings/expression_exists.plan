@@ -1,0 +1,5 @@
+project (k) (rows≈4 cost≈4.7K)
+└─ join left_semi [sa.s = __join_expr_0__] (rows≈4 cost≈4.6K)
+   ├─ source sa AS sa (rows≈4 cost≈96)
+   └─ project (__join_expr_0__) (rows≈6 cost≈192)
+      └─ source sb AS sb (rows≈6 cost≈96)

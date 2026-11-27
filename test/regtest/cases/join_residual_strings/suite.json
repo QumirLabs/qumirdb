@@ -12,6 +12,16 @@
     "keyed_not_exists.sql": {"order": "unordered"},
     "keyless_left.sql": {"order": "unordered"},
     "keyless_full.sql": {"order": "unordered"},
-    "keyless_not_exists.sql": {"order": "unordered"}
+    "keyless_not_exists.sql": {"order": "unordered"},
+    "expression_substr.sql": {"order": "unordered"},
+    "expression_upper_nulls.sql": {"order": "unordered"},
+    "expression_coalesce.sql": {"order": "unordered"},
+    "expression_arithmetic.sql": {"order": "unordered"},
+    "expression_cast.sql": {"order": "unordered"},
+    "expression_mixed_keys.sql": {"order": "unordered"},
+    "expression_right.sql": {"order": "unordered"},
+    "expression_exists.sql": {"order": "unordered"},
+    "expression_in.sql": {"order": "unordered"},
+    "expression_both_inputs.sql": {"order": "unordered"}
   }
 }

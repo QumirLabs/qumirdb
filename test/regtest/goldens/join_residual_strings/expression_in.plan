@@ -1,0 +1,7 @@
+project (k) (rows≈4 cost≈4.8K)
+└─ project (sa.k) (rows≈4 cost≈4.8K)
+   └─ join left_semi [__join_expr_0__ = __qdb_in__s] (rows≈4 cost≈4.7K)
+      ├─ project (sa.k, __join_expr_0__) (rows≈4 cost≈192)
+      │  └─ source sa AS sa (rows≈4 cost≈96)
+      └─ project (__qdb_in__s) (rows≈6 cost≈192)
+         └─ source sb AS sb (rows≈6 cost≈96)

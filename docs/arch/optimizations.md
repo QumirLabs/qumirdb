@@ -432,6 +432,32 @@ Each `nation` scan gets `n_name = 'FRANCE' OR n_name = 'UNITED KINGDOM'`, so 23
 of 25 nations — and everything joined through them — are dropped before the
 join, while the pairing condition is still enforced by the residual above.
 
+**Expression keys.** An equality whose operands each read only one input, at
+least one through an expression, is a key too. A projection below the join
+computes the expression on its own input as a new column, and the join hashes
+that column like any key. Without the key, the residual compares every pair of
+rows: TPC-DS q08 joins zip prefixes this way.
+
+```sql
+SELECT s_store_sk FROM store, v1 WHERE substr(s_zip, 1, 2) = substr(v1.ca_zip, 1, 2);
+```
+
+```
+before                                        after
+join inner residual                           join inner [__join_expr_0__ = __join_expr_1__]
+     (== (call substr |store.s_zip| 1 2)      ├─ project (store.s_store_sk, __join_expr_0__)
+         (call substr |v1.ca_zip| 1 2))       │  └─ source store AS store
+├─ source store AS store                      └─ project (__join_expr_1__)
+└─ source v1 AS v1                               └─ source v1 AS v1
+```
+
+The new column behaves as a column key in every join type that keys columns:
+`CoerceJoinKeys` casts both sides to their common type, a NULL value matches
+nothing, as `=` behaves, and a semi or anti join projects the column away from
+its output again. The column has no statistics, so the join is estimated with
+the default key NDV, like a cast key. An operand that reads both inputs stays in
+the residual.
+
 ### 2.7 PushDownSemiJoins
 
 A semi join whose keys touch one side of an inner join below it is pushed onto
