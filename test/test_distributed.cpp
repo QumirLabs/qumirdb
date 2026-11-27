@@ -1172,10 +1172,10 @@ TEST(DistributedScheduler, HeartbeatsAdvertiseLocalSchedulersAndAllowAllocation)
         cluster.Loop.Poller().SetMaxDuration(std::chrono::milliseconds(1));
         const auto first = cluster.Leader.RegisterWellKnown(
             static_cast<TLocalActorId>(EWellKnownActors::LocalScheduler),
-            std::unique_ptr<IActor>(CreateLocalScheduler(leaderId, 1)));
+            std::unique_ptr<IActor>(CreateLocalScheduler(leaderId, 1, std::make_shared<TRuntimeResources>())));
         const auto second = cluster.Follower.RegisterWellKnown(
             static_cast<TLocalActorId>(EWellKnownActors::LocalScheduler),
-            std::unique_ptr<IActor>(CreateLocalScheduler(leaderId, 1)));
+            std::unique_ptr<IActor>(CreateLocalScheduler(leaderId, 1, std::make_shared<TRuntimeResources>())));
         const auto leaderActors = cluster.Leader.ActorsSize();
         const auto followerActors = cluster.Follower.ActorsSize();
         const auto deadline = NNet::TClock::now() + std::chrono::seconds(2);
@@ -1218,7 +1218,7 @@ TEST(DistributedScheduler, LocalSchedulerCreatesIndependentActors) {
     const auto local = cluster.Follower.RegisterWellKnown(
         static_cast<TLocalActorId>(EWellKnownActors::LocalScheduler),
         std::unique_ptr<IActor>(CreateLocalScheduler(
-            cluster.LeaderScheduler.NodeId(), 1000)));
+            cluster.LeaderScheduler.NodeId(), 1000, std::make_shared<TRuntimeResources>())));
     const auto before = cluster.Follower.ActorsSize();
     for (uint32_t count : {0, 1, 3}) {
         SCOPED_TRACE(count);
@@ -1507,7 +1507,7 @@ TEST(DistributedAllocation, LocalSchedulerAllowsOversubscription) {
     const auto local = cluster.Follower.RegisterWellKnown(
         static_cast<TLocalActorId>(EWellKnownActors::LocalScheduler),
         std::unique_ptr<IActor>(CreateLocalScheduler(
-            cluster.LeaderScheduler.NodeId(), 1000)));
+            cluster.LeaderScheduler.NodeId(), 1000, std::make_shared<TRuntimeResources>())));
     const auto before = cluster.Follower.ActorsSize();
     cluster.Spawn(32, local);
     ASSERT_EQ(cluster.Responses.size(), 1);
@@ -4077,10 +4077,13 @@ struct TQueryCluster {
         const auto leaderId = Cluster.LeaderScheduler.NodeId();
         for (auto* system : {&Cluster.Leader, &Cluster.Follower}) {
             Cleaners.push_back(std::make_shared<NQdb::NScheduler::TGraphCleaner>(RetiredGraphs));
+            auto resources = std::make_shared<TRuntimeResources>();
+            resources->Scheduler = Settings.Scheduler;
+            resources->SerializeOnIoThreads = QueryIoThreads.value_or(0) > 0;
+            resources->GraphCleaner = Cleaners.back();
             system->RegisterWellKnown(
                 static_cast<TLocalActorId>(EWellKnownActors::LocalScheduler),
-                std::unique_ptr<IActor>(CreateLocalScheduler(leaderId, 1, Settings.Scheduler, {}, nullptr,
-                    QueryIoThreads.value_or(0) > 0, Cleaners.back())));
+                std::unique_ptr<IActor>(CreateLocalScheduler(leaderId, 1, std::move(resources))));
         }
         const auto deadline = NNet::TClock::now() + std::chrono::seconds(2);
         do {
