@@ -11,7 +11,7 @@ import urllib.error
 import urllib.request
 
 
-REPOSITORY = 'resetius/qumirdb'
+REPOSITORY = 'QumirLabs/qumirdb'
 REPO_URL = 'https://github.com/' + REPOSITORY
 
 
