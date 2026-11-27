@@ -1737,3 +1737,32 @@ int main(int argc, char** argv) {
     NQumir::NCodeGen::TLLVMInitializer initializer;
     return RUN_ALL_TESTS();
 }
+
+TEST(ChooseKeylessInnerJoin, BroadcastsTheSmallInputAndStreamsTheWideLargeOne) {
+    const TKeylessJoinSide small{100, 1, 2};
+    const TKeylessJoinSide large{14e6, 3, 128};
+    EXPECT_EQ(ChooseKeylessInnerJoin(small, large), EKeylessJoinStrategy::BroadcastLeft);
+    EXPECT_EQ(ChooseKeylessInnerJoin(large, small), EKeylessJoinStrategy::BroadcastRight);
+}
+
+TEST(ChooseKeylessInnerJoin, KeepsTheDefaultWhenTheSwapGainsNothing) {
+    // One lane on both sides: the swap only moves the broadcast cells.
+    EXPECT_EQ(
+        ChooseKeylessInnerJoin({100, 1, 1}, {1e6, 2, 1}), EKeylessJoinStrategy::BroadcastRight);
+    // The larger input has fewer lanes than the smaller one.
+    EXPECT_EQ(
+        ChooseKeylessInnerJoin({1e6, 1, 16}, {2e6, 1, 1}), EKeylessJoinStrategy::BroadcastRight);
+}
+
+TEST(ChooseKeylessInnerJoin, GathersTinyInputs) {
+    // Replicating two rows to 128 lanes costs more than the product itself.
+    EXPECT_EQ(
+        ChooseKeylessInnerJoin({3, 1, 128}, {2, 1, 128}), EKeylessJoinStrategy::Gather);
+}
+
+TEST(ChooseKeylessInnerJoin, KeepsTheDefaultWithoutEstimates) {
+    EXPECT_EQ(
+        ChooseKeylessInnerJoin({0, 1, 2}, {14e6, 3, 128}), EKeylessJoinStrategy::BroadcastRight);
+    EXPECT_EQ(
+        ChooseKeylessInnerJoin({100, 1, 2}, {0, 3, 128}), EKeylessJoinStrategy::BroadcastRight);
+}

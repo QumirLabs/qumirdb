@@ -408,50 +408,69 @@ public:
         return 0;
     }
 
-    // An inner keyless join broadcasts the smaller input by estimate and streams
-    // the larger one, if that costs no lanes. Other types stream the left: its
-    // match status needs the whole right input, which a split right lacks.
-    static bool KeylessJoinStreamsRight(
-        const TJoinOperator& join, size_t leftLanes, size_t rightLanes)
-    {
-        if (join.JoinType() != EJoinType::Inner) {
-            return false;
-        }
-        const auto& leftStats = join.Left()->Stats_;
-        const auto& rightStats = join.Right()->Stats_;
-        return leftStats && rightStats
-            && leftStats->RowCount < rightStats->RowCount
-            && rightLanes >= leftLanes;
-    }
+    struct TKeylessJoinPlan {
+        // The right input is streamed on its lanes and the left one is broadcast.
+        bool StreamRight = false;
+        size_t Lanes = 0;
+    };
 
     // A keyless (nested-loop) join broadcasts one side to every lane of the
     // streamed side, which keeps its partition count when each streamed row's
     // output depends only on that row: inner, left outer, and left semi/anti.
     // RIGHT / FULL pad the right rows no left row matched, which only the
-    // whole left input decides, so they run on one lane.
-    size_t KeylessJoinLanes(const TJoinOperator& join) const {
+    // whole left input decides, so they run on one lane. An inner join is
+    // symmetric and picks its placement by cost (ChooseKeylessInnerJoin).
+    TKeylessJoinPlan KeylessJoinPlan(const TJoinOperator& join) const {
         const size_t leftLanes = OutputLanes(join.Left());
         const size_t rightLanes = OutputLanes(join.Right());
         if (leftLanes == 0 || rightLanes == 0) {
-            return 0;
+            return {};
         }
-        const size_t lanes =
-            KeylessJoinStreamsRight(join, leftLanes, rightLanes) ? rightLanes : leftLanes;
         switch (join.JoinType()) {
             case EJoinType::Inner:
+                return InnerKeylessJoinPlan(join, leftLanes, rightLanes);
             case EJoinType::Left:
             case EJoinType::LeftSemi:
             case EJoinType::LeftAnti:
-                return lanes;
+                return {.Lanes = leftLanes};
             case EJoinType::Right:
             case EJoinType::Full:
-                return 1;
+                return {.Lanes = 1};
             case EJoinType::RightSemi:
             case EJoinType::RightAnti:
             case EJoinType::LeftMark:
-                return 0;
+                return {};
         }
-        return 0;
+        return {};
+    }
+
+    static TKeylessJoinPlan InnerKeylessJoinPlan(
+        const TJoinOperator& join, size_t leftLanes, size_t rightLanes)
+    {
+        const auto& leftStats = join.Left()->Stats_;
+        const auto& rightStats = join.Right()->Stats_;
+        if (!leftStats || !rightStats) {
+            return {.Lanes = leftLanes};
+        }
+        const TKeylessJoinSide left{
+            static_cast<double>(leftStats->RowCount),
+            join.Left()->OutputColumns()->Fields.size(), leftLanes};
+        const TKeylessJoinSide right{
+            static_cast<double>(rightStats->RowCount),
+            join.Right()->OutputColumns()->Fields.size(), rightLanes};
+        switch (ChooseKeylessInnerJoin(left, right)) {
+            case EKeylessJoinStrategy::BroadcastRight:
+                return {.Lanes = leftLanes};
+            case EKeylessJoinStrategy::BroadcastLeft:
+                return {.StreamRight = true, .Lanes = rightLanes};
+            case EKeylessJoinStrategy::Gather:
+                return {.Lanes = 1};
+        }
+        return {.Lanes = leftLanes};
+    }
+
+    size_t KeylessJoinLanes(const TJoinOperator& join) const {
+        return KeylessJoinPlan(join).Lanes;
     }
 
     // outLaneOffset shifts this operator's producer lanes within outConn, so a
@@ -2240,8 +2259,8 @@ private:
     //   parent gather. The scalar side is lowered, gathered to one lane, and
     //   forwarded into a broadcast connection replicated to every vector lane.
     //   The vector side is the left input, or the right one when an inner join
-    //   estimates it larger (KeylessJoinStreamsRight). RIGHT / FULL gather the
-    //   vector side to one lane (KeylessJoinLanes).
+    //   chooses so by cost (KeylessJoinPlan). RIGHT / FULL, and an inner join
+    //   of tiny inputs, gather the vector side to one lane.
     //   Only an inner join filters the product by its residual; the other
     //   types evaluate the residual in the kernel, where it decides matches.
     TLoweredOutput LowerCrossJoin(
@@ -2251,9 +2270,7 @@ private:
     {
         const auto crossStageId = NewExecStage(
             &join, EExecPlanNodeKind::CrossJoin);
-        const size_t lanes = KeylessJoinLanes(join);
-        const bool streamRight = KeylessJoinStreamsRight(
-            join, OutputLanes(join.Left()), OutputLanes(join.Right()));
+        const auto [streamRight, lanes] = KeylessJoinPlan(join);
         const auto& vectorOp = streamRight ? join.Right() : join.Left();
         const auto& scalarOp = streamRight ? join.Left() : join.Right();
         // Input index of each side in the exec plan: left is 0, right is 1.
