@@ -35,6 +35,8 @@ template <class TState>
 using TStates = std::unordered_map<uint64_t, std::tuple<std::shared_ptr<TState>, NScheduler::TTaskNode*>>;
 
 // A stopped graph with its scheduler and remote states, which point into it and die first.
+// It outlives its actor: the states keep the actor's ActorChannel and the CTE sink wake captures
+// the actor, so nothing may call them once the scheduler thread is joined.
 struct TRetiredGraph {
     std::unique_ptr<NScheduler::TTaskGraph> OwnedGraph;
     std::unique_ptr<NScheduler::TThreadedScheduler> Scheduler;

@@ -4223,6 +4223,49 @@ TEST(DistributedScheduler, QueryActorRepliesBeforeItsGraphsAreDestroyed) {
     EXPECT_TRUE(fourthRetired.load());
 }
 
+// A graph still running when its actor stops: the peer never confirms, so its sink waits
+// with rows queued. The cleaner takes it as it is and frees those rows only when it gets to it.
+TEST(DistributedScheduler, CleanerTakesAGraphStoppedWhileItRuns) {
+    using namespace NQdb::NScheduler;
+    std::atomic<int> destroyed = 0;
+    // As in RemoteSinkReleasesItsOutboxOnTeardown: each row set alone fills the sink's window.
+    constexpr int produced = 8;
+    auto cleaner = std::make_shared<TGraphCleaner>(2);
+    {
+        THeldCleaners held({cleaner});
+        auto resources = std::make_shared<TRuntimeResources>();
+        resources->Scheduler.WorkerCount = 2;
+        resources->GraphCleaner = cleaner;
+        TTestCluster cluster;
+        std::map<std::string, int> statuses;
+        std::vector<std::string> errors;
+        const auto query = cluster.Follower.Register(std::make_unique<TReportProbe>(statuses, errors));
+        const auto peer = cluster.Follower.Register(std::make_unique<TBlackHole>());
+        const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+        cluster.Follower.Send<TTaskGraphMessage>(query, actor, GraphMessage(RelaySpec(), RelayEndpoints(peer, peer)));
+        for (uint64_t seq = 1; seq <= produced; ++seq) {
+            cluster.Follower.Send<TDataChunk>(query, actor, TDataChunk(2, seq, {CountedRows(1 << 20, &destroyed)}));
+        }
+        const auto until = NNet::TClock::now() + std::chrono::milliseconds(200);
+        while (NNet::TClock::now() < until) {
+            cluster.Pump();
+        }
+        EXPECT_EQ(errors, std::vector<std::string>{});
+        const int released = destroyed.load();
+        EXPECT_LT(released, produced);
+        const auto actors = cluster.Follower.ActorsSize();
+        cluster.Follower.Send<TPoison>(query, actor, TPoison{});
+        cluster.Pump();
+        EXPECT_EQ(cluster.Follower.ActorsSize(), actors - 1);
+        EXPECT_EQ(destroyed.load(), released);
+    }
+    const auto deadline = NNet::TClock::now() + std::chrono::seconds(10);
+    while (destroyed.load() < produced && NNet::TClock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_EQ(destroyed.load(), produced);
+}
+
 // Joins whose build lanes and probes the split puts on both nodes: each node's
 // filter merges every build lane, so the rows are those of a local run without
 // filters. One build side is empty.
