@@ -1,5 +1,9 @@
 #include <qdb/exec/sort_key_ops.h>
 
+#include <qdb/kernel/compiler.h>
+
+#include <algorithm>
+
 namespace NQdb {
 
 bool RowSelected(const TRowSet& batch, int32_t row) {
@@ -7,12 +11,11 @@ bool RowSelected(const TRowSet& batch, int32_t row) {
 }
 
 size_t RadixWorkStride(const std::vector<TSortColumnRef>& keyColumns) {
+    size_t slots = 1;
     for (const auto& keyColumn : keyColumns) {
-        if (keyColumn.Value.Kind == EValueKind::String || keyColumn.Value.Kind == EValueKind::Float) {
-            return 4;
-        }
+        slots = std::max(slots, static_cast<size_t>(RowIdSortOf(keyColumn.Value).WorkSlots));
     }
-    return 1;
+    return slots;
 }
 
 } // namespace NQdb

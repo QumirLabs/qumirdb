@@ -54,18 +54,18 @@
         {
           "desc": true,
           "index": 1,
-          "isFloat": false,
           "isString": false,
           "nullsFirst": true,
-          "width": 8
+          "width": 8,
+          "workSlots": 3
         },
         {
           "desc": false,
           "index": 0,
-          "isFloat": false,
           "isString": false,
           "nullsFirst": false,
-          "width": 8
+          "width": 8,
+          "workSlots": 3
         }
       ],
       "radixNullable": false,

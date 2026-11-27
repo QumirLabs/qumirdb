@@ -52,183 +52,180 @@
         (block (return (: 1 u8))))
       (return (: 0 u8))))
 
-  (fun sort_fixed_rowids_count_pass [Value]
-       ((var store <ptr TRowSet>)
-        (var column_idx i64)
-        (var row_ids <ptr i64>)
-        (var work <ptr i64>)
+  ;; Fixed-width keys sort (key, row id) arrays: qumir_radix_key runs once per
+  ;; row, and each pass reads the keys in order instead of fetching every value
+  ;; through its row id. work holds keys and scattered keys of Key (u32 for keys
+  ;; of at most 32 bits, else u64), then the scattered ids: RowIdSortOf's slots.
+
+  ;; One stable counting pass over byte `digit` (bits) of keys, scattering keys
+  ;; and ids into keys_out and ids_out. When every key has the same byte there,
+  ;; it scatters nothing and returns #f.
+  (fun sr_keyed_count_pass [Key]
+       ((var keys <ptr Key>)
+        (var ids <ptr i64>)
+        (var keys_out <ptr Key>)
+        (var ids_out <ptr i64>)
         (var counts <ptr u32>)
         (var n i64)
         (var digit i64)
-        (var desc bool)
-        (var type_witness <ptr Value>))
+        (var desc bool)) -> bool
     (block
-      (var i i64)
-      (= i (: 0 i64))
+      (var i = (: 0 i64))
       (while (< i (: 256 i64))
         (block
           (= counts [i] (: 0 u32))
           (= i (+ i (: 1 i64)))))
-
+      (var shift = (cast digit Key))
+      (var byte_mask = (cast (: 255 i64) Key))
       (= i (: 0 i64))
       (while (< i n)
         (block
-          (var row = (index row_ids i))
-          (var bucket = (call qumir_radix_digit
-            (call qumir_radix_key
-              (call sr_load_fixed_key store row column_idx type_witness))
-            digit))
-          (if desc
-            (block (= bucket (- (: 255 u32) bucket))))
-          (var bucket_index = (cast bucket i64))
-          (= counts [bucket_index] (+ (index counts bucket_index) (: 1 u32)))
-          (= i (+ i (: 1 i64)))))
-
-      (= i (: 1 i64))
-      (while (< i (: 256 i64))
-        (block
-          (= counts [i] (+ (index counts i) (index counts (- i (: 1 i64)))))
-          (= i (+ i (: 1 i64)))))
-
-      (= i n)
-      (while (> i (: 0 i64))
-        (block
-          (= i (- i (: 1 i64)))
-          (var row = (index row_ids i))
-          (var bucket = (call qumir_radix_digit
-            (call qumir_radix_key
-              (call sr_load_fixed_key store row column_idx type_witness))
-            digit))
-          (if desc
-            (block (= bucket (- (: 255 u32) bucket))))
-          (var bucket_index = (cast bucket i64))
-          (var place = (- (index counts bucket_index) (: 1 u32)))
-          (= work [(cast place i64)] row)
-          (= counts [bucket_index] place)))
-
-      (= i (: 0 i64))
-      (while (< i n)
-        (block
-          (= row_ids [i] (index work i))
-          (= i (+ i (: 1 i64)))))))
-
-  (fun sort_fixed_rowids [Value]
-       ((var store <ptr TRowSet>)
-        (var column_idx i64)
-        (var row_ids <ptr i64>)
-        (var work <ptr i64>)
-        (var counts <ptr u32>)
-        (var n i64)
-        (var key_bits i64)
-        (var desc bool)
-        (var type_witness <ptr Value>))
-    (block
-      (var digit i64)
-      (= digit (: 0 i64))
-      (while (< digit key_bits)
-        (block
-          (call sort_fixed_rowids_count_pass
-            store column_idx row_ids work counts n digit desc type_witness)
-          (= digit (+ digit (: 8 i64)))))))
-
-  (fun sort_fixed_rowids_count_pass_nullable [Value]
-       ((var store <ptr TRowSet>)
-        (var column_idx i64)
-        (var row_ids <ptr i64>)
-        (var work <ptr i64>)
-        (var counts <ptr u32>)
-        (var n i64)
-        (var digit i64)
-        (var desc bool)
-        (var nulls_first bool)
-        (var type_witness <ptr Value>))
-    (block
-      (var i i64)
-      (= i (: 0 i64))
-      (while (< i (: 257 i64))
-        (block
-          (= counts [i] (: 0 u32))
-          (= i (+ i (: 1 i64)))))
-
-      (= i (: 0 i64))
-      (while (< i n)
-        (block
-          (var row = (index row_ids i))
-          (var bucket i64)
-          (if (! (call sr_row_valid store row column_idx))
-            (block
-              (if nulls_first
-                (block (= bucket (: 0 i64)))
-                (block (= bucket (: 256 i64)))))
-            (block
-              (var digit_bucket = (cast (call qumir_radix_digit
-                (call qumir_radix_key
-                  (call sr_load_fixed_key store row column_idx type_witness))
-                digit) i64))
-              (if desc
-                (block (= digit_bucket (- (: 255 i64) digit_bucket))))
-              (if nulls_first
-                (block (= bucket (+ digit_bucket (: 1 i64))))
-                (block (= bucket digit_bucket)))))
+          (var bucket = (cast (& (>> (index keys i) shift) byte_mask) i64))
           (= counts [bucket] (+ (index counts bucket) (: 1 u32)))
           (= i (+ i (: 1 i64)))))
 
-      (= i (: 1 i64))
-      (while (< i (: 257 i64))
+      ;; Exclusive offsets in output order: DESC walks the buckets downwards.
+      (var offset = (: 0 u32))
+      (= i (: 0 i64))
+      (while (< i (: 256 i64))
         (block
-          (= counts [i] (+ (index counts i) (index counts (- i (: 1 i64)))))
+          (var bucket = i)
+          (if desc
+            (block (= bucket (- (: 255 i64) i))))
+          (var bucket_rows = (index counts bucket))
+          (if (== (cast bucket_rows i64) n)
+            (block (return #f)))
+          (= counts [bucket] offset)
+          (= offset (+ offset bucket_rows))
           (= i (+ i (: 1 i64)))))
-
-      (= i n)
-      (while (> i (: 0 i64))
-        (block
-          (= i (- i (: 1 i64)))
-          (var row = (index row_ids i))
-          (var bucket i64)
-          (if (! (call sr_row_valid store row column_idx))
-            (block
-              (if nulls_first
-                (block (= bucket (: 0 i64)))
-                (block (= bucket (: 256 i64)))))
-            (block
-              (var digit_bucket = (cast (call qumir_radix_digit
-                (call qumir_radix_key
-                  (call sr_load_fixed_key store row column_idx type_witness))
-                digit) i64))
-              (if desc
-                (block (= digit_bucket (- (: 255 i64) digit_bucket))))
-              (if nulls_first
-                (block (= bucket (+ digit_bucket (: 1 i64))))
-                (block (= bucket digit_bucket)))))
-          (var place = (- (index counts bucket) (: 1 u32)))
-          (= work [(cast place i64)] row)
-          (= counts [bucket] place)))
 
       (= i (: 0 i64))
       (while (< i n)
         (block
-          (= row_ids [i] (index work i))
-          (= i (+ i (: 1 i64)))))))
+          (var key = (index keys i))
+          (var bucket = (cast (& (>> key shift) byte_mask) i64))
+          (var place = (cast (index counts bucket) i64))
+          (= keys_out [place] key)
+          (= ids_out [place] (index ids i))
+          (= counts [bucket] (+ (index counts bucket) (: 1 u32)))
+          (= i (+ i (: 1 i64)))))
+      (return #t)))
 
-  (fun sort_fixed_rowids_nullable [Value]
+  ;; Stable LSD sort of ids[0, n) by keys over key_bits bits. The passes move
+  ;; the arrays back and forth; the sorted ids end in ids.
+  (fun sr_keyed_sort [Key]
+       ((var keys <ptr Key>)
+        (var ids <ptr i64>)
+        (var keys_work <ptr Key>)
+        (var ids_work <ptr i64>)
+        (var counts <ptr u32>)
+        (var n i64)
+        (var key_bits i64)
+        (var desc bool))
+    (block
+      (var src_keys = keys)
+      (var src_ids = ids)
+      (var dst_keys = keys_work)
+      (var dst_ids = ids_work)
+      (var digit = (: 0 i64))
+      (while (< digit key_bits)
+        (block
+          (if (call sr_keyed_count_pass src_keys src_ids dst_keys dst_ids counts n digit desc)
+            (block
+              (var keys_tmp = src_keys)
+              (= src_keys dst_keys)
+              (= dst_keys keys_tmp)
+              (var ids_tmp = src_ids)
+              (= src_ids dst_ids)
+              (= dst_ids ids_tmp)))
+          (= digit (+ digit (: 8 i64)))))
+      (if (!= (cast src_ids i64) (cast ids i64))
+        (block
+          (var i = (: 0 i64))
+          (while (< i n)
+            (block
+              (= ids [i] (index src_ids i))
+              (= i (+ i (: 1 i64)))))))))
+
+  (fun sort_fixed_rowids [Value Key]
        ((var store <ptr TRowSet>)
         (var column_idx i64)
         (var row_ids <ptr i64>)
-        (var work <ptr i64>)
+        (var work <ptr u64>)
+        (var counts <ptr u32>)
+        (var n i64)
+        (var key_bits i64)
+        (var desc bool)
+        (var type_witness <ptr Value>)
+        (var key_witness <ptr Key>)
+        (var key_bytes i64))
+    (block
+      (var keys = (cast work <ptr Key>))
+      (var keys_work = (cast (+ (cast work i64) (* n key_bytes)) <ptr Key>))
+      (var ids_work = (cast (+ (cast work i64) (* n (* key_bytes (: 2 i64)))) <ptr i64>))
+      (var i = (: 0 i64))
+      (while (< i n)
+        (block
+          (= keys [i] (cast (call qumir_radix_key
+            (call sr_load_fixed_key store (index row_ids i) column_idx type_witness)) Key))
+          (= i (+ i (: 1 i64)))))
+      (call sr_keyed_sort keys row_ids keys_work ids_work counts n key_bits desc)))
+
+  ;; NULL rows keep their input order at the chosen end, as in the 257-bucket
+  ;; passes; only the valid rows are sorted.
+  (fun sort_fixed_rowids_nullable [Value Key]
+       ((var store <ptr TRowSet>)
+        (var column_idx i64)
+        (var row_ids <ptr i64>)
+        (var work <ptr u64>)
         (var counts <ptr u32>)
         (var n i64)
         (var key_bits i64)
         (var desc bool)
         (var nulls_first bool)
-        (var type_witness <ptr Value>))
+        (var type_witness <ptr Value>)
+        (var key_witness <ptr Key>)
+        (var key_bytes i64))
     (block
-      (var digit i64)
-      (= digit (: 0 i64))
-      (while (< digit key_bits)
+      (var keys = (cast work <ptr Key>))
+      (var keys_work = (cast (+ (cast work i64) (* n key_bytes)) <ptr Key>))
+      (var ids_work = (cast (+ (cast work i64) (* n (* key_bytes (: 2 i64)))) <ptr i64>))
+      ;; Valid rows go to the front of ids_work, NULL rows to its back.
+      (var valid = (: 0 i64))
+      (var nulls = (: 0 i64))
+      (var i = (: 0 i64))
+      (while (< i n)
         (block
-          (call sort_fixed_rowids_count_pass_nullable
-            store column_idx row_ids work counts n digit desc nulls_first type_witness)
-          (= digit (+ digit (: 8 i64)))))))
+          (var row = (index row_ids i))
+          (if (call sr_row_valid store row column_idx)
+            (block
+              (= keys [valid] (cast (call qumir_radix_key
+                (call sr_load_fixed_key store row column_idx type_witness)) Key))
+              (= ids_work [valid] row)
+              (= valid (+ valid (: 1 i64))))
+            (block
+              (= nulls (+ nulls (: 1 i64)))
+              (= ids_work [(- n nulls)] row)))
+          (= i (+ i (: 1 i64)))))
+
+      (var valid_base = (: 0 i64))
+      (var null_base = valid)
+      (if nulls_first
+        (block
+          (= valid_base nulls)
+          (= null_base (: 0 i64))))
+      (= i (: 0 i64))
+      (while (< i valid)
+        (block
+          (= row_ids [(+ valid_base i)] (index ids_work i))
+          (= i (+ i (: 1 i64)))))
+      (= i (: 0 i64))
+      (while (< i nulls)
+        (block
+          (= row_ids [(+ null_base i)] (index ids_work (- (- n (: 1 i64)) i)))
+          (= i (+ i (: 1 i64)))))
+      (var valid_ids = (cast (+ (cast row_ids i64) (* valid_base (: 8 i64))) <ptr i64>))
+      (call sr_keyed_sort keys valid_ids keys_work ids_work counts valid key_bits desc)))
 
   ;; BinInt (128-bit decimal) radix key for one 64-bit half. A signed 128-bit value
   ;; orders as (Hi signed, Lo unsigned): flip Hi's sign bit, leave Lo as-is. Radix is
@@ -667,7 +664,8 @@
         (block (return (>= cmp (: 0 i64)))))
       (return (<= cmp (: 0 i64)))))
 
-  ;; One stable counting pass over prefix byte `digit` (bits) of the pairs.
+  ;; One stable counting pass over prefix byte `digit` (bits), from pairs into
+  ;; work.
   (fun sr_pair_count_pass
        ((var pairs <ptr u64>)
         (var work <ptr u64>)
@@ -713,13 +711,7 @@
           (= work [(* place (: 2 i64))] (index pairs (* i (: 2 i64))))
           (= work [(+ (* place (: 2 i64)) (: 1 i64))]
              (index pairs (+ (* i (: 2 i64)) (: 1 i64))))
-          (= counts [bucket] (cast place u32))))
-
-      (= i (: 0 i64))
-      (while (< i (* n (: 2 i64)))
-        (block
-          (= pairs [i] (index work i))
-          (= i (+ i (: 1 i64)))))))
+          (= counts [bucket] (cast place u32))))))
 
   ;; True when the row at pair position `j` must move past `key_row`.
   (fun sr_pair_shifts
@@ -871,6 +863,14 @@
               (= run_start i)))
           (= i (+ i (: 1 i64)))))))
 
+  (fun sr_pairs_to_row_ids ((var pairs <ptr u64>) (var row_ids <ptr i64>) (var n i64))
+    (block
+      (var i = (: 0 i64))
+      (while (< i n)
+        (block
+          (= row_ids [i] (cast (index pairs (+ (* i (: 2 i64)) (: 1 i64))) i64))
+          (= i (+ i (: 1 i64)))))))
+
   ;; Entry: stable sort of row_ids[0, n) by one string column. `work` must hold
   ;; two pair arrays: 32 * n bytes.
   (fun sort_string_rowids
@@ -895,23 +895,21 @@
           (= pairs [(+ (* i (: 2 i64)) (: 1 i64))] (cast row u64))
           (= i (+ i (: 1 i64)))))
 
+      ;; Two passes per step move the pairs to pair_work and back.
       (var digit = (: 0 i64))
       (while (< digit (: 64 i64))
         (block
           (call sr_pair_count_pass pairs pair_work counts n digit desc)
-          (= digit (+ digit (: 8 i64)))))
+          (call sr_pair_count_pass pair_work pairs counts n (+ digit (: 8 i64)) desc)
+          (= digit (+ digit (: 16 i64)))))
 
       (call sr_pair_tiebreak_runs store column_idx
         pairs pair_work (: 0 i64) n desc)
 
-      (= i (: 0 i64))
-      (while (< i n)
-        (block
-          (= row_ids [i] (cast (index pairs (+ (* i (: 2 i64)) (: 1 i64))) i64))
-          (= i (+ i (: 1 i64)))))))
+      (call sr_pairs_to_row_ids pairs row_ids n)))
 
-  ;; Nullable stable counting pass over pairs: bucket 0 or 256 holds nulls per
-  ;; nulls_first (mirrors radix_nullable.oz).
+  ;; Nullable stable counting pass from pairs into work: bucket 0 or 256 holds
+  ;; nulls per nulls_first (mirrors radix_nullable.oz).
   (fun sr_pair_count_pass_nullable
        ((var store <ptr TRowSet>)
         (var column_idx i64)
@@ -980,13 +978,7 @@
           (= work [(* place (: 2 i64))] (index pairs (* i (: 2 i64))))
           (= work [(+ (* place (: 2 i64)) (: 1 i64))]
              (index pairs (+ (* i (: 2 i64)) (: 1 i64))))
-          (= counts [bucket] (cast place u32))))
-
-      (= i (: 0 i64))
-      (while (< i (* n (: 2 i64)))
-        (block
-          (= pairs [i] (index work i))
-          (= i (+ i (: 1 i64)))))))
+          (= counts [bucket] (cast place u32))))))
 
   ;; Nullable entry: nulls are grouped at the chosen end by the passes; the
   ;; tie-break runs only over the contiguous valid region.
@@ -1016,12 +1008,15 @@
           (= pairs [(+ (* i (: 2 i64)) (: 1 i64))] (cast row u64))
           (= i (+ i (: 1 i64)))))
 
+      ;; Two passes per step move the pairs to pair_work and back.
       (var digit = (: 0 i64))
       (while (< digit (: 64 i64))
         (block
           (call sr_pair_count_pass_nullable
             store column_idx pairs pair_work counts n digit desc nulls_first)
-          (= digit (+ digit (: 8 i64)))))
+          (call sr_pair_count_pass_nullable
+            store column_idx pair_work pairs counts n (+ digit (: 8 i64)) desc nulls_first)
+          (= digit (+ digit (: 16 i64)))))
 
       (var lo = (: 0 i64))
       (var hi = n)
@@ -1044,80 +1039,5 @@
       (call sr_pair_tiebreak_runs store column_idx
         pairs pair_work lo hi desc)
 
-      (= i (: 0 i64))
-      (while (< i n)
-        (block
-          (= row_ids [i] (cast (index pairs (+ (* i (: 2 i64)) (: 1 i64))) i64))
-          (= i (+ i (: 1 i64)))))))
-
-  ;; Float keys sort (qumir_radix_key, row id) pairs with the string passes:
-  ;; the key is computed once per row, not in every pass. work holds 4n slots.
-  (fun sr_float_pairs_fill [Value]
-       ((var store <ptr TRowSet>)
-        (var column_idx i64)
-        (var row_ids <ptr i64>)
-        (var pairs <ptr u64>)
-        (var n i64)
-        (var type_witness <ptr Value>))
-    (block
-      (var i = (: 0 i64))
-      (while (< i n)
-        (block
-          (var row = (index row_ids i))
-          (= pairs [(* i (: 2 i64))]
-             (call qumir_radix_key (call sr_load_fixed_key store row column_idx type_witness)))
-          (= pairs [(+ (* i (: 2 i64)) (: 1 i64))] (cast row u64))
-          (= i (+ i (: 1 i64)))))))
-
-  (fun sr_pairs_to_row_ids ((var pairs <ptr u64>) (var row_ids <ptr i64>) (var n i64))
-    (block
-      (var i = (: 0 i64))
-      (while (< i n)
-        (block
-          (= row_ids [i] (cast (index pairs (+ (* i (: 2 i64)) (: 1 i64))) i64))
-          (= i (+ i (: 1 i64)))))))
-
-  (fun sort_float_rowids [Value]
-       ((var store <ptr TRowSet>)
-        (var column_idx i64)
-        (var row_ids <ptr i64>)
-        (var work <ptr u64>)
-        (var counts <ptr u32>)
-        (var n i64)
-        (var key_bits i64)
-        (var desc bool)
-        (var type_witness <ptr Value>))
-    (block
-      (var pairs = work)
-      (var pair_work = (cast (+ (cast pairs i64) (* n (: 16 i64))) <ptr u64>))
-      (call sr_float_pairs_fill store column_idx row_ids pairs n type_witness)
-      (var digit = (: 0 i64))
-      (while (< digit key_bits)
-        (block
-          (call sr_pair_count_pass pairs pair_work counts n digit desc)
-          (= digit (+ digit (: 8 i64)))))
-      (call sr_pairs_to_row_ids pairs row_ids n)))
-
-  (fun sort_float_rowids_nullable [Value]
-       ((var store <ptr TRowSet>)
-        (var column_idx i64)
-        (var row_ids <ptr i64>)
-        (var work <ptr u64>)
-        (var counts <ptr u32>)
-        (var n i64)
-        (var key_bits i64)
-        (var desc bool)
-        (var nulls_first bool)
-        (var type_witness <ptr Value>))
-    (block
-      (var pairs = work)
-      (var pair_work = (cast (+ (cast pairs i64) (* n (: 16 i64))) <ptr u64>))
-      (call sr_float_pairs_fill store column_idx row_ids pairs n type_witness)
-      (var digit = (: 0 i64))
-      (while (< digit key_bits)
-        (block
-          (call sr_pair_count_pass_nullable
-            store column_idx pairs pair_work counts n digit desc nulls_first)
-          (= digit (+ digit (: 8 i64)))))
       (call sr_pairs_to_row_ids pairs row_ids n)))
 )

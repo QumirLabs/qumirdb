@@ -37,6 +37,7 @@
 #include <numeric>
 #include <sstream>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 using namespace NQdb;
@@ -670,6 +671,102 @@ TEST(SortExec, F32TopSortOrdersLikeF64) {
         auto f32Rows = SortFloatKeyPayload<float>(sql, true);
         EXPECT_EQ(f32Rows.size(), 4u) << sql;
         EXPECT_EQ(f32Rows, SortFloatKeyPayload<double>(sql, true)) << sql;
+    }
+}
+
+// Sorts a nullable integer key over two batches by `order` and returns the
+// payload (the row's input position) in output order.
+template<typename TInt>
+std::vector<int64_t> SortIntKeyPayload(const std::vector<TInt>& keys, uint8_t nullRow, const char* order) {
+    using namespace NQumir::NAst;
+    const size_t half = keys.size() / 2;
+    std::vector<TInt> keys1(keys.begin(), keys.begin() + half);
+    std::vector<TInt> keys2(keys.begin() + half, keys.end());
+    std::vector<int64_t> payload(keys.size());
+    std::iota(payload.begin(), payload.end(), 0);
+    std::vector<int64_t> payload1(payload.begin(), payload.begin() + half);
+    std::vector<int64_t> payload2(payload.begin() + half, payload.end());
+    uint8_t mask1[] = {0xff, 0xff};
+    uint8_t mask2[] = {0xff, 0xff};
+    mask1[nullRow / 8] &= ~(uint8_t(1) << (nullRow % 8));
+    mask2[nullRow / 8] &= ~(uint8_t(1) << (nullRow % 8));
+    std::vector<TColumn> columns1 = {
+        TColumn{.Data = reinterpret_cast<char*>(keys1.data()), .Mask = mask1},
+        TColumn{.Data = reinterpret_cast<char*>(payload1.data())},
+    };
+    std::vector<TColumn> columns2 = {
+        TColumn{.Data = reinterpret_cast<char*>(keys2.data()), .Mask = mask2},
+        TColumn{.Data = reinterpret_cast<char*>(payload2.data())},
+    };
+    TRowSet batch1{.Columns = columns1.data(), .ColumnCount = 2, .RowCount = static_cast<int64_t>(half), .RefCount = 1};
+    TRowSet batch2{.Columns = columns2.data(), .ColumnCount = 2, .RowCount = static_cast<int64_t>(half), .RefCount = 1};
+
+    auto intType = TestTypes().MakeInteger(sizeof(TInt) == 4 ? TIntegerType::I32 : TIntegerType::I64);
+    NQdb::TMockSource source(
+        TMockColumns{},
+        {{"k", MakeNullableType(TestTypes(), intType)},
+         {"payload", TestTypes().MakeInteger()}},
+        {batch1, batch2});
+    auto plan = BuildSqlPlan(std::string("SELECT k, payload FROM t ORDER BY ") + order, source);
+    EXPECT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+    if (!plan) {
+        return {};
+    }
+    auto runtime = RunPlan(*plan);
+    std::vector<int64_t> result;
+    TRowSet out{};
+    while (runtime->Next(out)) {
+        auto* rows = reinterpret_cast<int64_t*>(out.Columns[1].Data);
+        result.insert(result.end(), rows, rows + out.RowCount);
+        Release(&out);
+    }
+    return result;
+}
+
+// The expected payload of SortIntKeyPayload: a stable sort of the input positions.
+template<typename TInt>
+std::vector<int64_t> StableIntKeyOrder(const std::vector<TInt>& keys, uint8_t nullRow, bool desc, bool nullsFirst) {
+    const size_t half = keys.size() / 2;
+    auto isNull = [&](int64_t row) {
+        return static_cast<size_t>(row) % half == nullRow;
+    };
+    std::vector<int64_t> rows(keys.size());
+    std::iota(rows.begin(), rows.end(), 0);
+    std::stable_sort(rows.begin(), rows.end(), [&](int64_t a, int64_t b) {
+        if (isNull(a) || isNull(b)) {
+            return isNull(a) != isNull(b) && isNull(a) == nullsFirst;
+        }
+        return desc ? keys[b] < keys[a] : keys[a] < keys[b];
+    });
+    return rows;
+}
+
+// The radix sort skips a pass in which every key has the same byte, and the
+// row ids end in the caller's array after an odd number of moving passes.
+TEST(SortExec, IntegerKeysSkipPassesThatMoveNothing) {
+    // Keys that differ in 1, 2 or 3 bytes, with repeats so that ties show stability.
+    const std::vector<std::vector<int64_t>> keys64 = {
+        {0x0102030405060700 + 7, 0x0102030405060700 + 3, 0x0102030405060700 + 9, 0x0102030405060700 + 3,
+         0x0102030405060700 + 0, 0x0102030405060700 + 3, 0x0102030405060700 + 255, 0x0102030405060700 + 9,
+         0x0102030405060700 + 1, 0x0102030405060700 + 7},
+        {0x1200 + 7, 0x3400 + 3, 0x1200 + 9, 0x3400 + 3, 0x0000 + 0, 0x3400 + 7, 0x1200 + 3, 0x0000 + 9, 0x3400 + 3, 0x1200 + 7},
+        {(int64_t(3) << 40) | (1 << 16) | 5, (int64_t(1) << 40) | (2 << 16) | 9, (int64_t(3) << 40) | (1 << 16) | 2,
+         (int64_t(2) << 40) | 5, (int64_t(3) << 40) | (1 << 16) | 5, (int64_t(1) << 40) | (7 << 16) | 1,
+         (int64_t(2) << 40) | 5, (int64_t(3) << 40) | 2, (int64_t(1) << 40) | (2 << 16) | 9,
+         (int64_t(2) << 40) | (1 << 16)},
+    };
+    for (const auto& keys : keys64) {
+        for (const auto& [order, desc, nullsFirst] : {
+                 std::tuple{"k DESC NULLS FIRST", true, true},
+                 std::tuple{"k ASC NULLS LAST", false, false}})
+        {
+            EXPECT_EQ(SortIntKeyPayload(keys, 2, order), StableIntKeyOrder(keys, 2, desc, nullsFirst)) << order;
+            std::vector<int32_t> narrow;
+            for (int64_t key : keys) {
+                narrow.push_back(static_cast<int32_t>(key ^ (key >> 32)));
+            }
+            EXPECT_EQ(SortIntKeyPayload(narrow, 2, order), StableIntKeyOrder(narrow, 2, desc, nullsFirst)) << order;
+        }
     }
 }
 

@@ -3,6 +3,7 @@
 #include <qdb/exec/instrumentation/operator.h>
 #include <qdb/exec/plan_data.h>
 #include <qdb/io/io.h>
+#include <qdb/io/value_type.h>
 #include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/backend.h>
 #include <qdb/kernel/generated.h>
@@ -112,6 +113,24 @@ struct TSortRadixKeyInput {
     bool Desc = false;
     bool NullsFirst = false;
 };
+
+// How the radix sort orders row ids by one key: the kernel calls the sort of
+// Kind, and the caller's work buffer gives it WorkSlots i64 slots per row.
+// One rule for both, so a sort never writes past its buffer.
+struct TRowIdSort {
+    enum class EKind {
+        Fixed,
+        Bool,
+        BinInt,
+        String,
+    };
+    EKind Kind = EKind::Fixed;
+    // Fixed keys: the bytes of one radix key in the key arrays.
+    int32_t KeyBytes = 8;
+    int32_t WorkSlots = 1;
+};
+
+TRowIdSort RowIdSortOf(const TValueType& value);
 
 // Generates a heap_less overload taking the row store as its context, so heap
 // items stay bare packed row ids. It reads the given sort columns from each
