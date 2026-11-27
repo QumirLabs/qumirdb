@@ -2,7 +2,7 @@
 
 ## GitHub in the header
 
-The header links to `resetius/qumirdb`, shows stars and forks, and links to the
+The header links to `QumirLabs/qumirdb`, shows stars and forks, and links to the
 latest GitHub release. Icons and statistics are served locally. The repository
 links also work without JavaScript; when statistics are unavailable the header
 keeps the Star, Forks and Releases links.

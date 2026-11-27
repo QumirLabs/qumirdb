@@ -1,4 +1,4 @@
-const repository = 'resetius/qumirdb';
+const repository = 'QumirLabs/qumirdb';
 const repoUrl = 'https://github.com/' + repository;
 
 export async function initGitHubProject() {
