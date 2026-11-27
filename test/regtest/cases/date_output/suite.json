@@ -18,6 +18,10 @@
     "error_sum.sql": {"expect_error": true},
     "error_avg.sql": {"expect_error": true},
     "error_union_integer.sql": {"expect_error": true},
-    "window_max_date.sql": {"order": "ordered"}
+    "window_max_date.sql": {"order": "ordered"},
+    "join_key_max_date.sql": {"order": "unordered"},
+    "join_key_max_date_timestamp.sql": {"order": "unordered"},
+    "join_key_date_plus_max.sql": {"order": "unordered"},
+    "join_key_date_timestamp.sql": {"order": "unordered"}
   }
 }

@@ -1,0 +1,6 @@
+project (id, uid) (rows≈1 cost≈4.3K)
+└─ join inner [t.d = __join_key_0__] (rows≈1 cost≈4.3K)
+   ├─ source date_values AS t (rows≈4 cost≈32)
+   └─ project (u.id, __join_key_0__) (rows≈4 cost≈96)
+      └─ project (u.id, __join_expr_0__) (rows≈4 cost≈64)
+         └─ source date_values AS u (rows≈4 cost≈32)

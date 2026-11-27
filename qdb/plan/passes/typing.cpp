@@ -18,6 +18,7 @@
 #include <qdb/kernel/annotate_type.h>
 
 #include <qumir/error.h>
+#include <qumir/parser/core/printer.h>
 #include <qumir/parser/type.h>
 
 #include <algorithm>
@@ -499,15 +500,7 @@ TOperatorPtr AddCastedKey(
     NQumir::NAst::TTypeFactory& types,
     const TOperatorPtr& input, const std::string& column, const TTypePtr& target, const std::string& alias)
 {
-    auto* schema = static_cast<const TStructType*>(input->OutputColumns());
-    std::vector<TProjectionSpec> projections;
-    projections.reserve(schema->Fields.size() + 1);
-    for (const auto& [name, type] : schema->Fields) {
-        projections.push_back({
-            .Name = name,
-            .Expression = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, name),
-        });
-    }
+    auto projections = PassThroughProjections(*input->OutputColumns());
     projections.push_back({
         .Name = alias,
         .Expression = NQumir::MakeIntrusive<TCastExpr>(NQumir::TLocation{},
@@ -538,13 +531,25 @@ int32_t IntegerDecimalDigits(const TIntegerType& type) {
 
 // Type both join key sides are cast to so that equal values have equal bytes:
 // DOUBLE for a float key against any other number, as PostgreSQL's `=` compares REAL only
-// with REAL; the common integer type; or for a decimal key (against a decimal or an
-// integer) the decimal with the larger scale and the larger integer part. nullptr when the
-// sides already share a type or no common key type exists; throws when the common
-// decimal would need more than 38 digits, as a wrapping cast would equate unequal keys.
+// with REAL; a DATE for a DATE key; the common integer type; or for a decimal key
+// (against a decimal or an integer) the decimal with the larger scale and the larger
+// integer part. nullptr when the sides already share a type or no common key type exists;
+// throws when the common decimal would need more than 38 digits, as a wrapping cast would
+// equate unequal keys.
 TTypePtr CommonKeyType(NQumir::NAst::TTypeFactory& types, const TTypePtr& left, const TTypePtr& right) {
     if (left == right) {
         return nullptr;
+    }
+    auto leftInt = MaybeIntegerType(left);
+    auto rightInt = MaybeIntegerType(right);
+    // PostgreSQL compares a DATE with a TIMESTAMP as that day's midnight, and qdb types
+    // a TIMESTAMP as its day count: both sides key on the day count of the wider integer.
+    if (IsDateType(left) || IsDateType(right)) {
+        if (!leftInt || !rightInt) {
+            return nullptr;
+        }
+        const auto days = UnifyIntegers(types, *leftInt.Cast(), *rightInt.Cast());
+        return days ? MakeDateType(types, MaybeIntegerType(days).Cast()->Width) : nullptr;
     }
     const auto isNumber = [](const TTypePtr& type) {
         return IsIntType(type) || IsFloatType(type) || DecimalSpecOfValueType(type);
@@ -552,8 +557,6 @@ TTypePtr CommonKeyType(NQumir::NAst::TTypeFactory& types, const TTypePtr& left, 
     if ((IsFloatType(left) || IsFloatType(right)) && isNumber(left) && isNumber(right)) {
         return types.MakeFloat(TFloatType::F64);
     }
-    auto leftInt = MaybeIntegerType(left);
-    auto rightInt = MaybeIntegerType(right);
     if (leftInt && rightInt) {
         return UnifyIntegers(types, *leftInt.Cast(), *rightInt.Cast());
     }
@@ -578,6 +581,40 @@ TTypePtr CommonKeyType(NQumir::NAst::TTypeFactory& types, const TTypePtr& left, 
     return MakeDecimalType(types, {integerDigits + scale, scale});
 }
 
+// The expression that the projection right below the join computes key `column`
+// from, or null for a column of the input.
+TExprPtr ComputedKey(const TOperatorPtr& input, const std::string& column) {
+    auto maybeProject = TMaybeOp<TProjectOperator>(input);
+    if (!maybeProject) {
+        return nullptr;
+    }
+    for (const auto& projection : maybeProject.Cast()->Projections()) {
+        if (projection.Name == column) {
+            return TMaybeNode<TIdentExpr>(projection.Expression) ? nullptr : projection.Expression;
+        }
+    }
+    return nullptr;
+}
+
+// A computed key column has an internal name, so key types without a common type
+// are reported with the expressions of the query. The join kernel reports a pair
+// of plain columns by name.
+void RequireComparableKeys(
+    const TJoinOperator& join, const TJoinKey& key, const TTypePtr& leftType, const TTypePtr& rightType)
+{
+    const auto leftExpr = ComputedKey(join.Left(), key.Left);
+    const auto rightExpr = ComputedKey(join.Right(), key.Right);
+    if ((!leftExpr && !rightExpr) || leftType == rightType) {
+        return;
+    }
+    auto side = [](const TExprPtr& expr, const std::string& column, const TTypePtr& type) {
+        return (expr ? NQumir::NAst::NCore::PrintAst(expr) : "'" + column + "'") + " is " + SqlTypeName(type);
+    };
+    throw NQumir::TError((leftExpr ? leftExpr : rightExpr)->Location,
+        "join key types incompatible: left " + side(leftExpr, key.Left, leftType)
+        + ", right " + side(rightExpr, key.Right, rightType));
+}
+
 // `aliasCounter` spans the whole plan: the types of the joins below are stale
 // until re-annotation, so an alias cannot be checked against their schemas.
 void CoerceJoinKeys(NQumir::NAst::TTypeFactory& types, TOperatorPtr& root, size_t& aliasCounter) {
@@ -591,13 +628,7 @@ void CoerceJoinKeys(NQumir::NAst::TTypeFactory& types, TOperatorPtr& root, size_
     bool coerced = false;
     // A semi or anti join outputs one input as is, so nothing above it drops a key
     // alias added to that input (INTERSECT, EXCEPT); project the original columns back.
-    std::vector<TProjectionSpec> restored;
-    for (const auto& [name, _] : static_cast<const TStructType*>(root->OutputColumns())->Fields) {
-        restored.push_back({
-            .Name = name,
-            .Expression = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, name),
-        });
-    }
+    auto restored = PassThroughProjections(*root->OutputColumns());
     for (auto& key : join.Cast()->MutableKeys()) {
         const auto leftType = ColumnType(join.Cast()->Left(), key.Left);
         const auto rightType = ColumnType(join.Cast()->Right(), key.Right);
@@ -606,6 +637,7 @@ void CoerceJoinKeys(NQumir::NAst::TTypeFactory& types, TOperatorPtr& root, size_
         }
         const auto common = CommonKeyType(types, UnwrapNullableType(leftType), UnwrapNullableType(rightType));
         if (!common) {
+            RequireComparableKeys(*join.Cast(), key, UnwrapNullableType(leftType), UnwrapNullableType(rightType));
             continue;
         }
         // A side that already has the common type is left alone; the other side is cast.

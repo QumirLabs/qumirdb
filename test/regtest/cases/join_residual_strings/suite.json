@@ -22,6 +22,7 @@
     "expression_right.sql": {"order": "unordered"},
     "expression_exists.sql": {"order": "unordered"},
     "expression_in.sql": {"order": "unordered"},
-    "expression_both_inputs.sql": {"order": "unordered"}
+    "expression_both_inputs.sql": {"order": "unordered"},
+    "expression_incompatible_types.sql": {"expect_error": true}
   }
 }

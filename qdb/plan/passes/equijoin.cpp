@@ -889,13 +889,7 @@ TOperatorPtr AddComputedColumns(
     if (computed.empty()) {
         return input;
     }
-    std::vector<TProjectionSpec> projections;
-    for (const auto& [name, _] : input->OutputColumns()->Fields) {
-        projections.push_back({
-            .Name = name,
-            .Expression = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, name),
-        });
-    }
+    auto projections = PassThroughProjections(*input->OutputColumns());
     std::ranges::move(computed, std::back_inserter(projections));
     return NQumir::MakeIntrusive<TProjectOperator>(types, input, std::move(projections));
 }
@@ -909,10 +903,13 @@ void KeyExpressionEqualities(NQumir::NAst::TTypeFactory& types, TOperatorPtr& ro
         KeyExpressionEqualities(types, input, aliasCounter);
     }
     auto maybeJoin = TMaybeOp<TJoinOperator>(root);
-    if (!maybeJoin || !maybeJoin.Cast()->Filter()) {
+    if (!maybeJoin) {
         return;
     }
     auto join = maybeJoin.Cast();
+    if (!join->Filter()) {
+        return;
+    }
     const auto leftCols = JoinColumns(0, join);
     const auto rightCols = JoinColumns(1, join);
     std::vector<TExprPtr> conjuncts;
@@ -942,15 +939,9 @@ void KeyExpressionEqualities(NQumir::NAst::TTypeFactory& types, TOperatorPtr& ro
     const bool outputChanged =
         ((type == EJoinType::LeftSemi || type == EJoinType::LeftAnti) && !leftComputed.empty())
         || ((type == EJoinType::RightSemi || type == EJoinType::RightAnti) && !rightComputed.empty());
-    std::vector<TProjectionSpec> restored;
-    if (outputChanged) {
-        for (const auto& [name, _] : join->OutputColumns()->Fields) {
-            restored.push_back({
-                .Name = name,
-                .Expression = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, name),
-            });
-        }
-    }
+    auto restored = outputChanged
+        ? PassThroughProjections(*join->OutputColumns())
+        : std::vector<TProjectionSpec>{};
     join->MutableLeft() = AddComputedColumns(types, join->Left(), std::move(leftComputed));
     join->MutableRight() = AddComputedColumns(types, join->Right(), std::move(rightComputed));
     if (outputChanged) {

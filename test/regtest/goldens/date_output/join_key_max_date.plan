@@ -1,0 +1,7 @@
+project (id, mid) (rows≈1 cost≈4.4K)
+└─ join inner [__join_key_0__ = m.md] (rows≈1 cost≈4.4K)
+   ├─ project (t.id, __join_key_0__) (rows≈4 cost≈80)
+   │  └─ source date_values AS t (rows≈4 cost≈32)
+   └─ project (m.id, m.md) (rows≈4 cost≈128)
+      └─ aggregate keys=[date_values.id] aggs=[max_0=max] (rows≈4 cost≈80)
+         └─ source date_values AS date_values (rows≈4 cost≈32)
