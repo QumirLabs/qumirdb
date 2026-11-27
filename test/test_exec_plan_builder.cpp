@@ -1133,6 +1133,47 @@ TEST(ExecPlanBuilder, CrossJoinGraphRunsFromItsSerializedSpec) {
     EXPECT_EQ(rows.size(), 1u + 15u);
 }
 
+// A keyless inner join broadcasts one input and streams the other on its own
+// lanes; `streamRight` says which, `rows` is the result size without the header
+// (an empty result has none).
+void ExpectKeylessPlacement(const std::string& sql, bool streamRight, size_t rows) {
+    const auto got = ExpectQueryFromSpec(
+        sql, MultiSettings(), false, [streamRight](const NScheduler::TGraphSpec& spec) {
+            ASSERT_GT(CountNodes<NScheduler::TCrossJoinNode>(spec), 0u);
+            for (const auto& node : spec.Nodes) {
+                if (const auto* join = std::get_if<NScheduler::TCrossJoinNode>(&node.Body)) {
+                    EXPECT_EQ(join->StreamRight, streamRight);
+                }
+            }
+        });
+    EXPECT_EQ(got.size(), rows == 0 ? 0u : 1u + rows);
+}
+
+// The small input is broadcast and the larger one keeps its four scan lanes,
+// whichever side it is on.
+TEST(ExecPlanBuilder, KeylessInnerJoinStreamsItsLargerInput) {
+    const std::string small = "(SELECT id FROM t WHERE id < 3) a";
+    ExpectKeylessPlacement(
+        "SELECT a.id, b.id AS bid FROM " + small + " CROSS JOIN t b", true, 3 * 256);
+    ExpectKeylessPlacement(
+        "SELECT b.id, a.id AS aid FROM t b CROSS JOIN " + small, false, 3 * 256);
+}
+
+// An input that is empty but estimated non-empty is placed like any other, by
+// the estimate; an input estimated empty gets the default placement.
+TEST(ExecPlanBuilder, KeylessInnerJoinWithAnEmptyInput) {
+    const std::string estimated = "(SELECT id FROM t WHERE id < 8 AND (id % 7) * 2 = 99) e";
+    ExpectKeylessPlacement(
+        "SELECT e.id, b.id AS bid FROM " + estimated + " CROSS JOIN t b", true, 0);
+    ExpectKeylessPlacement(
+        "SELECT b.id, e.id AS eid FROM t b CROSS JOIN " + estimated, false, 0);
+    const std::string zero = "(SELECT id FROM t WHERE id % 1000 = 999) z";
+    ExpectKeylessPlacement(
+        "SELECT z.id, b.id AS bid FROM " + zero + " CROSS JOIN t b", false, 0);
+    ExpectKeylessPlacement(
+        "SELECT b.id, z.id AS zid FROM t b CROSS JOIN " + zero, false, 0);
+}
+
 // A forced runtime filter: the build shuffles of b publish it, and the filter
 // tasks on the scan lanes of a wait for them, then pass the matching rows.
 void ExpectRuntimeFilterJoinFromSpec(NScheduler::EJoinTableKind table)

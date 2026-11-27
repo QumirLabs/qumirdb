@@ -408,32 +408,65 @@ public:
         return 0;
     }
 
-    // A keyless (nested-loop) join broadcasts its right side to every lane of
-    // the left side, which keeps its partition count when each left row's
-    // output depends only on that row: inner, left outer, and left semi/anti.
-    // RIGHT / FULL pad the right rows no left row matched, which only the
-    // whole left input decides, so they run on one lane.
-    size_t KeylessJoinLanes(TJoinOperator& join) const {
-        const size_t lanes = OutputLanes(join.Left());
+    struct TKeylessJoinPlan {
+        // The right input is streamed on its lanes and the left one is broadcast.
+        bool StreamRight = false;
+        size_t Lanes = 0;
+    };
+
+    // Left outer/semi/anti keep the left lanes; RIGHT / FULL need the whole left
+    // input, so one lane; an inner join picks by cost (ChooseKeylessInnerJoin).
+    TKeylessJoinPlan KeylessJoinPlan(const TJoinOperator& join) const {
+        const size_t leftLanes = OutputLanes(join.Left());
         const size_t rightLanes = OutputLanes(join.Right());
-        if (lanes == 0 || rightLanes == 0) {
-            return 0;
+        if (leftLanes == 0 || rightLanes == 0) {
+            return {};
         }
         switch (join.JoinType()) {
             case EJoinType::Inner:
+                return InnerKeylessJoinPlan(join, leftLanes, rightLanes);
             case EJoinType::Left:
             case EJoinType::LeftSemi:
             case EJoinType::LeftAnti:
-                return lanes;
+                return {.Lanes = leftLanes};
             case EJoinType::Right:
             case EJoinType::Full:
-                return 1;
+                return {.Lanes = 1};
             case EJoinType::RightSemi:
             case EJoinType::RightAnti:
             case EJoinType::LeftMark:
-                return 0;
+                return {};
         }
-        return 0;
+        return {};
+    }
+
+    static TKeylessJoinPlan InnerKeylessJoinPlan(
+        const TJoinOperator& join, size_t leftLanes, size_t rightLanes)
+    {
+        const auto& leftStats = join.Left()->Stats_;
+        const auto& rightStats = join.Right()->Stats_;
+        if (!leftStats || !rightStats) {
+            return {.Lanes = leftLanes};
+        }
+        const TKeylessJoinSide left{
+            static_cast<double>(leftStats->RowCount),
+            join.Left()->OutputColumns()->Fields.size(), leftLanes};
+        const TKeylessJoinSide right{
+            static_cast<double>(rightStats->RowCount),
+            join.Right()->OutputColumns()->Fields.size(), rightLanes};
+        switch (ChooseKeylessInnerJoin(left, right)) {
+            case EKeylessJoinStrategy::BroadcastRight:
+                return {.Lanes = leftLanes};
+            case EKeylessJoinStrategy::BroadcastLeft:
+                return {.StreamRight = true, .Lanes = rightLanes};
+            case EKeylessJoinStrategy::Gather:
+                return {.Lanes = 1};
+        }
+        return {.Lanes = leftLanes};
+    }
+
+    size_t KeylessJoinLanes(const TJoinOperator& join) const {
+        return KeylessJoinPlan(join).Lanes;
     }
 
     // outLaneOffset shifts this operator's producer lanes within outConn, so a
@@ -2217,11 +2250,13 @@ private:
         };
     }
 
-    // Keyless (nested-loop) join with a scalar (broadcast) right side:
+    // Keyless (nested-loop) join with a scalar (broadcast) side:
     //   vector[N] x Broadcast(scalar) -> local cross[N] -> filter(residual) ->
     //   parent gather. The scalar side is lowered, gathered to one lane, and
     //   forwarded into a broadcast connection replicated to every vector lane.
-    //   RIGHT / FULL gather the vector side to one lane (KeylessJoinLanes).
+    //   The vector side is the left input, or the right one when an inner join
+    //   chooses so by cost (KeylessJoinPlan). RIGHT / FULL, and an inner join
+    //   of tiny inputs, gather the vector side to one lane.
     //   Only an inner join filters the product by its residual; the other
     //   types evaluate the residual in the kernel, where it decides matches.
     TLoweredOutput LowerCrossJoin(
@@ -2231,22 +2266,27 @@ private:
     {
         const auto crossStageId = NewExecStage(
             &join, EExecPlanNodeKind::CrossJoin);
-        const size_t leftLanes = OutputLanes(join.Left());
-        const size_t lanes = KeylessJoinLanes(join);
-        const bool gatherVector = lanes != leftLanes;
+        const auto [streamRight, lanes] = KeylessJoinPlan(join);
+        const auto& vectorOp = streamRight ? join.Right() : join.Left();
+        const auto& scalarOp = streamRight ? join.Left() : join.Right();
+        // Input index of each side in the exec plan: left is 0, right is 1.
+        const size_t vectorExecInput = streamRight ? 1 : 0;
+        const size_t scalarExecInput = 1 - vectorExecInput;
+        const size_t vectorLanes = OutputLanes(vectorOp);
+        const bool gatherVector = lanes != vectorLanes;
 
         // Vector (streamed, partitioned) side.
         NScheduler::IConnection* vectorRef = nullptr;
         if (gatherVector) {
             vectorRef = &AddConn<NScheduler::TGatherConnection>(
-                leftLanes, lanes, "cross-vector-gather");
+                vectorLanes, lanes, "cross-vector-gather");
         } else {
             vectorRef = &AddConn<NScheduler::TOneToOneConnection>(
                 lanes, lanes, "cross-vector-input");
         }
-        auto vectorOut = Lower(join.Left(), *vectorRef);
+        auto vectorOut = Lower(vectorOp, *vectorRef);
 
-        const size_t scalarLanes = OutputLanes(join.Right());
+        const size_t scalarLanes = OutputLanes(scalarOp);
         TLoweredOutput scalarOut;
         NScheduler::IConnection* scalarInput = nullptr;
         NScheduler::TTaskNode* scalarBroadcastProducer = nullptr;
@@ -2254,14 +2294,14 @@ private:
         if (directScalar) {
             scalarInput = &AddConn<NScheduler::TOneToOneConnection>(
                 1, 1, "cross-right-input");
-            scalarOut = Lower(join.Right(), *scalarInput);
+            scalarOut = Lower(scalarOp, *scalarInput);
         } else {
             // Scalar (buffered, broadcast) side: lower it, gather to one lane,
             // then forward into a broadcast connection replicated to every
             // vector lane.
             auto& scalarGatherRef = AddConn<NScheduler::TGatherConnection>(
                 scalarLanes, 1, "cross-scalar-gather");
-            scalarOut = Lower(join.Right(), scalarGatherRef);
+            scalarOut = Lower(scalarOp, scalarGatherRef);
 
             auto& broadcastRef = AddConn<NScheduler::TBroadcastConnection>(
                 1, lanes, "cross-scalar-broadcast");
@@ -2284,8 +2324,8 @@ private:
             scalarBroadcastProducer = &fwdNode;
         }
 
-        auto leftType = vectorOut.OutputType;
-        auto rightType = scalarOut.OutputType;
+        auto leftType = streamRight ? scalarOut.OutputType : vectorOut.OutputType;
+        auto rightType = streamRight ? vectorOut.OutputType : scalarOut.OutputType;
         auto crossTypeExp =
             ComputeJoinOutputType(*Types_, leftType, rightType, join.JoinType());
         if (!crossTypeExp) {
@@ -2313,6 +2353,7 @@ private:
                 return compiler.CompileCrossJoin(kernelSpec).Kernel;
             }(),
             .JoinType = join.JoinType(),
+            .StreamRight = streamRight,
         };
 
         NScheduler::IConnection* crossOut = &outConn;
@@ -2324,24 +2365,28 @@ private:
             crossOut = residualConn;
         }
 
+        auto& leftInput = streamRight ? *scalarInput : *vectorRef;
+        auto& rightInput = streamRight ? *vectorRef : *scalarInput;
         std::vector<NScheduler::TTaskNode*> crossNodes;
         crossNodes.reserve(lanes);
         for (size_t m = 0; m < lanes; ++m) {
             auto& node = AddJoinNode(
-                crossNode, *vectorRef, *scalarInput, m, *crossOut, m, crossStageId, JoinDebugLabel(join));
+                crossNode, leftInput, rightInput, m, *crossOut, m, crossStageId, JoinDebugLabel(join));
             if (gatherVector) {
-                for (size_t s = 0; s < leftLanes; ++s) {
-                    Graph_.AddEdge(*vectorOut.Producers[s], node, *vectorRef, s, m);
+                for (size_t s = 0; s < vectorLanes; ++s) {
+                    Graph_.AddEdge(
+                        *vectorOut.Producers[s], node, *vectorRef, s, m, vectorExecInput);
                 }
             } else {
-                Graph_.AddEdge(*vectorOut.Producers[m], node, *vectorRef, m, m);
+                Graph_.AddEdge(
+                    *vectorOut.Producers[m], node, *vectorRef, m, m, vectorExecInput);
             }
             if (directScalar) {
                 Graph_.AddEdge(
-                    *scalarOut.Producers[0], node, *scalarInput, 0, 0, 1);
+                    *scalarOut.Producers[0], node, *scalarInput, 0, 0, scalarExecInput);
             } else {
                 Graph_.AddEdge(
-                    *scalarBroadcastProducer, node, *scalarInput, 0, m, 1);
+                    *scalarBroadcastProducer, node, *scalarInput, 0, m, scalarExecInput);
             }
             crossNodes.push_back(&node);
         }

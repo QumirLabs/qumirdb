@@ -1545,6 +1545,54 @@ TEST_F(CompileCrossJoin, EmitsSelectedPairsAndMaterializesStringPayload) {
     FreeMaterializedRowSet(out);
 }
 
+TEST_F(CompileCrossJoin, InnerJoinStreamsTheRightInputInCanonicalPairOrder) {
+    using namespace NQumir::NAst;
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rv", i64}});
+
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});
+    auto kernels = compiler.CompileCrossJoin(
+        NKernel::BuildCrossJoinKernelSpec(TestTypes(), leftType, rightType));
+
+    std::vector<int64_t> lk = {1, 2, 3};
+    std::vector<uint8_t> lsel = {1, 0, 1};
+    std::vector<TColumn> lcols = {TColumn{.Data = reinterpret_cast<char*>(lk.data())}};
+    TRowSet lbatch{
+        .Columns = lcols.data(), .ColumnCount = 1, .RowCount = 3,
+        .Selection = lsel.data(), .RefCount = 1,
+    };
+    std::vector<int64_t> rv = {10, 20};
+    std::vector<TColumn> rcols = {TColumn{.Data = reinterpret_cast<char*>(rv.data())}};
+    TRowSet rbatch{.Columns = rcols.data(), .ColumnCount = 1, .RowCount = 2, .RefCount = 1};
+
+    // The streamed right batch comes first, the buffered left store second.
+    TPairBuffer pairs{};
+    ASSERT_TRUE(kernels.Dispatch(
+        &rbatch, 0, &lbatch, 1, nullptr, &pairs,
+        static_cast<int64_t>(ECrossJoinKernelOp::EmitStreamedRight)));
+    ASSERT_EQ(pairs.Count, 4);
+    // (left_id, right_id) per pair, each right row against the selected left rows.
+    EXPECT_EQ(pairs.Data[0], PackRowId(0, 0));
+    EXPECT_EQ(pairs.Data[1], PackRowId(0, 0));
+    EXPECT_EQ(pairs.Data[2], PackRowId(0, 2));
+    EXPECT_EQ(pairs.Data[3], PackRowId(0, 0));
+    EXPECT_EQ(pairs.Data[4], PackRowId(0, 0));
+    EXPECT_EQ(pairs.Data[5], PackRowId(0, 1));
+    EXPECT_EQ(pairs.Data[6], PackRowId(0, 2));
+    EXPECT_EQ(pairs.Data[7], PackRowId(0, 1));
+
+    TRowSet out{};
+    ASSERT_EQ(kernels.Materialize(&pairs, &lbatch, &rbatch, &lbatch, &rbatch, 0, 100, &out), 4);
+    ASSERT_EQ(out.ColumnCount, 2);
+    const auto* outLk = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+    const auto* outRv = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
+    EXPECT_EQ(std::vector<int64_t>(outLk, outLk + 4), (std::vector<int64_t>{1, 3, 1, 3}));
+    EXPECT_EQ(std::vector<int64_t>(outRv, outRv + 4), (std::vector<int64_t>{10, 10, 20, 20}));
+
+    FreeMaterializedRowSet(out);
+}
+
 namespace {
 
 // Nested-loop fixture for the residual lk < rv: left lk = {1, 5, 3} with row

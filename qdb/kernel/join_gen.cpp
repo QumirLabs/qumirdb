@@ -1391,18 +1391,32 @@ NQumir::NAst::TExprPtr GenCrossJoinDispatchAst(
         ? Oz::Call(
             "xj_emit_unmatched_right",
             {
-                Oz::Ident("right_store"),
-                Oz::Ident("right_batch_count"),
+                Oz::Ident("buffered_store"),
+                Oz::Ident("buffered_batch_count"),
                 Oz::Ident("right_matched"),
                 Oz::Ident("pairs"),
             })
         : Oz::Bool(types, true);
+    // Only an inner join may stream the right input: it pads no unmatched rows.
+    TExprPtr emitStreamedRight = type == EJoinType::Inner
+        ? Oz::Call(
+            "xj_emit_right",
+            {
+                Oz::Ident("stream_store"),
+                Oz::Ident("batch_idx"),
+                Oz::Ident("buffered_store"),
+                Oz::Ident("buffered_batch_count"),
+                Oz::Ident("pairs"),
+            })
+        : Oz::Bool(types, false);
 
     Oz::TFunBuilder builder("xj_dispatch");
-    builder.Param("left_store", rowSetPtrType)
+    // The streamed store is the left input, or the right one for op 3; the
+    // buffered store is the other.
+    builder.Param("stream_store", rowSetPtrType)
         .Param("batch_idx", i64Type)
-        .Param("right_store", rowSetPtrType)
-        .Param("right_batch_count", i64Type)
+        .Param("buffered_store", rowSetPtrType)
+        .Param("buffered_batch_count", i64Type)
         .Param("right_matched", u8PtrType)
         .Param("pairs", pairBufferRefType)
         .Param("arena", ptrI8Type)
@@ -1416,10 +1430,10 @@ NQumir::NAst::TExprPtr GenCrossJoinDispatchAst(
                         Oz::Call(
                             "xj_emit",
                             {
-                                Oz::Ident("left_store"),
+                                Oz::Ident("stream_store"),
                                 Oz::Ident("batch_idx"),
-                                Oz::Ident("right_store"),
-                                Oz::Ident("right_batch_count"),
+                                Oz::Ident("buffered_store"),
+                                Oz::Ident("buffered_batch_count"),
                                 Oz::Ident("right_matched"),
                                 Oz::Ident("pairs"),
                                 Oz::Ident("arena"),
@@ -1430,6 +1444,7 @@ NQumir::NAst::TExprPtr GenCrossJoinDispatchAst(
                             })),
                 })))
         .Stmt(Oz::If(opIs(2), Oz::Block({Oz::Return(std::move(emitUnmatchedRight))})))
+        .Stmt(Oz::If(opIs(3), Oz::Block({Oz::Return(std::move(emitStreamedRight))})))
         .Stmt(Oz::Return(Oz::Bool(types, false)));
 
     return std::move(builder).Build();

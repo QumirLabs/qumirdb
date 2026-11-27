@@ -518,6 +518,34 @@ EJoinBuildSide ChooseJoinBuildSide(
     return EJoinBuildSide::Auto;
 }
 
+EKeylessJoinStrategy ChooseKeylessInnerJoin(
+    const TKeylessJoinSide& left,
+    const TKeylessJoinSide& right)
+{
+    if (left.Rows <= 0 || right.Rows <= 0) {
+        return EKeylessJoinStrategy::BroadcastRight;
+    }
+    // A row costs at least one cell, so inputs without columns still have work.
+    const double leftWidth = static_cast<double>(left.Columns + 1);
+    const double rightWidth = static_cast<double>(right.Columns + 1);
+    const double leftCells = left.Rows * leftWidth;
+    const double rightCells = right.Rows * rightWidth;
+    const double pairCells = left.Rows * right.Rows * (leftWidth + rightWidth);
+    auto broadcast = [&](double broadcastCells, size_t lanes) {
+        return pairCells / static_cast<double>(lanes)
+            + KeylessBroadcastCellCost * broadcastCells * static_cast<double>(lanes);
+    };
+    const double broadcastRight = broadcast(rightCells, left.Lanes);
+    const double broadcastLeft = broadcast(leftCells, right.Lanes);
+    const double gather = pairCells + KeylessBroadcastCellCost * (leftCells + rightCells);
+    const bool leftIsBetter = broadcastLeft <= gather;
+    const double best = leftIsBetter ? broadcastLeft : gather;
+    if (best >= KeylessMaxCostRatio * broadcastRight) {
+        return EKeylessJoinStrategy::BroadcastRight;
+    }
+    return leftIsBetter ? EKeylessJoinStrategy::BroadcastLeft : EKeylessJoinStrategy::Gather;
+}
+
 std::string_view JoinBuildSideName(EJoinBuildSide side) {
     switch (side) {
         case EJoinBuildSide::Left: return "left";

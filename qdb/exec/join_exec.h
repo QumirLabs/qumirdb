@@ -206,20 +206,18 @@ private:
     int64_t LastRightBatchRows_ = 0;
 };
 
-// Fetch-driven nested-loop join for joins without equi-keys. Buffers the
-// (broadcast) right side, streams left batches through xj_dispatch, which
-// emits row-id pairs as the compiled join type requires, then materializes
-// through the shared jt_materialize kernel. An inner join's residual is
-// applied downstream (cross -> filter); the other types evaluate it in the
-// kernel, where it decides matches. RIGHT / FULL pad the unmatched right rows
-// after the last left batch, so they must see the whole left input.
+// Fetch-driven nested-loop join for joins without equi-keys: buffers one input
+// and streams the other through xj_dispatch. The right input is buffered, except
+// for an inner join with `streamRight`. An inner residual is a downstream filter;
+// other types evaluate it in the kernel. RIGHT / FULL need the whole left input.
 class TCrossJoinProcessor {
 public:
     using TFetch = std::function<EJoinFetchResult(TRowSet&)>;
 
     explicit TCrossJoinProcessor(
         TCrossJoinKernels kernels,
-        EJoinType joinType = EJoinType::Inner);
+        EJoinType joinType = EJoinType::Inner,
+        bool streamRight = false);
     void SetInstrumentation(TOperatorInstrumentation* instrumentation);
     TCrossJoinProcessor(const TCrossJoinProcessor&) = delete;
     TCrossJoinProcessor& operator=(const TCrossJoinProcessor&) = delete;
@@ -240,7 +238,7 @@ private:
     bool DrainMaterialized(TRowSet& rowSet);
     bool KeepsUnmatchedLeft() const;
     bool KeepsUnmatchedRight() const;
-    bool Dispatch(int32_t leftBatch, ECrossJoinKernelOp op);
+    bool Dispatch(int32_t streamedBatch, ECrossJoinKernelOp op);
 
 private:
     TKernelHeap StandaloneHeap_;
@@ -248,13 +246,16 @@ private:
     EJoinType JoinType_ = EJoinType::Inner;
     TRowStore LeftRows_;
     TRowStore RightRows_;
+    TRowStore& StreamedRows_;
+    TRowStore& BufferedRows_;
+    const bool StreamRight_;
     // One match flag per buffered right row, in store order (RIGHT / FULL).
     std::vector<uint8_t> RightMatched_;
     TPairBufferState PairBuffer_;
     int64_t MaterializeCursor_ = 0;
-    bool RightDrained_ = false;
-    bool LeftDone_ = false;
-    int64_t RightTotalRows_ = 0;
+    bool BufferedDrained_ = false;
+    bool StreamDone_ = false;
+    int64_t BufferedTotalRows_ = 0;
 };
 
 } // namespace NQdb

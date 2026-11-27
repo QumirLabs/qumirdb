@@ -1,0 +1,4 @@
+project (tid, ta, wid, wa) (rows≈48 cost≈7.4K)
+└─ join inner (rows≈48 cost≈5.9K)
+   ├─ source t AS t (rows≈4 cost≈64)
+   └─ source w AS w (rows≈12 cost≈192)

@@ -499,7 +499,8 @@ std::unique_ptr<ITask> MakeNodeTask(
         } else if constexpr (std::is_same_v<TNode, TCrossJoinNode>) {
             return MakeJoinTask<NLowering::TSchedulerCrossJoinState>(
                 node, connections,
-                BindCrossJoinKernels(SlotAt(context, node.Kernel), {.Kernel = node.Kernel}), node.JoinType);
+                BindCrossJoinKernels(SlotAt(context, node.Kernel), {.Kernel = node.Kernel}), node.JoinType,
+                node.StreamRight);
         } else if constexpr (std::is_same_v<TNode, TLimitNode>) {
             return std::make_unique<TBlockingTask>(
                 NLowering::MakeLimitBlockingCode(),

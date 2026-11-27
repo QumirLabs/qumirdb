@@ -155,6 +155,38 @@ EJoinBuildSide ChooseJoinBuildSide(
     const TJoinOperator& join,
     NScheduler::EJoinTableKind table);
 
+// One input of a keyless inner join, as the optimizer estimated it.
+struct TKeylessJoinSide {
+    double Rows = 0;
+    size_t Columns = 0;
+    size_t Lanes = 0;
+};
+
+// How a keyless inner join places its inputs: the right input is broadcast to
+// the lanes of the left one (the default), the left one to the lanes of the
+// right one, or both inputs are gathered to one lane.
+enum class EKeylessJoinStrategy {
+    BroadcastRight,
+    BroadcastLeft,
+    Gather,
+};
+
+// Cost of replicating one cell to one receiving lane, in materialized cells:
+// a copy crosses a connection and, in a cluster, a node, so it counts twice.
+inline constexpr double KeylessBroadcastCellCost = 2.0;
+
+// An alternative replaces the default only when its cost is below this
+// fraction of the default's: estimates are rough, so a close call keeps it.
+inline constexpr double KeylessMaxCostRatio = 0.8;
+
+// Picks the strategy of an inner join without keys by modelled cost (formulas
+// on the wiki page "Join-implementation"). Lanes count as parallelism and as
+// receivers of a broadcast, whatever the workers and nodes behind them. Without
+// an estimate for either input the default is kept.
+EKeylessJoinStrategy ChooseKeylessInnerJoin(
+    const TKeylessJoinSide& left,
+    const TKeylessJoinSide& right);
+
 // Whether the row join table (kernel/join/join_rows.oz) serves a join under
 // this table setting and build side: an equi-join without a residual that is
 // inner, outer with a null-supplying build side, or SEMI/ANTI with its left

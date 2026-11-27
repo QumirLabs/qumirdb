@@ -298,8 +298,8 @@ struct TSchedulerRowJoinState : TProcessorTaskState<TSchedulerRowJoinState> {
 };
 
 struct TSchedulerCrossJoinState : TProcessorTaskState<TSchedulerCrossJoinState> {
-    TSchedulerCrossJoinState(TCrossJoinKernels kernels, EJoinType joinType)
-        : Processor(std::move(kernels), joinType)
+    TSchedulerCrossJoinState(TCrossJoinKernels kernels, EJoinType joinType, bool streamRight)
+        : Processor(std::move(kernels), joinType, streamRight)
     {}
 
     TCrossJoinProcessor Processor;

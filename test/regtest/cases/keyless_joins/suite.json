@@ -4,9 +4,10 @@
     "t": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}},
     "s": {"json": "tables/s.json", "parquet": {"row_group_rows": 2}},
     "u": {"json": "tables/u.json", "parquet": {"row_group_rows": 1}},
+    "w": {"json": "tables/w.json", "parquet": {"row_group_rows": 3}},
     "e": {"json": "tables/e.json"}
   },
-  "tables": {"t": "t", "s": "s", "u": "u", "e": "e"},
+  "tables": {"t": "t", "s": "s", "u": "u", "w": "w", "e": "e"},
   "variants": ["single", "threaded", "js"],
   "cases": {
     "in_expression_operand.sql": {"order": "unordered"},
@@ -21,6 +22,15 @@
     "right_join_non_equality.sql": {"order": "unordered"},
     "full_join_non_equality.sql": {"order": "unordered"},
     "full_join_empty_right.sql": {"order": "unordered"},
-    "full_join_empty_left.sql": {"order": "unordered"}
+    "full_join_empty_left.sql": {"order": "unordered"},
+    "inner_small_left_large_right.sql": {"order": "unordered"},
+    "inner_large_left_small_right.sql": {"order": "unordered"},
+    "inner_residual_small_left.sql": {"order": "unordered"},
+    "inner_residual_small_right.sql": {"order": "unordered"},
+    "inner_empty_small_left.sql": {"order": "unordered"},
+    "inner_empty_small_right.sql": {"order": "unordered"},
+    "inner_count_without_columns.sql": {},
+    "inner_empty_filtered_left.sql": {},
+    "inner_empty_filtered_right.sql": {}
   }
 }

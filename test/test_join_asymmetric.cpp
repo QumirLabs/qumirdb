@@ -1732,6 +1732,52 @@ TEST(OuterStreamJoinPlan, MatchesGeneralPathAcrossPartitions) {
     }
 }
 
+TEST(ChooseKeylessInnerJoin, BroadcastsTheSmallInputAndStreamsTheWideLargeOne) {
+    const TKeylessJoinSide small{100, 1, 2};
+    const TKeylessJoinSide large{14e6, 3, 128};
+    EXPECT_EQ(ChooseKeylessInnerJoin(small, large), EKeylessJoinStrategy::BroadcastLeft);
+    EXPECT_EQ(ChooseKeylessInnerJoin(large, small), EKeylessJoinStrategy::BroadcastRight);
+}
+
+TEST(ChooseKeylessInnerJoin, KeepsTheDefaultWhenTheSwapGainsNothing) {
+    // One lane on both sides: the swap only moves the broadcast cells.
+    EXPECT_EQ(
+        ChooseKeylessInnerJoin({100, 1, 1}, {1e6, 2, 1}), EKeylessJoinStrategy::BroadcastRight);
+    // The larger input has fewer lanes than the smaller one.
+    EXPECT_EQ(
+        ChooseKeylessInnerJoin({1e6, 1, 16}, {2e6, 1, 1}), EKeylessJoinStrategy::BroadcastRight);
+}
+
+TEST(ChooseKeylessInnerJoin, GathersTinyInputs) {
+    // Replicating two rows to 128 lanes costs more than the product itself.
+    EXPECT_EQ(
+        ChooseKeylessInnerJoin({3, 1, 128}, {2, 1, 128}), EKeylessJoinStrategy::Gather);
+}
+
+TEST(ChooseKeylessInnerJoin, KeepsTheDefaultWithoutEstimates) {
+    EXPECT_EQ(
+        ChooseKeylessInnerJoin({0, 1, 2}, {14e6, 3, 128}), EKeylessJoinStrategy::BroadcastRight);
+    EXPECT_EQ(
+        ChooseKeylessInnerJoin({100, 1, 2}, {0, 3, 128}), EKeylessJoinStrategy::BroadcastRight);
+}
+
+TEST(ChooseKeylessInnerJoin, CountsRowsAndLanesWithoutColumns) {
+    // count(*) over a product: no columns, but the pairs still cost work.
+    EXPECT_EQ(
+        ChooseKeylessInnerJoin({32768, 0, 16}, {20000, 0, 1}),
+        EKeylessJoinStrategy::BroadcastRight);
+    EXPECT_EQ(
+        ChooseKeylessInnerJoin({20000, 0, 1}, {32768, 0, 16}),
+        EKeylessJoinStrategy::BroadcastLeft);
+}
+
+TEST(ChooseKeylessInnerJoin, KeepsTheDefaultOnATie) {
+    EXPECT_EQ(
+        ChooseKeylessInnerJoin({1000, 2, 8}, {1000, 2, 8}), EKeylessJoinStrategy::BroadcastRight);
+    EXPECT_EQ(
+        ChooseKeylessInnerJoin({1000, 0, 8}, {1000, 0, 8}), EKeylessJoinStrategy::BroadcastRight);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     NQumir::NCodeGen::TLLVMInitializer initializer;
