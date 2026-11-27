@@ -33,8 +33,9 @@ struct TPartialView {
 struct TPublishState {
     int64_t MaxKeys = 0;
     uint64_t* Keys = nullptr;
-    uint32_t* SortOrder = nullptr;
-    uint64_t* SortKeys = nullptr;
+    uint8_t* SetCtrl = nullptr;
+    uint64_t* SetSlots = nullptr;
+    int64_t SetCapacity = 0;
     uint64_t* Table = nullptr;
     uint64_t* Bloom = nullptr;
     int64_t BloomWords = 0;
@@ -53,7 +54,7 @@ struct TFilterData {
 
 static_assert(sizeof(TRuntimeFilterBuildState) == 12 * sizeof(int64_t));
 static_assert(sizeof(TPartialView) == 4 * sizeof(int64_t));
-static_assert(sizeof(TPublishState) == 12 * sizeof(int64_t));
+static_assert(sizeof(TPublishState) == 13 * sizeof(int64_t));
 static_assert(sizeof(TFilterData) == 3 * sizeof(int64_t));
 
 using EMode = TRuntimeFilterBuildState::EMode;
@@ -82,6 +83,12 @@ void CheckKernels(const std::shared_ptr<TRuntimeContext>& context) {
 // Scratch for sorting count keys: two index arrays and the radix counters.
 size_t SortOrderSize(size_t count) {
     return count * 2 + 256;
+}
+
+// Keeps a deduplicating set of up to keys + 1 hashes at most half full, in
+// whole swiss groups.
+size_t SetCapacity(size_t keys) {
+    return std::bit_ceil(std::max<size_t>(16, (keys + 1) * 2));
 }
 
 template <typename T>
@@ -151,9 +158,7 @@ void TRuntimeFilterBuilder::ProvideStorage(size_t rows) {
         const auto keys = static_cast<size_t>(State_.KeyCount);
         SortOrder_.resize(SortOrderSize(keys));
         SortKeys_.resize(keys);
-        // Keeps the set at most half full, in whole swiss groups.
-        const size_t capacity = std::bit_ceil(
-            std::max<size_t>(16, (static_cast<size_t>(State_.MaxKeys) + 1) * 2));
+        const size_t capacity = SetCapacity(static_cast<size_t>(State_.MaxKeys));
         SetCtrl_.resize(capacity);
         SetSlots_.resize(capacity);
         State_.SetCapacity = static_cast<int64_t>(capacity);
@@ -240,8 +245,8 @@ void TRuntimeFilter::BuildPublishedData() {
     std::vector<uint64_t> bloom;
     std::vector<uint64_t> table;
     std::vector<uint64_t> keys;
-    std::vector<uint64_t> sortKeys;
-    std::vector<uint32_t> sortOrder;
+    std::vector<uint8_t> setCtrl;
+    std::vector<uint64_t> setSlots;
     // Reuse one producer's Bloom allocation instead of allocating and OR-ing
     // an initially empty global filter.
     for (auto& partial : Partials_) {
@@ -252,11 +257,12 @@ void TRuntimeFilter::BuildPublishedData() {
         }
     }
     if (!state.BloomSeeded) {
-        keys.resize(exactHashes);
-        sortKeys.resize(exactHashes);
-        sortOrder.resize(SortOrderSize(exactHashes));
-        table.assign(std::bit_ceil(
-            std::max<size_t>(8, std::min(exactHashes, MaxKeys_) * 2)), 0);
+        // The kernel stops at the first distinct key over the cap.
+        const size_t exactKeys = std::min(exactHashes, MaxKeys_);
+        keys.resize(std::min(exactHashes, MaxKeys_ + 1));
+        setCtrl.resize(SetCapacity(exactKeys));
+        setSlots.resize(setCtrl.size());
+        table.assign(std::bit_ceil(std::max<size_t>(8, exactKeys * 2)), 0);
         if (exactHashes > MaxKeys_) {
             bloom.assign(BloomBytes_ / sizeof(uint64_t), 0);
         }
@@ -272,8 +278,9 @@ void TRuntimeFilter::BuildPublishedData() {
         });
     }
     state.Keys = keys.data();
-    state.SortOrder = sortOrder.data();
-    state.SortKeys = sortKeys.data();
+    state.SetCtrl = setCtrl.data();
+    state.SetSlots = setSlots.data();
+    state.SetCapacity = static_cast<int64_t>(setCtrl.size());
     state.Table = table.data();
     state.Bloom = bloom.data();
     state.BloomWords = static_cast<int64_t>(bloom.size());

@@ -552,6 +552,44 @@ TEST_F(RuntimeFilter, CapIsEnforcedAcrossBuildersAtPublication) {
     ExpectContainsAll(filter, allKeys);
 }
 
+// The merge stops counting distinct keys at the first one over the cap and
+// still publishes the exact set, or the Bloom one producer builds from the keys.
+TEST_F(RuntimeFilter, CappedCountAtPublicationKeepsTheFilter) {
+    constexpr size_t Cap = 8;
+    const auto k = Hashes(Cap + 1, 60);
+    struct TCase {
+        // Raw partials, below 2 * Cap rows each, so no lane compacts.
+        std::vector<std::vector<uint64_t>> Partials;
+        bool Bloom;
+    };
+    const std::vector<TCase> cases = {
+        {{Hashes(Cap + 4, 61), Hashes(Cap + 4, 62), Hashes(Cap + 4, 63)}, true},
+        {{{k[0], k[1], k[2], k[0]}, {k[1], k[3], k[4], k[5]}, {k[6], k[7], k[2], k[7]}}, false},
+        {{{k[0], k[1], k[2], k[3]}, {k[4], k[5], k[6], k[7], k[0]}, {k[3], k[Cap]}}, true},
+    };
+    const auto probes = Hashes(2000, 64);
+    for (const auto& test : cases) {
+        TRuntimeFilter filter(Context_, Cap, /*bloomBytes=*/4096);
+        filter.SetProducerCount(test.Partials.size());
+        std::vector<uint64_t> all;
+        for (const auto& keys : test.Partials) {
+            all.insert(all.end(), keys.begin(), keys.end());
+            PublishKeys(filter, keys);
+        }
+
+        ASSERT_EQ(filter.UsesBloom(), test.Bloom);
+        ExpectContainsAll(filter, all);
+        if (!test.Bloom) {
+            EXPECT_EQ(filter.StatsSnapshot().ExactKeys, Cap);
+            continue;
+        }
+        TRuntimeFilter direct(Context_, Cap, /*bloomBytes=*/4096);
+        direct.FinishProducer(BuildPartial(/*maxKeys=*/0, /*bloomBytes=*/4096, all, all.size()));
+        EXPECT_EQ(filter.StatsSnapshot().BloomSetBits, direct.StatsSnapshot().BloomSetBits);
+        EXPECT_EQ(Flags(ProbeRuntimeFilter(filter, probes)), Flags(ProbeRuntimeFilter(direct, probes)));
+    }
+}
+
 TEST_F(RuntimeFilter, BloomFragmentsMergeFromSeveralProducers) {
     constexpr size_t Producers = 4;
     TRuntimeFilter filter(Context_, /*maxKeys=*/32, /*bloomBytes=*/4096);
