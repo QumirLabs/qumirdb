@@ -1,0 +1,4 @@
+project (tid, wid) (rows≈45 cost≈6.5K)
+└─ join inner residual (< |t.a| |w.a|) (rows≈45 cost≈5.8K)
+   ├─ source t AS t (rows≈4 cost≈64)
+   └─ source w AS w (rows≈12 cost≈192)

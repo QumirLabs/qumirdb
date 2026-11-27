@@ -83,6 +83,42 @@
           (= l (+ l 1))))
       (return #t)))
 
+  ;; Inner join that streams the right input: pairs the selected rows of right
+  ;; batch `batch_idx` with every selected row of the buffered left store. An
+  ;; inner join has no kernel residual, so every pair matches. The pairs keep
+  ;; the canonical (left_id, right_id) order.
+  (fun xj_emit_right ((var right_store <ptr TRowSet>)
+                      (var batch_idx i64)
+                      (var left_store <ptr TRowSet>)
+                      (var left_batch_count i64)
+                      (var pairs <ref PairBuffer>)) -> bool
+    (block
+      (var batch = (index right_store batch_idx))
+      (var r i64)
+      (= r 0)
+      (while (< r (field batch RowCount))
+        (block
+          (if (call xj_selected batch r)
+            (block
+              (var right_id = (call xj_row_id batch_idx r))
+              (var lb i64)
+              (= lb 0)
+              (while (< lb left_batch_count)
+                (block
+                  (var left_batch = (index left_store lb))
+                  (var l i64)
+                  (= l 0)
+                  (while (< l (field left_batch RowCount))
+                    (block
+                      (if (call xj_selected left_batch l)
+                        (block
+                          (if (! (call pb_push pairs (call xj_row_id lb l) right_id))
+                            (block (return #f)))))
+                      (= l (+ l 1))))
+                  (= lb (+ lb 1))))))
+          (= r (+ r 1))))
+      (return #t)))
+
   ;; After the last left batch: pads every selected right row that no left
   ;; row matched with a NULL left side (RIGHT / FULL).
   (fun xj_emit_unmatched_right ((var right_store <ptr TRowSet>)

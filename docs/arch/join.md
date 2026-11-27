@@ -344,7 +344,18 @@ In a parallel plan the right side is broadcast to every left lane. `Inner`,
 `Left`, `LeftSemi` and `LeftAnti` keep the left partition count, because the
 output for a left row depends on that row alone. `Right` and `Full` run on one
 lane: a right row is unmatched only if no row of the whole left input matches
-it. The browser runtime runs the same kernel for every type.
+it.
+
+An `Inner` join is symmetric, so it broadcasts the input with the smaller
+estimated row count and streams the larger one on its own lanes. The estimates
+must exist for both inputs, and the larger input must have at least as many
+lanes as the other; otherwise the right side is broadcast as above. The
+output columns stay left then right, and the kernel emits the same canonical
+pairs. The other types cannot swap: a left row of an outer, semi or anti join
+is decided by the whole right input, which a lane that streams part of the
+right input does not see. A `Right` join could mirror a `Left` join but does
+not yet. The browser runtime runs the same kernel for every type and always
+streams the left input.
 
 ## Memory and lifetime invariants
 

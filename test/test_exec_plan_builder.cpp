@@ -1133,6 +1133,28 @@ TEST(ExecPlanBuilder, CrossJoinGraphRunsFromItsSerializedSpec) {
     EXPECT_EQ(rows.size(), 1u + 15u);
 }
 
+// The estimated smaller input of a keyless inner join is broadcast and the
+// larger one keeps its scan lanes, whichever side it is on.
+TEST(ExecPlanBuilder, KeylessInnerJoinStreamsItsLargerInput) {
+    const std::string small = "(SELECT id FROM t WHERE id < 3) a";
+    const std::string large = "t b";
+    auto check = [](const std::string& sql, bool streamRight) {
+        const auto rows = ExpectQueryFromSpec(
+            sql, MultiSettings(), false, [streamRight](const NScheduler::TGraphSpec& spec) {
+                // Four scan lanes of t, one cross task per lane.
+                EXPECT_EQ(CountNodes<NScheduler::TCrossJoinNode>(spec), 4u);
+                for (const auto& node : spec.Nodes) {
+                    if (const auto* join = std::get_if<NScheduler::TCrossJoinNode>(&node.Body)) {
+                        EXPECT_EQ(join->StreamRight, streamRight);
+                    }
+                }
+            });
+        EXPECT_EQ(rows.size(), 1u + 3u * 256u);
+    };
+    check("SELECT a.id, b.id AS bid FROM " + small + " CROSS JOIN " + large, true);
+    check("SELECT b.id, a.id AS aid FROM " + large + " CROSS JOIN " + small, false);
+}
+
 // A forced runtime filter: the build shuffles of b publish it, and the filter
 // tasks on the scan lanes of a wait for them, then pass the matching rows.
 void ExpectRuntimeFilterJoinFromSpec(NScheduler::EJoinTableKind table)

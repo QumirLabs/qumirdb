@@ -573,10 +573,17 @@ void TCrossJoinProcessor::SetInstrumentation(TOperatorInstrumentation* instrumen
 
 TCrossJoinProcessor::TCrossJoinProcessor(
     TCrossJoinKernels kernels,
-    EJoinType joinType)
+    EJoinType joinType,
+    bool streamRight)
     : Kernels_(std::move(kernels))
     , JoinType_(joinType)
+    , StreamedRows_(streamRight ? RightRows_ : LeftRows_)
+    , BufferedRows_(streamRight ? LeftRows_ : RightRows_)
+    , StreamRight_(streamRight)
 {
+    if (StreamRight_ && JoinType_ != EJoinType::Inner) {
+        throw std::runtime_error("only an inner nested-loop join can stream its right input");
+    }
     // The nested-loop kernel has no marker emission.
     if (JoinType_ == EJoinType::LeftMark) {
         throw std::runtime_error("left_mark join is not supported by the nested-loop join processor");
@@ -593,12 +600,12 @@ bool TCrossJoinProcessor::KeepsUnmatchedRight() const {
     return JoinType_ == EJoinType::Right || JoinType_ == EJoinType::Full;
 }
 
-bool TCrossJoinProcessor::Dispatch(int32_t leftBatch, ECrossJoinKernelOp op) {
+bool TCrossJoinProcessor::Dispatch(int32_t streamedBatch, ECrossJoinKernelOp op) {
     return Kernels_.Dispatch(
-        const_cast<TRowSet*>(LeftRows_.Data()),
-        leftBatch,
-        const_cast<TRowSet*>(RightRows_.Data()),
-        RightRows_.BatchCount(),
+        const_cast<TRowSet*>(StreamedRows_.Data()),
+        streamedBatch,
+        const_cast<TRowSet*>(BufferedRows_.Data()),
+        BufferedRows_.BatchCount(),
         RightMatched_.data(),
         &PairBuffer_,
         CrossJoinOp(op));
@@ -637,54 +644,60 @@ EJoinProcessorResult TCrossJoinProcessor::Process(
         return EJoinProcessorResult::OK;
     }
 
-    // Phase 1: fully buffer the (broadcast) right side.
-    if (!RightDrained_) {
+    const auto& fetchBuffered = StreamRight_ ? left : right;
+    const auto& fetchStreamed = StreamRight_ ? right : left;
+
+    // Phase 1: fully buffer the (broadcast) side.
+    if (!BufferedDrained_) {
         for (;;) {
             TRowSet batch{};
-            auto fetch = right(batch);
+            auto fetch = fetchBuffered(batch);
             if (fetch == EJoinFetchResult::NO_DATA) {
                 return EJoinProcessorResult::NEED_DATA;
             }
             if (fetch == EJoinFetchResult::FINISHED) {
-                RightDrained_ = true;
+                BufferedDrained_ = true;
                 if (KeepsUnmatchedRight()) {
-                    RightMatched_.assign(RightTotalRows_, 0);
+                    RightMatched_.assign(BufferedTotalRows_, 0);
                 }
                 break;
             }
-            RightTotalRows_ += batch.RowCount;
-            RightRows_.PushBatch(batch);
+            BufferedTotalRows_ += batch.RowCount;
+            BufferedRows_.PushBatch(batch);
         }
     }
 
-    // Phase 2: stream left, comparing each selected left row with every
-    // selected right row.
+    // Phase 2: stream the other side, comparing each selected row with every
+    // selected buffered row.
+    const auto emit = StreamRight_
+        ? ECrossJoinKernelOp::EmitStreamedRight
+        : ECrossJoinKernelOp::Emit;
     for (;;) {
         if (DrainMaterialized(output)) {
             return EJoinProcessorResult::OK;
         }
-        if (LeftDone_) {
+        if (StreamDone_) {
             return EJoinProcessorResult::FINISHED;
         }
         TRowSet batch{};
-        auto fetch = left(batch);
+        auto fetch = fetchStreamed(batch);
         if (fetch == EJoinFetchResult::NO_DATA) {
             return EJoinProcessorResult::NEED_DATA;
         }
         if (fetch == EJoinFetchResult::FINISHED) {
-            LeftDone_ = true;
+            StreamDone_ = true;
             if (KeepsUnmatchedRight() &&
                 !Dispatch(0, ECrossJoinKernelOp::EmitUnmatchedRight)) {
                 throw std::runtime_error("cross join unmatched-right emission failed");
             }
             continue;
         }
-        if (RightTotalRows_ == 0 && !KeepsUnmatchedLeft()) {
+        if (BufferedTotalRows_ == 0 && !KeepsUnmatchedLeft()) {
             Release(&batch);
             continue;
         }
-        const int32_t li = LeftRows_.PushBatch(batch);
-        if (!Dispatch(li, ECrossJoinKernelOp::Emit)) {
+        const int32_t batchIdx = StreamedRows_.PushBatch(batch);
+        if (!Dispatch(batchIdx, emit)) {
             throw std::runtime_error("cross join kernel update failed");
         }
         if (DrainMaterialized(output)) {

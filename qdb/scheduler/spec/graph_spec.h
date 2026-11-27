@@ -399,7 +399,8 @@ struct TRowJoinNode {
     }
 };
 
-// A keyless join of each Left batch against the buffered Right input.
+// A keyless join of each Left batch against the buffered Right input, or, with
+// StreamRight (inner joins only), of each Right batch against the buffered Left.
 struct TCrossJoinNode {
     TPortSpec Left;
     TPortSpec Right;
@@ -407,6 +408,7 @@ struct TCrossJoinNode {
     // Index of the cross join kernel in the sink (0 without a sink).
     uint32_t Kernel = 0;
     EJoinType JoinType = EJoinType::Inner;
+    bool StreamRight = false;
 
     void Fields(this auto& self, auto& v)
     {
@@ -415,6 +417,7 @@ struct TCrossJoinNode {
         v(self.Out);
         v(self.Kernel);
         v(self.JoinType);
+        v(self.StreamRight);
     }
 };
 

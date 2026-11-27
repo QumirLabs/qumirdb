@@ -302,6 +302,9 @@ TJoinKernels BindJoinKernels(
 enum class ECrossJoinKernelOp : int64_t {
     Emit = 0,
     EmitUnmatchedRight = 2,
+    // Inner join only: the first store is the streamed right input and the
+    // second the buffered left one.
+    EmitStreamedRight = 3,
 };
 
 using TCrossJoinDispatch = std::function<bool(
