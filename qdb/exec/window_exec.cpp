@@ -19,13 +19,14 @@ TSortRadixKernel MakeWindowKernel(TKernelCompiler::TSortRadixCompositeDispatch d
 
 namespace {
 
-struct TCarryRowSetData {
-    int64_t Value = 0;
-    TColumn Column{};
+// One row of a carries table, which it keeps alive.
+struct TCarryRowData {
+    std::shared_ptr<TWindowRouteProcessor::TCarryTable> Table;
+    std::vector<TColumn> Columns;
 };
 
-void DestroyCarryRowSet(TRowSet* rowSet) {
-    delete static_cast<TCarryRowSetData*>(rowSet->Private);
+void DestroyCarryRow(TRowSet* rowSet) {
+    delete static_cast<TCarryRowData*>(rowSet->Private);
 }
 
 uint64_t SelectedRows(const TRowSet& rowSet) {
@@ -38,6 +39,28 @@ uint64_t SelectedRows(const TRowSet& rowSet) {
 }
 
 } // namespace
+
+// Zeroed fixed-width columns, one row per range: the state window_carry.oz
+// updates in place.
+struct TWindowRouteProcessor::TCarryTable {
+    TCarryTable(const std::vector<TValueLayout>& layouts, size_t rows)
+    {
+        Buffers.reserve(layouts.size());
+        for (const auto& layout : layouts) {
+            Buffers.emplace_back(rows * static_cast<size_t>(layout.Width), char{0});
+            Columns.push_back(TColumn{.Data = Buffers.back().data()});
+        }
+        RowSet = TRowSet{
+            .Columns = Columns.data(),
+            .ColumnCount = static_cast<int64_t>(Columns.size()),
+            .RowCount = static_cast<int64_t>(rows),
+        };
+    }
+
+    std::vector<std::vector<char>> Buffers;
+    std::vector<TColumn> Columns;
+    TRowSet RowSet{};
+};
 
 TWindowProcessor::TWindowProcessor(
     std::vector<TSortKey> keys,
@@ -201,9 +224,12 @@ bool TWindowSampleProcessor::Next(TRowSet& rowSet)
 }
 
 TWindowRouteProcessor::TWindowRouteProcessor(
-    TKernelCompiler::TWindowRangeDispatch kernel, size_t ranges)
+    TKernelCompiler::TWindowRangeDispatch kernel,
+    size_t ranges,
+    std::vector<TValueLayout> carryLayouts)
     : Kernel_(std::move(kernel))
     , Ranges_(std::max<size_t>(ranges, 1))
+    , CarryLayouts_(std::move(carryLayouts))
 {}
 
 TWindowRouteProcessor::~TWindowRouteProcessor()
@@ -245,7 +271,7 @@ void TWindowRouteProcessor::PickSplitters()
                 static_cast<int32_t>(batch), static_cast<int32_t>(position - batchStart)));
         }
     }
-    Tails_.assign(Splitters_.size(), 0);
+    Tails_ = std::make_shared<TCarryTable>(CarryLayouts_, Splitters_.size() + 1);
     Store_.push_back({});
 }
 
@@ -263,7 +289,7 @@ void TWindowRouteProcessor::Route(TRowSet& rowSet, std::vector<std::pair<size_t,
     Store_.back() = rowSet;
     const int64_t routed = Kernel_.Route(
         Store_.data(), Splitters_.data(), splitters, static_cast<int64_t>(SampleBatches_),
-        ranges.data(), offsets.data(), rowIds.data(), Tails_.data());
+        ranges.data(), offsets.data(), rowIds.data(), &Tails_->RowSet);
     for (size_t range = 0; range <= Splitters_.size() && routed > 0; ++range) {
         const int64_t start = offsets[range];
         const int64_t count = offsets[range + 1] - start;
@@ -293,22 +319,29 @@ bool TWindowRouteProcessor::Carry(size_t range, TRowSet& carry)
     if (!Picked_) {
         PickSplitters();
     }
-    if (Carries_.empty()) {
-        Carries_.assign(Splitters_.size() + 1, 0);
+    if (!Carries_) {
+        Carries_ = std::make_shared<TCarryTable>(CarryLayouts_, Splitters_.size() + 1);
         Kernel_.Carries(
             Store_.data(), Splitters_.data(), static_cast<int64_t>(Splitters_.size()),
-            Tails_.data(), Carries_.data());
+            &Tails_->RowSet, &Carries_->RowSet);
     }
-    if (range >= Carries_.size() || Carries_[range] == 0) {
+    // Column 0 counts the rows before the range, which every other state covers.
+    if (range > Splitters_.size()
+        || reinterpret_cast<const int64_t*>(Carries_->Columns[0].Data)[range] == 0)
+    {
         return false;
     }
-    auto* data = new TCarryRowSetData{.Value = Carries_[range]};
-    data->Column = TColumn{.Data = reinterpret_cast<char*>(&data->Value)};
+    auto* data = new TCarryRowData{.Table = Carries_};
+    for (size_t c = 0; c < CarryLayouts_.size(); ++c) {
+        data->Columns.push_back(TColumn{
+            .Data = Carries_->Columns[c].Data + range * static_cast<size_t>(CarryLayouts_[c].Width),
+        });
+    }
     carry = TRowSet{
-        .Columns = &data->Column,
-        .ColumnCount = 1,
+        .Columns = data->Columns.data(),
+        .ColumnCount = static_cast<int64_t>(data->Columns.size()),
         .RowCount = 1,
-        .Destroy = DestroyCarryRowSet,
+        .Destroy = DestroyCarryRow,
         .Private = data,
         .RefCount = 1,
     };

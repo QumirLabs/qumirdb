@@ -181,8 +181,11 @@ struct TWindowSampleState : NScheduler::ITaskState {
 std::shared_ptr<const NScheduler::TFanOutCode> MakeWindowSampleCode();
 
 struct TWindowRouteState : NScheduler::ITaskState {
-    TWindowRouteState(TKernelCompiler::TWindowRangeDispatch kernel, size_t ranges)
-        : Processor(std::move(kernel), ranges)
+    TWindowRouteState(
+        TKernelCompiler::TWindowRangeDispatch kernel,
+        size_t ranges,
+        std::vector<TValueLayout> carryLayouts)
+        : Processor(std::move(kernel), ranges, std::move(carryLayouts))
         , Ranges(ranges)
     {}
 

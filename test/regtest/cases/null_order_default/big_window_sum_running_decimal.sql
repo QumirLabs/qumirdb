@@ -1,0 +1,1 @@
+SELECT id, sum(CAST(i AS DECIMAL(12, 2))) OVER (ORDER BY g, i NULLS LAST) AS s FROM big ORDER BY id;

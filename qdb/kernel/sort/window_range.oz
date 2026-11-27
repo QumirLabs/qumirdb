@@ -5,9 +5,10 @@
   ;; sample rows in `store`; range j holds the keys in [splitter j-1, splitter j).
 
   ;; Routes the selected rows of store[batch]: row_ids[offsets[j] ..
-  ;; offsets[j+1]) are the rows of range j (offsets has nsplit + 2 slots). tails[j]
-  ;; counts the rows of range j in the partition of splitter j, which continues
-  ;; into the next range. ranges is scratch, one slot per row.
+  ;; offsets[j+1]) are the rows of range j (offsets has nsplit + 2 slots). Row j
+  ;; of the tails table (window_range_tail_add) gathers the rows of range j in the
+  ;; partition of splitter j, which continues into the next range. ranges is
+  ;; scratch, one slot per row.
   (fun qdb_window_range_route
        ((var store <ptr TRowSet>)
         (var splitters <ptr i64>)
@@ -16,7 +17,7 @@
         (var ranges <ptr i64>)
         (var offsets <ptr i64>)
         (var row_ids <ptr i64>)
-        (var tails <ptr i64>)) -> i64
+        (var tails <ptr TRowSet>)) -> i64
     (block
       (var rs = (index store batch))
       (var rows = (field rs RowCount))
@@ -50,7 +51,7 @@
               (if (< target nsplit)
                 (block
                   (if (call window_same_partition store row_id (index splitters target))
-                    (block (= tails [target] (+ (index tails target) 1))))))))
+                    (block (call window_range_tail_add store row_id tails target)))))))
           (= ranges [r] target)
           (= r (+ r 1))))
       (= j 0)
@@ -78,49 +79,27 @@
       (= offsets [0] 0)
       (return routed)))
 
-  ;; The partial carries of one lane: carries[j] (nsplit + 1 slots) counts the
-  ;; routed rows of range j's leading partition (the partition of splitter j-1)
-  ;; in ranges before j. Peers never cross a range, so that is the row offset of
-  ;; the range inside its leading partition.
+  ;; The partial carries of one lane: row j of the carries table (nsplit + 1
+  ;; rows, row 0 empty) is the state of the routed rows of range j's leading
+  ;; partition (the partition of splitter j-1) in ranges before j. Peers never
+  ;; cross a range, so the row count is the row offset of the range inside its
+  ;; leading partition.
   (fun qdb_window_range_carries
        ((var store <ptr TRowSet>)
         (var splitters <ptr i64>)
         (var nsplit i64)
-        (var tails <ptr i64>)
-        (var carries <ptr i64>)) -> i64
+        (var tails <ptr TRowSet>)
+        (var carries <ptr TRowSet>)) -> i64
     (block
-      (= carries [0] 0)
       (var j = 0)
       (while (< j nsplit)
         (block
-          (var carry = (index tails j))
+          (var same = #f)
           (if (> j 0)
             (block
-              (if (call window_same_partition store
-                    (index splitters (- j 1)) (index splitters j))
-                (block (= carry (+ carry (index carries j)))))))
-          (= carries [(+ j 1)] carry)
+              (= same (call window_same_partition store
+                (index splitters (- j 1)) (index splitters j)))))
+          (call window_range_carry_step tails carries j same)
           (= j (+ j 1))))
       (return (+ nsplit 1))))
-
-  ;; Sums the partial carries of a range: one i64 column, one row per lane.
-  (fun window_carry_rows_before
-       ((var carries <ptr TRowSet>)
-        (var carry_count i64)) -> i64
-    (block
-      (var total = 0)
-      (var b = 0)
-      (while (< b carry_count)
-        (block
-          (var rs = (index carries b))
-          (var columns = (field rs Columns))
-          (var col = (index columns 0))
-          (var data = (cast (cast (field col Data) i64) <ptr i64>))
-          (var r = 0)
-          (while (< r (field rs RowCount))
-            (block
-              (= total (+ total (index data r)))
-              (= r (+ r 1))))
-          (= b (+ b 1))))
-      (return total)))
 )

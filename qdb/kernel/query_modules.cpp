@@ -92,6 +92,7 @@ constexpr std::pair<const char*, const char*> KernelLibraryFiles[] = {
     {"sort", "radix.oz"},
     {"sort", "sort_rowids.oz"},
     {"sort", "window.oz"},
+    {"sort", "window_carry.oz"},
     {"sort", "window_range.oz"},
 };
 

@@ -87,6 +87,12 @@
     "big_window_rank_skew.sql": {"order": "ordered"},
     "big_window_rank_many_partitions.sql": {"order": "ordered"},
     "big_window_rank_null_partition.sql": {"order": "ordered"},
-    "big_window_row_number_correlated_limit.sql": {"order": "ordered"}
+    "big_window_row_number_correlated_limit.sql": {"order": "ordered"},
+    "big_window_sum_running_peers.sql": {"order": "ordered"},
+    "big_window_sum_running_rows.sql": {"order": "ordered"},
+    "big_window_max_running.sql": {"order": "ordered"},
+    "big_window_sum_running_decimal.sql": {"order": "ordered"},
+    "big_window_sum_running_int_rows.sql": {"order": "ordered"},
+    "big_window_max_running_null_prefix.sql": {"order": "ordered"}
   }
 }

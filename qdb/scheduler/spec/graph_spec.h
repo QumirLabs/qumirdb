@@ -229,6 +229,7 @@ struct TWindowRouteNode {
     TPortSpec Right;
     std::vector<TPortSpec> Out;
     uint32_t Kernel = 0;
+    std::vector<TValueLayout> CarryLayouts;
 
     void Fields(this auto& self, auto& v)
     {
@@ -236,6 +237,7 @@ struct TWindowRouteNode {
         v(self.Right);
         v(self.Out);
         v(self.Kernel);
+        v(self.CarryLayouts);
     }
 };
 

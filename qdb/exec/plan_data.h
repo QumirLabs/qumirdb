@@ -127,12 +127,15 @@ struct TWindowPlanData {
     std::vector<TSortColumnRef> KeyColumns;
     // Index of the window kernel in the sink (0 without a sink).
     uint32_t Kernel = 0;
+    // The columns of the range scheme's carries; empty without its entries.
+    std::vector<TValueLayout> CarryLayouts;
 
     void Fields(this auto& self, auto& v)
     {
         v(self.Keys);
         v(self.KeyColumns);
         v(self.Kernel);
+        v(self.CarryLayouts);
     }
 };
 

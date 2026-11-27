@@ -74,6 +74,9 @@
   ;; peer rows (equal order key), so every peer shares the running sum through the
   ;; last peer; peer_inclusive=false is ROWS mode (strict row-by-row). NULL args
   ;; are skipped (SQL sum ignores nulls); output is NULL until the first non-NULL.
+  ;; The first partition starts from init_acc over init_count values: the range
+  ;; scheme's carry of the rows before the slice (zero otherwise). So do the
+  ;; other running fillers.
   (fun window_fill_prefix_sum_fixed [Value Sum]
        ((var store <ptr TRowSet>)
         (var row_ids <ptr i64>)
@@ -87,15 +90,17 @@
         (var out <ref TRowSet>)
         (var data_owner_idx i64)
         (var mask_owner_idx i64)
-        (var peer_inclusive bool))
+        (var peer_inclusive bool)
+        (var init_acc Sum)
+        (var init_count i64))
     (block
       (var data =
         (call window_init_masked_fixed_output
           n sum_bytes out_col out data_owner_idx mask_owner_idx sum_witness))
       (var mask = (field out_col Mask))
       (var zero = (cast (: 0 i64) Sum))
-      (var acc = zero)
-      (var valid_count = (: 0 i64))
+      (var acc = init_acc)
+      (var valid_count = init_count)
       (var i = (: 0 i64))
       (while (< i n)
         (block
@@ -148,7 +153,9 @@
         (var out <ref TRowSet>)
         (var data_owner_idx i64)
         (var mask_owner_idx i64)
-        (var peer_inclusive bool))
+        (var peer_inclusive bool)
+        (var init_acc BinInt)
+        (var init_count i64))
     (block
       (var witness = (cast (: 0 i64) <ptr BinInt>))
       (var data =
@@ -156,8 +163,8 @@
           n (: 16 i64) out_col out data_owner_idx mask_owner_idx witness))
       (var mask = (field out_col Mask))
       (var zero = (cast (struct ((V (: 0 i128)))) BinInt))
-      (var acc = zero)
-      (var valid_count = (: 0 i64))
+      (var acc = init_acc)
+      (var valid_count = init_count)
       (var i = (: 0 i64))
       (while (< i n)
         (block
@@ -207,15 +214,17 @@
         (var out <ref TRowSet>)
         (var data_owner_idx i64)
         (var mask_owner_idx i64)
-        (var peer_inclusive bool))
+        (var peer_inclusive bool)
+        (var init_acc Value)
+        (var init_count i64))
     (block
       (var data =
         (call window_init_masked_fixed_output
           n value_bytes out_col out data_owner_idx mask_owner_idx arg_witness))
       (var mask = (field out_col Mask))
       (var zero = (cast (: 0 i64) Value))
-      (var acc = zero)
-      (var valid_count = (: 0 i64))
+      (var acc = init_acc)
+      (var valid_count = init_count)
       (var i = (: 0 i64))
       (while (< i n)
         (block
@@ -265,7 +274,9 @@
         (var out <ref TRowSet>)
         (var data_owner_idx i64)
         (var mask_owner_idx i64)
-        (var peer_inclusive bool))
+        (var peer_inclusive bool)
+        (var init_acc BinInt)
+        (var init_count i64))
     (block
       (var witness = (cast (: 0 i64) <ptr BinInt>))
       (var data =
@@ -273,8 +284,8 @@
           n (: 16 i64) out_col out data_owner_idx mask_owner_idx witness))
       (var mask = (field out_col Mask))
       (var zero = (cast (struct ((V (: 0 i128)))) BinInt))
-      (var acc = zero)
-      (var valid_count = (: 0 i64))
+      (var acc = init_acc)
+      (var valid_count = init_count)
       (var i = (: 0 i64))
       (while (< i n)
         (block

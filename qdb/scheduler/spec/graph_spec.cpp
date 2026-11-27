@@ -463,7 +463,7 @@ std::unique_ptr<ITask> MakeNodeTask(
             return std::make_unique<TFanOutTask>(
                 NLowering::MakeWindowRouteCode(),
                 std::make_shared<NLowering::TWindowRouteState>(
-                    BindWindowRange(SlotAt(context, node.Kernel)), node.Out.size() / 2),
+                    BindWindowRange(SlotAt(context, node.Kernel)), node.Out.size() / 2, node.CarryLayouts),
                 std::vector<TInputPort>{
                     InputPort(connections, node.Left), InputPort(connections, node.Right)},
                 OutputPorts(connections, node.Out));
