@@ -5,6 +5,7 @@
 #include <qdbd/serialization.h>
 
 #include "pinger.h"
+#include "runtime_resources.h"
 #include "compute.h"
 #include "local_scheduler.h"
 
