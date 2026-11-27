@@ -3125,6 +3125,12 @@ function stableSortRowSetForStore(arena, layout, rowSet) {
   };
 }
 
+// i64 work slots per row of the sort kernels, as RadixWorkStride: string and
+// float keys sort {key, rowId} pairs.
+function radixWorkStride(radixKeys) {
+  return radixKeys.some(key => key.isString || key.isFloat) ? 4 : 1;
+}
+
 function runSortKernelRowSets(
   kernel,
   layout,
@@ -3138,7 +3144,7 @@ function runSortKernelRowSets(
   const n = selectedRowCount(rowSets);
   const keyCount = radixKeys.length;
   const nullable = !!kernel.nullable;
-  const workStride = radixKeys.some(key => key.isString) ? 4 : 1;
+  const workStride = radixWorkStride(radixKeys);
   const store = new WasmRowStore(arena, layout);
   const storeBatchIndexes = new Array(rowSets.length);
   const releaseInputs = [];
@@ -4397,7 +4403,7 @@ class TopSortWasmState {
     const batchRowSet = stableSortRowSetForStore(arena, this.layout, rowSet);
     const pickCapacity = Math.min(
       this.limit, this.stateBatch.rowCount + n);
-    const workStride = this.stage.radixKeys.some(key => key.isString) ? 4 : 1;
+    const workStride = radixWorkStride(this.stage.radixKeys);
     const rowIdsPtr = arena.alloc(Math.max(n, pickCapacity, 1) * 8, 8);
     const workPtr = arena.alloc(Math.max(n, 1) * workStride * 8, 8);
     const countsPtr = arena.alloc((this.stage.radixNullable ? 257 : 256) * 4, 4);

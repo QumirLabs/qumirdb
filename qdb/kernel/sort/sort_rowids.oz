@@ -1049,4 +1049,75 @@
         (block
           (= row_ids [i] (cast (index pairs (+ (* i (: 2 i64)) (: 1 i64))) i64))
           (= i (+ i (: 1 i64)))))))
+
+  ;; Float keys sort (qumir_radix_key, row id) pairs with the string passes:
+  ;; the key is computed once per row, not in every pass. work holds 4n slots.
+  (fun sr_float_pairs_fill [Value]
+       ((var store <ptr TRowSet>)
+        (var column_idx i64)
+        (var row_ids <ptr i64>)
+        (var pairs <ptr u64>)
+        (var n i64)
+        (var type_witness <ptr Value>))
+    (block
+      (var i = (: 0 i64))
+      (while (< i n)
+        (block
+          (var row = (index row_ids i))
+          (= pairs [(* i (: 2 i64))]
+             (call qumir_radix_key (call sr_load_fixed_key store row column_idx type_witness)))
+          (= pairs [(+ (* i (: 2 i64)) (: 1 i64))] (cast row u64))
+          (= i (+ i (: 1 i64)))))))
+
+  (fun sr_pairs_to_row_ids ((var pairs <ptr u64>) (var row_ids <ptr i64>) (var n i64))
+    (block
+      (var i = (: 0 i64))
+      (while (< i n)
+        (block
+          (= row_ids [i] (cast (index pairs (+ (* i (: 2 i64)) (: 1 i64))) i64))
+          (= i (+ i (: 1 i64)))))))
+
+  (fun sort_float_rowids [Value]
+       ((var store <ptr TRowSet>)
+        (var column_idx i64)
+        (var row_ids <ptr i64>)
+        (var work <ptr u64>)
+        (var counts <ptr u32>)
+        (var n i64)
+        (var key_bits i64)
+        (var desc bool)
+        (var type_witness <ptr Value>))
+    (block
+      (var pairs = work)
+      (var pair_work = (cast (+ (cast pairs i64) (* n (: 16 i64))) <ptr u64>))
+      (call sr_float_pairs_fill store column_idx row_ids pairs n type_witness)
+      (var digit = (: 0 i64))
+      (while (< digit key_bits)
+        (block
+          (call sr_pair_count_pass pairs pair_work counts n digit desc)
+          (= digit (+ digit (: 8 i64)))))
+      (call sr_pairs_to_row_ids pairs row_ids n)))
+
+  (fun sort_float_rowids_nullable [Value]
+       ((var store <ptr TRowSet>)
+        (var column_idx i64)
+        (var row_ids <ptr i64>)
+        (var work <ptr u64>)
+        (var counts <ptr u32>)
+        (var n i64)
+        (var key_bits i64)
+        (var desc bool)
+        (var nulls_first bool)
+        (var type_witness <ptr Value>))
+    (block
+      (var pairs = work)
+      (var pair_work = (cast (+ (cast pairs i64) (* n (: 16 i64))) <ptr u64>))
+      (call sr_float_pairs_fill store column_idx row_ids pairs n type_witness)
+      (var digit = (: 0 i64))
+      (while (< digit key_bits)
+        (block
+          (call sr_pair_count_pass_nullable
+            store column_idx pairs pair_work counts n digit desc nulls_first)
+          (= digit (+ digit (: 8 i64)))))
+      (call sr_pairs_to_row_ids pairs row_ids n)))
 )

@@ -228,7 +228,8 @@ constexpr const char* CacheSchemaVersion = "v1";
 // qumirdb.oz gains the sorted-table lookups of long IN lists (qdb_in_sorted_*).
 // qdb_decimal_from_f32 returns right after an overflow, which returns while row errors are deferred.
 // qumir_radix_key maps every NaN above +inf and -0 to +0; sort comparators order NaN the same way.
-constexpr const char* KernelLibVersion = "70";
+// sort_rowids.oz gains sort_float_rowids, which sorts (key, row id) pairs.
+constexpr const char* KernelLibVersion = "71";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -493,11 +494,14 @@ NQumir::NAst::TExprPtr BuildRowIdSortCall(
             "CompileRadixSortComposite: unsupported key type " +
             SqlTypeName(key.Type));
     }
+    // A float key sorts (key, row id) pairs, so qumir_radix_key runs once per
+    // row instead of in every pass; the work buffer holds the pairs.
+    const bool floatKey = static_cast<bool>(TMaybeType<TFloatType>(coreType));
     std::vector<TExprPtr> args{
         Oz::Ident(storeName),
         std::move(columnIndex),
         Oz::Ident("row_ids"),
-        Oz::Ident("work"),
+        floatKey ? Cast(Oz::Ident("work"), ptrU64) : Oz::Ident("work"),
         Oz::Ident("counts"),
         Oz::Ident("n"),
         Int64Literal(types, keyBits),
@@ -507,6 +511,11 @@ NQumir::NAst::TExprPtr BuildRowIdSortCall(
         args.push_back(std::move(nullsFirst));
     }
     args.push_back(Cast(Int64Literal(types, 0), Ptr(types, std::move(coreType))));
+    if (floatKey) {
+        return Oz::Call(
+            nullable ? "sort_float_rowids_nullable" : "sort_float_rowids",
+            std::move(args));
+    }
     return Oz::Call(
         nullable ? "sort_fixed_rowids_nullable" : "sort_fixed_rowids",
         std::move(args));
