@@ -537,13 +537,9 @@ EKeylessJoinStrategy ChooseKeylessInnerJoin(
     };
     const double broadcastRight = broadcast(rightCells, left.Lanes);
     const double broadcastLeft = broadcast(leftCells, right.Lanes);
-    const double gather = pairCells + KeylessBroadcastCellCost * (leftCells + rightCells);
-    const bool leftIsBetter = broadcastLeft <= gather;
-    const double best = leftIsBetter ? broadcastLeft : gather;
-    if (best >= KeylessMaxCostRatio * broadcastRight) {
-        return EKeylessJoinStrategy::BroadcastRight;
-    }
-    return leftIsBetter ? EKeylessJoinStrategy::BroadcastLeft : EKeylessJoinStrategy::Gather;
+    return broadcastLeft < KeylessMaxCostRatio * broadcastRight
+        ? EKeylessJoinStrategy::BroadcastLeft
+        : EKeylessJoinStrategy::BroadcastRight;
 }
 
 std::string_view JoinBuildSideName(EJoinBuildSide side) {
