@@ -127,6 +127,9 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
     resources->SerializeOnIoThreads = EngineSettings.IoThreads > 0;
     // Frees the graphs of finished queries off the actor thread; at most two wait for it.
     resources->GraphCleaner = std::make_shared<NScheduler::TGraphCleaner>(2);
+    // At exit the actor system stops the compute actors, whose workers are back in the pool then;
+    // the cleaner frees the retired graphs, and resources->Workers joins its threads last. A failed
+    // I/O loop aborts the process (io_threads.cpp) and joins nothing.
     auto compilerFactory = [&]() {
         auto tableFactory = [&dataDir, tablesCache](NQumir::NAst::TTypeFactory& types, std::string_view table)
             -> std::expected<NQdb::TOperatorPtr, NQumir::TError>

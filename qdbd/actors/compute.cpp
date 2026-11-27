@@ -4,7 +4,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -36,7 +35,7 @@ using TStates = std::unordered_map<uint64_t, std::tuple<std::shared_ptr<TState>,
 
 // A stopped graph with its scheduler and remote states, which point into it and die first.
 // It outlives its actor: the states keep the actor's ActorChannel and the CTE sink wake captures
-// the actor, so nothing may call them once the scheduler thread is joined.
+// the actor, so nothing may call them once the scheduler's workers are back in the pool.
 struct TRetiredGraph {
     std::unique_ptr<NScheduler::TTaskGraph> OwnedGraph;
     std::unique_ptr<NScheduler::TThreadedScheduler> Scheduler;
@@ -169,16 +168,19 @@ struct TComputeActor : public IBehaviorActor {
             ctx->Self(), ctx->Self());
     }
 
+    // The workers of a finished graph are back in the pool already; the others leave after
+    // their current task. Until then they may use the notification channel.
     void StopScheduler() {
-        if (SchedulerThread.joinable()) {
+        if (Scheduler) {
             Scheduler->Cancel();
-            SchedulerThread.join();
+            Scheduler->Wait();
         }
     }
 
     void ReleaseSlot() {
-        StopScheduler();
+        // The scheduler runs on Resources->Workers, so it is stopped while they exist.
         if (Resources) {
+            StopScheduler();
             RetireGraph();
             Resources->UsedSlots.fetch_sub(1, std::memory_order_relaxed);
             Resources.reset();
@@ -278,15 +280,13 @@ struct TComputeActor : public IBehaviorActor {
             }
         }
         Scheduler = std::make_unique<NScheduler::TThreadedScheduler>(
-            Graph, SchedulerSettings.WorkerCount, SchedulerSettings.ReadyQueueCapacity
+            Graph, Resources->Workers, SchedulerSettings.WorkerCount, SchedulerSettings.ReadyQueueCapacity
         );
         SchedulerChannel = std::make_unique<NScheduler::TSchedulerChannel>(
             *Scheduler
         );
-        // Run() blocks until every root of the graph finishes or the scheduler is cancelled.
-        SchedulerThread = std::thread([this] {
-            Scheduler->Run();
-        });
+        // The node's pool runs the graph until every root finishes or the scheduler is cancelled.
+        Scheduler->Start();
         // Each source gets its chunks before its finish, as its sink sent them.
         for (auto& chunk : std::exchange(EarlyChunks, {})) {
             OnDataChunk(std::move(chunk), ctx);
@@ -453,7 +453,6 @@ struct TComputeActor : public IBehaviorActor {
     TStates<NScheduler::TRemoteSourceState> SourceStates;
     TStates<NScheduler::TRemoteSinkState> SinkStates;
     TStates<NScheduler::TRuntimeFilterSourceState> FilterSourceStates;
-    std::thread SchedulerThread;
     TVoidSuspendedTask NotificationTask;
     TActorId QueryActorId;
     // A peer may send before this actor gets its graph, which sets QueryActorId;

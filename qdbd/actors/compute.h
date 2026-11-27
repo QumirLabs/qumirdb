@@ -10,7 +10,8 @@
 namespace NQdb {
 namespace NRemote {
 
-NNet::NActors::IActor* CreateComputeActor(std::shared_ptr<TRuntimeResources> resources = {});
+// The actor runs its graph on the threads of `resources`.
+NNet::NActors::IActor* CreateComputeActor(std::shared_ptr<TRuntimeResources> resources);
 
 } // namespace NRemote
 } // namespace NQdb

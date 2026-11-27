@@ -4,6 +4,7 @@
 #include <memory>
 
 #include <qdb/io/parquet/table_cache.h>
+#include <qdb/scheduler/impl/worker_pool.h>
 #include <qdb/scheduler/settings/settings.h>
 #include <qdbd/scheduler/graph_cleaner.h>
 
@@ -21,6 +22,9 @@ struct TRuntimeResources {
     std::shared_ptr<TTableCache> Tables;
     // net:io_threads > 0: the I/O threads serialize the chunks the compute actors send.
     bool SerializeOnIoThreads = false;
+    // The threads of the compute actors' schedulers, kept between queries. Declared
+    // before GraphCleaner, so it is joined after the cleaner's thread (see bin/daemon.cpp).
+    NScheduler::TWorkerPool Workers;
     // Destroys the graphs of stopped compute actors; null destroys them on the actor thread.
     std::shared_ptr<NScheduler::TGraphCleaner> GraphCleaner;
 };

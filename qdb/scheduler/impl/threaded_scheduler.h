@@ -2,6 +2,7 @@
 
 #include <qdb/kernel/execution_context.h>
 #include <qdb/scheduler/graph.h>
+#include <qdb/scheduler/impl/worker_pool.h>
 #include <qdb/scheduler/utils/mpmc.h>
 
 #include <atomic>
@@ -22,14 +23,21 @@ public:
     virtual void Schedule(TTaskNode* task) = 0;
 };
 
+// Runs a graph on `workerCount` threads of a pool that outlives it.
 class TThreadedScheduler : public IThreadedScheduler {
 public:
     TThreadedScheduler(
         TSealedTaskGraph graph,
+        TWorkerPool& workers,
         size_t workerCount,
         size_t readyQueueCapacity = 0);
 
+    // Start() and Wait().
     bool Run(std::string* error = nullptr);
+    // Hands the graph to the workers and returns at once.
+    bool Start(std::string* error = nullptr);
+    // Returns once every worker has left the graph: all roots finished, or the run failed.
+    bool Wait(std::string* error = nullptr);
     // Makes a running Run() return false; safe from any thread.
     void Cancel();
     TSchedulerRunStats Stats() const;
@@ -51,6 +59,8 @@ private:
     void ResetStats();
 
     TSealedTaskGraph Graph_;
+    TWorkerPool& Workers_;
+    TWorkerPool::TRun WorkersRun_;
     TExecutionState Execution_;
     TMPMCQueue<TTaskNode*> Ready_;
     // One permit is released per task pushed to Ready_; idle workers block on

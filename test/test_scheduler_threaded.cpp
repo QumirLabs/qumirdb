@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include "test_worker_pool.h"
+
 #include <qdb/scheduler/channel.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/connections/local.h>
@@ -246,7 +248,7 @@ TEST(SchedulerExternal, WakeDuringExecuteIsRetained) {
         auto& node = graph.AddNode(task);
         const auto sealed = graph.Seal();
         ASSERT_TRUE(sealed);
-        TThreadedScheduler scheduler(sealed, workers);
+        TThreadedScheduler scheduler(sealed, NQdb::TestWorkerPool(), workers);
         TSchedulerChannel channel(scheduler);
         task.Channel = &channel;
         task.Node = &node;
@@ -292,7 +294,7 @@ TEST(SchedulerExternal, EmptyReadyQueueWaitsForExternalCompletion) {
         auto& node = graph.AddNode(task);
         const auto sealed = graph.Seal();
         ASSERT_TRUE(sealed);
-        TThreadedScheduler scheduler(sealed, workers);
+        TThreadedScheduler scheduler(sealed, NQdb::TestWorkerPool(), workers);
         CheckWakeAfterWaiting(scheduler, node, task);
     }
 }
@@ -330,7 +332,7 @@ TEST(SchedulerExternal, ConcurrentDuplicateWakesDoNotExecuteTaskConcurrently) {
         auto& node = graph.AddNode(task);
         const auto sealed = graph.Seal();
         ASSERT_TRUE(sealed);
-        TThreadedScheduler scheduler(sealed, workers);
+        TThreadedScheduler scheduler(sealed, NQdb::TestWorkerPool(), workers);
         CheckConcurrentWakes(scheduler, node, task);
     }
 }
@@ -341,7 +343,7 @@ TEST(SchedulerExternal, FinishedTaskIgnoresExternalWakes) {
     auto& node = graph.AddNode(task);
     const auto sealed = graph.Seal();
     ASSERT_TRUE(sealed);
-    TThreadedScheduler scheduler(sealed, 2);
+    TThreadedScheduler scheduler(sealed, NQdb::TestWorkerPool(), 2);
     TSchedulerChannel channel(scheduler);
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
@@ -381,7 +383,7 @@ TEST(SchedulerExternal, RootCompletionAbandonsExternalWaits) {
         graph.AddOwnedEdge(source, root, std::make_unique<TOneToOneConnection>());
         const auto sealed = graph.Seal();
         ASSERT_TRUE(sealed);
-        TThreadedScheduler scheduler(sealed, workers);
+        TThreadedScheduler scheduler(sealed, NQdb::TestWorkerPool(), workers);
         CheckEarlyCompletion(scheduler, source, root);
     }
 }
@@ -512,7 +514,7 @@ TEST(SchedulerExternal, WaitingTaskIsNotRunForEveryPush) {
         gate.Input = {.Connection = edge.Connection};
         const auto sealed = graph.Seal();
         ASSERT_TRUE(sealed);
-        TThreadedScheduler scheduler(sealed, workers);
+        TThreadedScheduler scheduler(sealed, NQdb::TestWorkerPool(), workers);
         TSchedulerChannel channel(scheduler);
         std::string error;
         bool success = false;
@@ -615,7 +617,7 @@ TEST(SchedulerExternal, NeighbourWakeDuringARunDoesNotEndAWait) {
         consumer.Input = {.Connection = edge.Connection};
         const auto sealed = graph.Seal();
         ASSERT_TRUE(sealed);
-        TThreadedScheduler scheduler(sealed, workers);
+        TThreadedScheduler scheduler(sealed, NQdb::TestWorkerPool(), workers);
         TSchedulerChannel channel(scheduler);
         std::string error;
         bool success = false;
@@ -654,7 +656,7 @@ TEST(SchedulerExternal, EventAfterANeighbourWakeInOneRunRunsItAgain) {
         consumer.Ready.store(true, std::memory_order_release);
         const auto sealed = graph.Seal();
         ASSERT_TRUE(sealed);
-        TThreadedScheduler scheduler(sealed, workers);
+        TThreadedScheduler scheduler(sealed, NQdb::TestWorkerPool(), workers);
         TSchedulerChannel channel(scheduler);
         consumer.Channel = &channel;
         std::string error;
@@ -731,7 +733,7 @@ TEST(SchedulerExternal, ConsumerDemandDoesNotRunAWaitingSource) {
         consumer.Input = {.Connection = &gather};
         const auto sealed = graph.Seal();
         ASSERT_TRUE(sealed);
-        TThreadedScheduler scheduler(sealed, workers);
+        TThreadedScheduler scheduler(sealed, NQdb::TestWorkerPool(), workers);
         TSchedulerChannel channel(scheduler);
         std::string error;
         bool success = false;
@@ -802,7 +804,7 @@ TEST(SchedulerExternal, EveryCreditWakesAWaitingSink) {
             sink.Input = {.Connection = edge.Connection};
             const auto sealed = graph.Seal();
             ASSERT_TRUE(sealed);
-            TThreadedScheduler scheduler(sealed, workers);
+            TThreadedScheduler scheduler(sealed, NQdb::TestWorkerPool(), workers);
             TSchedulerChannel channel(scheduler);
             std::string error;
             bool success = false;
@@ -836,7 +838,7 @@ TEST(SchedulerThreaded, RunsSmallGraph) {
     const auto sealed = graph.Seal();
     ASSERT_TRUE(sealed);
 
-    TThreadedScheduler scheduler(sealed, 4);
+    TThreadedScheduler scheduler(sealed, NQdb::TestWorkerPool(), 4);
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
     EXPECT_EQ(sourcePtr->Produced.load(std::memory_order_acquire), total);
@@ -853,7 +855,7 @@ TEST(SchedulerThreaded, OneWorkerMatchesSingleThreadedScheduler) {
 
     TRepeatTask* threadedTask = nullptr;
     auto threadedGraph = MakeRepeatGraph(threadedTask, 10);
-    TThreadedScheduler threadedScheduler(threadedGraph->Seal(), 1);
+    TThreadedScheduler threadedScheduler(threadedGraph->Seal(), NQdb::TestWorkerPool(), 1);
     ASSERT_TRUE(threadedScheduler.Run(&error)) << error;
 
     EXPECT_EQ(threadedTask->Calls(), singleTask->Calls());
@@ -874,7 +876,7 @@ TEST(SchedulerThreaded, StressProducerConsumerWakeups) {
     const auto sealed = graph.Seal();
     ASSERT_TRUE(sealed);
 
-    TThreadedScheduler scheduler(sealed, 4);
+    TThreadedScheduler scheduler(sealed, NQdb::TestWorkerPool(), 4);
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
     EXPECT_EQ(sinkPtr->Consumed(), total);
@@ -889,7 +891,7 @@ TEST(SchedulerThreaded, DoesNotExecuteSameTaskConcurrently) {
     const auto sealed = graph.Seal();
     ASSERT_TRUE(sealed);
 
-    TThreadedScheduler scheduler(sealed, 8);
+    TThreadedScheduler scheduler(sealed, NQdb::TestWorkerPool(), 8);
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
     EXPECT_EQ(taskPtr->Violations.load(std::memory_order_relaxed), 0);
@@ -916,6 +918,7 @@ TEST(SchedulerThreaded, ReadyQueueCapacityIsAtLeastNodeCount) {
 
     TThreadedScheduler scheduler(
         sealed,
+        NQdb::TestWorkerPool(),
         4,
         /*readyQueueCapacity=*/1);
     std::string error;
@@ -928,7 +931,7 @@ TEST(SchedulerThreaded, SingleTaskWithReadyQueueCapacityOne) {
     const auto sealed = graph.Seal();
     ASSERT_TRUE(sealed);
 
-    TThreadedScheduler scheduler(sealed, 2, /*readyQueueCapacity=*/1);
+    TThreadedScheduler scheduler(sealed, NQdb::TestWorkerPool(), 2, /*readyQueueCapacity=*/1);
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
 }
@@ -948,7 +951,7 @@ TEST(SchedulerThreaded, RechecksConsumerWhenInputsAlreadyFinished) {
     const auto sealed = graph.Seal();
     ASSERT_TRUE(sealed);
 
-    TThreadedScheduler scheduler(sealed, 1);
+    TThreadedScheduler scheduler(sealed, NQdb::TestWorkerPool(), 1);
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
     EXPECT_EQ(sinkPtr->Calls(), 3);
@@ -957,7 +960,7 @@ TEST(SchedulerThreaded, RechecksConsumerWhenInputsAlreadyFinished) {
 TEST(SchedulerThreaded, CannotRunTwice) {
     TRepeatTask* task = nullptr;
     auto graph = MakeRepeatGraph(task, 1);
-    TThreadedScheduler scheduler(graph->Seal(), 2);
+    TThreadedScheduler scheduler(graph->Seal(), NQdb::TestWorkerPool(), 2);
 
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
@@ -973,7 +976,7 @@ TEST(SchedulerThreaded, ReportsTaskExceptions) {
         ASSERT_TRUE(sealed);
         std::string error;
         const bool ok = threaded
-            ? TThreadedScheduler(sealed, 2).Run(&error)
+            ? TThreadedScheduler(sealed, NQdb::TestWorkerPool(), 2).Run(&error)
             : TSingleThreadedScheduler(sealed).Run(&error);
         EXPECT_FALSE(ok);
         EXPECT_EQ(error, "expected task failure");
@@ -981,6 +984,56 @@ TEST(SchedulerThreaded, ReportsTaskExceptions) {
 
     run(false);
     run(true);
+}
+
+TEST(SchedulerThreaded, BackToBackRunsReuseThePoolThreads) {
+    TWorkerPool pool(4);
+    for (int run = 0; run < 20; ++run) {
+        TRepeatTask* task = nullptr;
+        auto graph = MakeRepeatGraph(task, 10);
+        TThreadedScheduler scheduler(graph->Seal(), pool, 4);
+        std::string error;
+        ASSERT_TRUE(scheduler.Run(&error)) << error;
+        EXPECT_EQ(pool.Threads(), 4u);
+    }
+}
+
+// Finishes once every task that shares `all` runs at the same time.
+class TRendezvousTask : public ITask {
+public:
+    explicit TRendezvousTask(std::latch& all)
+        : All_(all)
+    {}
+
+    ETaskResult Execute() override {
+        All_.arrive_and_wait();
+        return ETaskResult::FINISHED;
+    }
+
+private:
+    std::latch& All_;
+};
+
+// Each run's task waits for the other's, as a query on one node waits for its part on
+// another: the second run starts threads of its own instead of waiting for the first's.
+TEST(SchedulerThreaded, RunsThatWaitForEachOtherGetTheirOwnThreads) {
+    // Two idle threads stay after the runs; the other two exit.
+    TWorkerPool pool(2);
+    std::latch both(2);
+    std::vector<std::unique_ptr<TTaskGraph>> graphs;
+    std::vector<std::unique_ptr<TThreadedScheduler>> schedulers;
+    for (int run = 0; run < 2; ++run) {
+        auto& graph = *graphs.emplace_back(std::make_unique<TTaskGraph>());
+        graph.AddOwnedNode(std::make_unique<TRendezvousTask>(both));
+        schedulers.push_back(std::make_unique<TThreadedScheduler>(graph.Seal(), pool, 2));
+        EXPECT_TRUE(schedulers.back()->Start());
+    }
+    EXPECT_EQ(pool.Threads(), 4u);
+    for (auto& scheduler : schedulers) {
+        std::string error;
+        EXPECT_TRUE(scheduler->Wait(&error)) << error;
+    }
+    EXPECT_EQ(pool.Threads(), 2u);
 }
 
 // Pushes `rows` one-row batches to its outputs, each to a lane among the first
@@ -1087,7 +1140,7 @@ bool RunGraph(TTaskGraph& graph, size_t workers, std::string* error) {
     if (workers == 0) {
         return TSingleThreadedScheduler(sealed).Run(error);
     }
-    TThreadedScheduler scheduler(sealed, workers);
+    TThreadedScheduler scheduler(sealed, NQdb::TestWorkerPool(), workers);
     return RunOrCancel(scheduler, error);
 }
 
