@@ -1,6 +1,7 @@
 #include <qdbd/serialization.h>
 #include "mock_source.h"
 #include "test_types.h"
+#include "test_worker_pool.h"
 #include <qdbd/actors.h>
 #include <qdbd/actors/compute.h>
 #include <qdbd/actors/collector.h>
@@ -2073,8 +2074,8 @@ void RunRemotePipeline(const TRemotePipeline& options) {
     ASSERT_TRUE(sealedB);
     static_cast<TSourceTask*>(source.Task)->BindCode(sourceCode, sourceState);
 
-    TThreadedScheduler schedulerA(sealedA, options.Workers);
-    TThreadedScheduler schedulerB(sealedB, options.Workers);
+    TThreadedScheduler schedulerA(sealedA, TestWorkerPool(), options.Workers);
+    TThreadedScheduler schedulerB(sealedB, TestWorkerPool(), options.Workers);
     TSchedulerChannel wakeA(schedulerA);
     TSchedulerChannel wakeB(schedulerB);
 
@@ -3399,7 +3400,8 @@ TEST(DistributedScheduler, ComputeActorReleasesWhatItKeptForAGraphThatNeverCame)
     std::atomic<int> destroyed = 0;
     TTestCluster cluster;
     const auto peer = cluster.Follower.Register(std::make_unique<TBlackHole>());
-    const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor()));
+    const auto actor = cluster.Follower.Register(
+        std::unique_ptr<IActor>(CreateComputeActor(std::make_shared<TRuntimeResources>())));
     cluster.Follower.Send<TDataChunk>(peer, actor, TDataChunk(2, 1, {CountedRows(3, &destroyed)}));
     cluster.Pump();
     EXPECT_EQ(destroyed.load(), 0);
@@ -3417,7 +3419,8 @@ TEST(DistributedScheduler, ComputeActorReleasesWhatItKeptForAGraphThatFailedToSt
     std::vector<std::string> errors;
     const auto query = cluster.Follower.Register(std::make_unique<TReportProbe>(statuses, errors));
     const auto peer = cluster.Follower.Register(std::make_unique<TBlackHole>());
-    const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor()));
+    const auto actor = cluster.Follower.Register(
+        std::unique_ptr<IActor>(CreateComputeActor(std::make_shared<TRuntimeResources>())));
     cluster.Follower.Send<TDataChunk>(peer, actor, TDataChunk(2, 1, {CountedRows(3, &destroyed)}));
     cluster.Pump();
     // The relay's source has no endpoint, so the graph cannot start.
@@ -3811,7 +3814,7 @@ std::string RunLocally(const std::string& sql, const NQdb::NScheduler::TSettings
     std::ostringstream out;
     TCsvSink sink(schema, out);
     std::string error;
-    if (!RunPlanIntoSink(std::move(lowered), sink, settings, nullptr, &error)) {
+    if (!RunPlanIntoSink(std::move(lowered), sink, settings, TestWorkerPool(), nullptr, &error)) {
         throw std::runtime_error(error);
     }
     return out.str();
@@ -4112,6 +4115,8 @@ struct TQueryCluster {
     // As in qdbd, each node destroys the graphs of finished queries on its cleaner's thread.
     size_t RetiredGraphs = 2;
     std::vector<std::shared_ptr<NQdb::NScheduler::TGraphCleaner>> Cleaners;
+    // Of the leader and the follower.
+    std::vector<std::shared_ptr<TRuntimeResources>> Resources;
 
     TQueryCluster() {
         using namespace NQdb::NScheduler;
@@ -4129,6 +4134,7 @@ struct TQueryCluster {
             resources->Scheduler = Settings.Scheduler;
             resources->SerializeOnIoThreads = QueryIoThreads.value_or(0) > 0;
             resources->GraphCleaner = Cleaners.back();
+            Resources.push_back(resources);
             system->RegisterWellKnown(
                 static_cast<TLocalActorId>(EWellKnownActors::LocalScheduler),
                 std::unique_ptr<IActor>(CreateLocalScheduler(leaderId, 1, std::move(resources))));
@@ -4145,15 +4151,31 @@ struct TQueryCluster {
     std::optional<TExecuteQueryResponse> Run(TDecimalsCompiler& compiler, const std::string& sql,
         std::optional<size_t> width, std::vector<std::string>& log)
     {
-        std::optional<TExecuteQueryResponse> answer;
-        const auto client = Cluster.Follower.Register(std::make_unique<TAnswerProbe>(answer));
-        const auto query = Cluster.Follower.Register(std::unique_ptr<IActor>(CreateQueryActor(
-            [&] { return compiler.MakeQueryCompiler(); }, Settings,
-            [&](const std::string& line) { log.push_back(line); })));
-        Cluster.Follower.Send<TExecuteQuery>(client, query, TExecuteQuery{.Query = sql, .PlanWidth = width});
+        return RunAtOnce(compiler, {sql}, width, log).front();
+    }
+
+    // The answers to `sqls`, which run at the same time.
+    std::vector<std::optional<TExecuteQueryResponse>> RunAtOnce(TDecimalsCompiler& compiler,
+        const std::vector<std::string>& sqls, std::optional<size_t> width, std::vector<std::string>& log)
+    {
+        std::vector<std::optional<TExecuteQueryResponse>> answers(sqls.size());
+        std::vector<TActorId> clients;
+        for (size_t i = 0; i < sqls.size(); ++i) {
+            clients.push_back(Cluster.Follower.Register(std::make_unique<TAnswerProbe>(answers[i])));
+            const auto query = Cluster.Follower.Register(std::unique_ptr<IActor>(CreateQueryActor(
+                [&] { return compiler.MakeQueryCompiler(); }, Settings,
+                [&](const std::string& line) { log.push_back(line); })));
+            Cluster.Follower.Send<TExecuteQuery>(
+                clients.back(), query, TExecuteQuery{.Query = sqls[i], .PlanWidth = width});
+        }
+        const auto answered = [&] {
+            return std::ranges::all_of(answers, [](const auto& answer) {
+                return answer.has_value();
+            });
+        };
         // The deadline only guards against a hang.
         const auto deadline = NNet::TClock::now() + std::chrono::seconds(60);
-        while (!answer && NNet::TClock::now() < deadline) {
+        while (!answered() && NNet::TClock::now() < deadline) {
             Cluster.Pump();
         }
         // The query stops its compute actors; over sockets the stops take a few steps.
@@ -4162,8 +4184,19 @@ struct TQueryCluster {
             Cluster.Pump();
         } while (Cluster.Leader.ActorsSize() != LeaderActors && NNet::TClock::now() < stopDeadline);
         EXPECT_EQ(Cluster.Leader.ActorsSize(), LeaderActors);
-        Cluster.Follower.Send<TPoison>(client, client, TPoison{});
-        return answer;
+        for (const auto client : clients) {
+            Cluster.Follower.Send<TPoison>(client, client, TPoison{});
+        }
+        return answers;
+    }
+
+    // The threads of the leader's and the follower's worker pools.
+    std::vector<size_t> WorkerThreads() const {
+        std::vector<size_t> threads;
+        for (const auto& resources : Resources) {
+            threads.push_back(resources->Workers.Threads());
+        }
+        return threads;
     }
 };
 
@@ -4315,6 +4348,41 @@ TEST(DistributedScheduler, CleanerTakesAGraphStoppedWhileItRuns) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     EXPECT_EQ(destroyed.load(), produced);
+}
+
+// Back-to-back queries run on the threads of the one before; queries at the same time
+// each take threads of their own, which then stay for the next queries.
+TEST(DistributedScheduler, QueryActorsShareTheWorkerThreadsOfEachNode) {
+    TQueryCluster cluster;
+    ASSERT_NO_FATAL_FAILURE(cluster.Start());
+    TDecimalsCompiler compiler;
+    const std::string sql = "SELECT a.id, b.s, b.d38 FROM t a JOIN t b ON a.id = b.id WHERE a.id % 5 = 0 ORDER BY a.id";
+    const auto expected = RunLocally(sql, cluster.Settings);
+    const auto workers = cluster.Settings.Scheduler.WorkerCount;
+    for (int query = 0; query < 4; ++query) {
+        SCOPED_TRACE(query);
+        std::vector<std::string> log;
+        const auto answer = cluster.Run(compiler, sql, std::nullopt, log);
+        ASSERT_TRUE(answer);
+        ASSERT_TRUE(answer->Response) << answer->Response.error().ToString();
+        EXPECT_EQ(*answer->Response, expected);
+        EXPECT_EQ(cluster.WorkerThreads(), std::vector<size_t>(2, workers));
+    }
+    constexpr size_t atOnce = 3;
+    std::vector<std::string> log;
+    for (const auto& answer : cluster.RunAtOnce(compiler, std::vector<std::string>(atOnce, sql), std::nullopt, log)) {
+        ASSERT_TRUE(answer);
+        ASSERT_TRUE(answer->Response) << answer->Response.error().ToString();
+        EXPECT_EQ(*answer->Response, expected);
+    }
+    const auto threads = cluster.WorkerThreads();
+    for (const auto count : threads) {
+        EXPECT_GE(count, workers);
+        EXPECT_LE(count, atOnce * workers);
+    }
+    const auto answer = cluster.Run(compiler, sql, std::nullopt, log);
+    ASSERT_TRUE(answer);
+    EXPECT_EQ(cluster.WorkerThreads(), threads);
 }
 
 // Joins whose build lanes and probes the split puts on both nodes: each node's

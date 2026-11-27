@@ -54,7 +54,9 @@ void Execute(const NCompiler::TPreparedQuery& prepared, bool explain, size_t sca
     std::ostringstream text;
     TCsvSink sink(schema, text);
     std::string error;
-    NScheduler::RunPlanIntoSink(std::move(lowered), sink, settings, nullptr, &error);
+    // The single-threaded scheduler takes no threads from it.
+    NScheduler::TWorkerPool workers;
+    NScheduler::RunPlanIntoSink(std::move(lowered), sink, settings, workers, nullptr, &error);
 }
 
 } // namespace

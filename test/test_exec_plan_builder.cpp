@@ -3,6 +3,7 @@
 
 #include "mock_source.h"
 #include "test_types.h"
+#include "test_worker_pool.h"
 
 #include <qdb/exec/plan_builder.h>
 #include <qdb/exec/runtime_filter.h>
@@ -642,7 +643,7 @@ std::vector<std::string> RunCsv(
     if (!sealed) {
         throw std::runtime_error(error);
     }
-    NScheduler::TSchedulerExecutor executor(sealed, settings);
+    NScheduler::TSchedulerExecutor executor(sealed, settings, TestWorkerPool());
     if (!executor.Run(&error)) {
         throw std::runtime_error(error);
     }

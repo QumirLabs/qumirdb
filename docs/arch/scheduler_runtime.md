@@ -43,6 +43,15 @@ The scheduler itself does not know SQL semantics. It only executes task nodes
 and reschedules their neighbors when a task returns `OK`, `NEED_DATA`,
 `BLOCKED_OUTPUT`, or `FINISHED`.
 
+The threaded scheduler does not start threads of its own. It runs a graph on
+N workers that it takes from a pool owned by the process: the CLI's `main`, or
+the runtime resources of a qdbd node. A run takes idle threads first and starts
+new ones when none is idle, so it never waits for threads that another query
+holds. Queries that wait for each other across nodes therefore cannot deadlock
+on a full pool. A run ends when each of its workers has left the graph and is
+back in the pool. Idle threads above a cap exit, and the pool joins the rest at
+process exit.
+
 ## Task State Machines
 
 ### Execution context and allocation ownership

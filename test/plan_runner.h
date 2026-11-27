@@ -6,6 +6,7 @@
 // one-line change (`RunPlan(root[, settings])` instead of building a planner).
 
 #include "test_types.h"
+#include "test_worker_pool.h"
 
 #include <qdb/io/io.h>
 #include <qdb/kernel/annotate_type.h>
@@ -110,7 +111,7 @@ inline std::unique_ptr<TTestRuntime> RunPlan(
     NTestDetail::TCollectingSink sink;
     std::string error;
     if (!NScheduler::RunPlanIntoSink(
-            std::move(lowered), sink, settings, nullptr, &error)) {
+            std::move(lowered), sink, settings, TestWorkerPool(), nullptr, &error)) {
         throw std::runtime_error(error);
     }
     if (timings) {

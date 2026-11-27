@@ -121,6 +121,7 @@ add_library(qumirdb
     scheduler/lowering/task_factory.cpp
     scheduler/impl/single_threaded_scheduler.cpp
     scheduler/impl/threaded_scheduler.cpp
+    scheduler/impl/worker_pool.cpp
 )
 target_include_directories(qumirdb PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_include_directories(qumirdb PRIVATE ${LLVM_INCLUDE_DIRS})

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/scheduler/graph.h>
+#include <qdb/scheduler/impl/worker_pool.h>
 #include <qdb/scheduler/settings/settings.h>
 
 #include <string>
@@ -15,8 +16,8 @@ class TSchedulerExecutor {
 public:
     // Gets only the static graph part, the sealed graph. The other static part, the
     // kernels, is TLoweredPlan::Kernels: FinalizeKernels compiles it into the kernel
-    // slots the tasks share before Run().
-    TSchedulerExecutor(TSealedTaskGraph graph, TSettings settings);
+    // slots the tasks share before Run(). The threaded scheduler takes its workers from `workers`.
+    TSchedulerExecutor(TSealedTaskGraph graph, TSettings settings, TWorkerPool& workers);
 
     bool Run(std::string* error = nullptr);
     TSchedulerRunStats Stats() const;
@@ -24,6 +25,7 @@ public:
 private:
     TSealedTaskGraph Graph_;
     TSettings Settings_;
+    TWorkerPool& Workers_;
     TSchedulerRunStats Stats_;
 };
 

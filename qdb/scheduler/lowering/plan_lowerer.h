@@ -7,6 +7,7 @@
 #include <qdb/plan/ops/operator.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/graph.h>
+#include <qdb/scheduler/impl/worker_pool.h>
 #include <qdb/scheduler/settings/settings.h>
 #include <qdb/scheduler/spec/graph_spec.h>
 
@@ -126,11 +127,13 @@ TSealedTaskGraph ApplySplit(TLoweredPlan& lowered, TSplitPlan&& plan);
 std::vector<TGraphSpec> ExtractFragmentSpecs(const TLoweredPlan& lowered);
 
 // Attach a terminal sink that writes every output rowset to `sink`, then run the
-// graph on the configured scheduler. Returns false and sets `error` on failure.
+// graph on the configured scheduler, whose workers come from `workers`. Returns
+// false and sets `error` on failure.
 bool RunPlanIntoSink(
     TLoweredPlan lowered,
     ISink& sink,
     TSettings settings,
+    TWorkerPool& workers,
     std::ostream* diagnostics,
     std::string* error);
 

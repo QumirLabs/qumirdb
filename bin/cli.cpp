@@ -174,6 +174,7 @@ std::chrono::duration<double> ProcessCpuTime() {
 int ExecutePlan(
     const NQdb::NCompiler::TPreparedQuery& prepared,
     const TCliOptions& config,
+    NQdb::NScheduler::TWorkerPool& workers,
     bool explain,
     std::chrono::steady_clock::time_point planStart)
 {
@@ -239,7 +240,7 @@ int ExecutePlan(
     auto cpuStart = ProcessCpuTime();
     std::string error;
     if (!NQdb::NScheduler::RunPlanIntoSink(
-            std::move(lowered), counting, config.Engine.Scheduler, diagnostics, &error)) {
+            std::move(lowered), counting, config.Engine.Scheduler, workers, diagnostics, &error)) {
         std::cerr << error << "\n";
         return 1;
     }
@@ -265,6 +266,7 @@ int RunQuery(
     ESyntax syntax,
     std::istream& in,
     const TCliOptions& config,
+    NQdb::NScheduler::TWorkerPool& workers,
     const std::shared_ptr<const NQdb::NKernel::TModuleBase>& base,
     NQdb::TExternalModuleCatalog& catalog)
 {
@@ -299,7 +301,7 @@ int RunQuery(
             return 1;
         }
         if (*prepared) {
-            if (int status = ExecutePlan(**prepared, config, query->Explain, planStart)) {
+            if (int status = ExecutePlan(**prepared, config, workers, query->Explain, planStart)) {
                 return status;
             }
         }
@@ -422,6 +424,7 @@ bool HasCompleteSqlStatement(const std::string& text) {
 // Reads SQL statements from readline and runs complete batches terminated by ';'.
 int RunInteractive(
     TCliOptions config,
+    NQdb::NScheduler::TWorkerPool& workers,
     const std::shared_ptr<const NQdb::NKernel::TModuleBase>& base,
     NQdb::TExternalModuleCatalog& catalog)
 {
@@ -485,7 +488,7 @@ int RunInteractive(
         }
         try {
             std::istringstream in(buffer);
-            RunQuery(ESyntax::Sql, in, config, base, catalog);
+            RunQuery(ESyntax::Sql, in, config, workers, base, catalog);
         } catch (const std::exception& e) {
             std::cerr << e.what() << "\n";
         }
@@ -541,6 +544,8 @@ int main(int argc, char** argv) {
     }
 
     NQumir::NCodeGen::TLLVMInitializer llvmInit;
+    // The statements of this process share the scheduler's threads; joined when main returns.
+    NQdb::NScheduler::TWorkerPool workers;
 
     TCliOptions config;
     NQdb::TExternalModuleCatalog catalog;
@@ -626,7 +631,7 @@ int main(int argc, char** argv) {
     try {
         const auto base = std::make_shared<const NQdb::NKernel::TModuleBase>();
         if (queryFile.empty()) {
-            return RunInteractive(config, base, catalog);
+            return RunInteractive(config, workers, base, catalog);
         }
 
         std::ifstream ifs(queryFile);
@@ -634,7 +639,7 @@ int main(int argc, char** argv) {
             std::cerr << "Cannot open query file: " << queryFile << "\n";
             return 1;
         }
-        return RunQuery(config.Syntax, ifs, config, base, catalog);
+        return RunQuery(config.Syntax, ifs, config, workers, base, catalog);
     } catch (const std::exception& e) {
         std::cerr << e.what() << "\n";
         return 1;

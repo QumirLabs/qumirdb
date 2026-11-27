@@ -2,6 +2,7 @@
 
 #include "runtime_filter_test_util.h"
 #include "test_types.h"
+#include "test_worker_pool.h"
 
 #include <qdb/scheduler/channel.h>
 #include <qdb/scheduler/connection.h>
@@ -415,7 +416,7 @@ TEST(SchedulerRuntimeAdapter, RunsSourceFilterProjectSinkSingleThreaded) {
 
 TEST(SchedulerRuntimeAdapter, RunsSourceFilterProjectSinkThreaded) {
     auto pipeline = MakePipeline();
-    TThreadedScheduler scheduler(pipeline.Graph->Seal(), 4);
+    TThreadedScheduler scheduler(pipeline.Graph->Seal(), TestWorkerPool(), 4);
 
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
@@ -461,7 +462,7 @@ void RunWaitingGraph(
     const auto sealed = graph.Seal(&error);
     ASSERT_TRUE(sealed) << error;
 
-    TThreadedScheduler scheduler(sealed, 2);
+    TThreadedScheduler scheduler(sealed, TestWorkerPool(), 2);
     TSchedulerChannel channel(scheduler);
     TTaskNode* wake = wakeByExternalId ? sealed.ExternalNode(externalId)
         : wakeSink ? &sink : &source;
@@ -739,7 +740,7 @@ TEST(SchedulerRuntimeAdapter, ThreadedRunCompletesWithAbandonedWaitingBranch) {
             std::abort();
         }
     });
-    TThreadedScheduler scheduler(sealed, 2);
+    TThreadedScheduler scheduler(sealed, TestWorkerPool(), 2);
     const bool ok = scheduler.Run(&error);
     finished.store(true);
     watchdog.join();
@@ -835,7 +836,7 @@ struct TMultiRootGraph {
         if (workers == 0) {
             return TSingleThreadedScheduler(sealed).Run(&error);
         }
-        return TThreadedScheduler(sealed, workers).Run(&error);
+        return TThreadedScheduler(sealed, TestWorkerPool(), workers).Run(&error);
     }
 };
 
@@ -1149,7 +1150,7 @@ TEST(SchedulerRuntimeAdapter, RunsBinaryBlockingTask) {
     std::string error;
     const auto sealed = graph->Seal(&error);
     ASSERT_TRUE(sealed) << error;
-    TThreadedScheduler scheduler(sealed, 3);
+    TThreadedScheduler scheduler(sealed, TestWorkerPool(), 3);
     ASSERT_TRUE(scheduler.Run(&error)) << error;
     EXPECT_EQ(binaryState->LeftRows, 3);
     EXPECT_EQ(binaryState->RightRows, 21);
@@ -1255,7 +1256,7 @@ TEST(SchedulerRuntimeAdapter, BroadcastFeedsTheLiveLaneAfterALimitFinishes) {
                 ASSERT_TRUE(sealed) << error;
                 const bool ok = workers == 0
                     ? TSingleThreadedScheduler(sealed).Run(&error)
-                    : TThreadedScheduler(sealed, workers).Run(&error);
+                    : TThreadedScheduler(sealed, TestWorkerPool(), workers).Run(&error);
                 ASSERT_TRUE(ok) << error;
             }
             EXPECT_EQ(sinkState->Batches, 2 + batches);
@@ -1792,7 +1793,7 @@ TEST_F(SchedulerRuntimeFilter, FilterSinkSendsPassAllWhenItsBuildLaneIsAbandoned
             ok = TSingleThreadedScheduler(sealed).Run(&error);
         } else {
             // A regression hangs Run(); the watchdog cancels it.
-            TThreadedScheduler scheduler(sealed, workers);
+            TThreadedScheduler scheduler(sealed, TestWorkerPool(), workers);
             std::atomic<bool> returned = false;
             std::thread watchdog([&] {
                 for (int i = 0; i < 100 && !returned.load(); ++i) {

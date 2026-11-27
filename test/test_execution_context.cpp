@@ -1,3 +1,5 @@
+#include "test_worker_pool.h"
+
 #include <qdb/exec/kernel_rowset.h>
 #include <qdb/kernel/execution_context.h>
 #include <qdb/modules/qumirdb_runtime.h>
@@ -304,7 +306,7 @@ TEST(ExecutionContext, SchedulerPinsAllocationDomain) {
     graph.AddNode(task);
     const auto sealed = graph.Seal();
     ASSERT_TRUE(sealed);
-    TThreadedScheduler scheduler(sealed, 2);
+    TThreadedScheduler scheduler(sealed, TestWorkerPool(), 2);
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
     EXPECT_EQ(task.Bytes, 96u);
@@ -326,7 +328,7 @@ TEST(ExecutionContext, SchedulersCreateExecutionStateFromTaskCount) {
 
         std::string error;
         const bool ok = threaded
-            ? TThreadedScheduler(sealed, 2).Run(&error)
+            ? TThreadedScheduler(sealed, TestWorkerPool(), 2).Run(&error)
             : TSingleThreadedScheduler(sealed).Run(&error);
         ASSERT_TRUE(ok) << error;
         EXPECT_EQ(root.State.load(), ETaskState::Finished);
@@ -346,7 +348,7 @@ TEST(ExecutionContext, PublishedBatchOutlivesSchedulerAndGraph) {
             ASSERT_TRUE(sealed);
             std::string error;
             const bool ok = threaded
-                ? TThreadedScheduler(sealed, 2).Run(&error)
+                ? TThreadedScheduler(sealed, TestWorkerPool(), 2).Run(&error)
                 : TSingleThreadedScheduler(sealed).Run(&error);
             ASSERT_TRUE(ok) << error;
         }
@@ -372,7 +374,7 @@ TEST(ExecutionContext, AbandonedTaskHeapIsReclaimedBeforeGraphTeardown) {
 
         std::string error;
         const bool ok = threaded
-            ? TThreadedScheduler(sealed, 2).Run(&error)
+            ? TThreadedScheduler(sealed, TestWorkerPool(), 2).Run(&error)
             : TSingleThreadedScheduler(sealed).Run(&error);
         ASSERT_TRUE(ok) << error;
         EXPECT_EQ(source.State.load(), ETaskState::Idle);

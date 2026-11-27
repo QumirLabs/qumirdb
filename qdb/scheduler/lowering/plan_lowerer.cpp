@@ -3626,6 +3626,7 @@ bool RunPlanIntoSink(
     TLoweredPlan lowered,
     ISink& sink,
     TSettings settings,
+    TWorkerPool& workers,
     std::ostream* diagnostics,
     std::string* error)
 {
@@ -3654,7 +3655,7 @@ bool RunPlanIntoSink(
         }
     }
 
-    TSchedulerExecutor executor(sealed, settings);
+    TSchedulerExecutor executor(sealed, settings, workers);
     if (!executor.Run(error)) {
         return false;
     }

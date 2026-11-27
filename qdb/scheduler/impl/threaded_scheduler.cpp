@@ -6,7 +6,6 @@
 #include <exception>
 #include <thread>
 #include <utility>
-#include <vector>
 
 namespace NQdb {
 namespace NScheduler {
@@ -22,9 +21,11 @@ void SetError(std::string* error, std::string message) {
 
 TThreadedScheduler::TThreadedScheduler(
     TSealedTaskGraph graph,
+    TWorkerPool& workers,
     size_t workerCount,
     size_t readyQueueCapacity)
     : Graph_(graph)
+    , Workers_(workers)
     , Execution_(graph.TaskCount())
     , Ready_(std::max({
         readyQueueCapacity,
@@ -33,7 +34,21 @@ TThreadedScheduler::TThreadedScheduler(
     , WorkerCount_(std::max<size_t>(workerCount, 1))
 {}
 
+TThreadedScheduler::~TThreadedScheduler()
+{
+    // After Wait the pool may be gone already: the graph cleaner frees schedulers late.
+    // So only a scheduler that was never waited for touches the pool here.
+    if (HasRun_ && !Waited_) {
+        Cancel();
+        Wait();
+    }
+}
+
 bool TThreadedScheduler::Run(std::string* error) {
+    return Start(error) && Wait(error);
+}
+
+bool TThreadedScheduler::Start(std::string* error) {
     if (!Graph_) {
         SetError(error, "task graph is not sealed");
         return false;
@@ -55,16 +70,22 @@ bool TThreadedScheduler::Run(std::string* error) {
     }
     UnfinishedRoots_.store(roots, std::memory_order_release);
 
-    std::vector<std::thread> workers;
-    workers.reserve(WorkerCount_);
-    for (size_t i = 0; i < WorkerCount_; ++i) {
-        workers.emplace_back([this]() {
+    try {
+        Workers_.Start(WorkerCount_, [this] {
             Work();
-        });
+        }, WorkersRun_);
+    } catch (...) {
+        // The workers that did start must leave the graph before it can be freed.
+        Cancel();
+        Workers_.Wait(WorkersRun_);
+        throw;
     }
-    for (auto& worker : workers) {
-        worker.join();
-    }
+    return true;
+}
+
+bool TThreadedScheduler::Wait(std::string* error) {
+    Workers_.Wait(WorkersRun_);
+    Waited_ = true;
     if (Failed_.load(std::memory_order_acquire)) {
         std::lock_guard lock(ErrorMutex_);
         SetError(error, Error_);

@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include "test_worker_pool.h"
+
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/connections/local.h>
 #include <qdb/scheduler/graph.h>
@@ -145,7 +147,7 @@ void CheckControlDependency(bool threaded) {
 
     std::string error;
     if (threaded) {
-        TThreadedScheduler scheduler(sealed, 2);
+        TThreadedScheduler scheduler(sealed, NQdb::TestWorkerPool(), 2);
         ASSERT_TRUE(scheduler.Run(&error)) << error;
     } else {
         TSingleThreadedScheduler scheduler(sealed);
@@ -1365,7 +1367,7 @@ TEST(SchedulerGraph, SchedulersRunTheRootsOfEverySubgraph) {
 
         std::string error;
         if (threaded) {
-            ASSERT_TRUE(TThreadedScheduler(sealed, 2).Run(&error)) << error;
+            ASSERT_TRUE(TThreadedScheduler(sealed, NQdb::TestWorkerPool(), 2).Run(&error)) << error;
         } else {
             ASSERT_TRUE(TSingleThreadedScheduler(sealed).Run(&error)) << error;
         }
@@ -1382,7 +1384,7 @@ TEST(SchedulerGraph, SchedulersRejectFailedSeal) {
     EXPECT_FALSE(TSingleThreadedScheduler(sealed).Run(&error));
     EXPECT_EQ(error, "task graph is not sealed");
     error.clear();
-    EXPECT_FALSE(TThreadedScheduler(sealed, 2).Run(&error));
+    EXPECT_FALSE(TThreadedScheduler(sealed, NQdb::TestWorkerPool(), 2).Run(&error));
     EXPECT_EQ(error, "task graph is not sealed");
 }
 
