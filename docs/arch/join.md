@@ -346,16 +346,20 @@ output for a left row depends on that row alone. `Right` and `Full` run on one
 lane: a right row is unmatched only if no row of the whole left input matches
 it.
 
-An `Inner` join is symmetric, so it broadcasts the input with the smaller
-estimated row count and streams the larger one on its own lanes. The estimates
-must exist for both inputs, and the larger input must have at least as many
-lanes as the other; otherwise the right side is broadcast as above. The
-output columns stay left then right, and the kernel emits the same canonical
-pairs. The other types cannot swap: a left row of an outer, semi or anti join
-is decided by the whole right input, which a lane that streams part of the
-right input does not see. A `Right` join could mirror a `Left` join but does
-not yet. The browser runtime runs the same kernel for every type and always
-streams the left input.
+An `Inner` join is symmetric, so it chooses by estimated cost between
+broadcasting the right input (the default), broadcasting the left input to the
+lanes of the right one, and gathering both to one lane. The cost counts the
+cells of the product spread over the streamed lanes, plus the broadcast cells
+replicated to each of those lanes. The larger input is therefore streamed when
+it has the lanes to spread the product over, and a smaller input with few
+lanes does not drag the product onto them. The default stays unless an
+alternative is clearly cheaper or an estimate is missing. The output columns
+stay left then right, and the kernel emits the same canonical pairs. The other
+types cannot swap: a left row of an outer, semi or anti join is decided by the
+whole right input, which a lane that streams part of the right input does not
+see. A `Right` join could mirror a `Left` join but does not yet. The browser
+runtime runs the same kernel for every type and always streams the left input.
+The formulas and thresholds are on the wiki page "Join-implementation".
 
 ## Memory and lifetime invariants
 
