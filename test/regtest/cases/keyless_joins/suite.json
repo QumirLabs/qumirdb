@@ -28,6 +28,9 @@
     "inner_residual_small_left.sql": {"order": "unordered"},
     "inner_residual_small_right.sql": {"order": "unordered"},
     "inner_empty_small_left.sql": {"order": "unordered"},
-    "inner_empty_small_right.sql": {"order": "unordered"}
+    "inner_empty_small_right.sql": {"order": "unordered"},
+    "inner_count_without_columns.sql": {},
+    "inner_empty_filtered_left.sql": {},
+    "inner_empty_filtered_right.sql": {}
   }
 }

@@ -581,9 +581,6 @@ TCrossJoinProcessor::TCrossJoinProcessor(
     , BufferedRows_(streamRight ? LeftRows_ : RightRows_)
     , StreamRight_(streamRight)
 {
-    if (StreamRight_ && JoinType_ != EJoinType::Inner) {
-        throw std::runtime_error("only an inner nested-loop join can stream its right input");
-    }
     // The nested-loop kernel has no marker emission.
     if (JoinType_ == EJoinType::LeftMark) {
         throw std::runtime_error("left_mark join is not supported by the nested-loop join processor");

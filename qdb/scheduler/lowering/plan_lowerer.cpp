@@ -414,12 +414,8 @@ public:
         size_t Lanes = 0;
     };
 
-    // A keyless (nested-loop) join broadcasts one side to every lane of the
-    // streamed side, which keeps its partition count when each streamed row's
-    // output depends only on that row: inner, left outer, and left semi/anti.
-    // RIGHT / FULL pad the right rows no left row matched, which only the
-    // whole left input decides, so they run on one lane. An inner join is
-    // symmetric and picks its placement by cost (ChooseKeylessInnerJoin).
+    // Left outer/semi/anti keep the left lanes; RIGHT / FULL need the whole left
+    // input, so one lane; an inner join picks by cost (ChooseKeylessInnerJoin).
     TKeylessJoinPlan KeylessJoinPlan(const TJoinOperator& join) const {
         const size_t leftLanes = OutputLanes(join.Left());
         const size_t rightLanes = OutputLanes(join.Right());

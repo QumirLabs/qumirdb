@@ -206,15 +206,10 @@ private:
     int64_t LastRightBatchRows_ = 0;
 };
 
-// Fetch-driven nested-loop join for joins without equi-keys. Buffers one input
-// and streams the other through xj_dispatch, which emits row-id pairs as the
-// compiled join type requires, then materializes through the shared
-// jt_materialize kernel. The right input is buffered and the left streamed,
-// except for an inner join with `streamRight`, which buffers the left input.
-// An inner join's residual is applied downstream (cross -> filter); the other
-// types evaluate it in the kernel, where it decides matches. RIGHT / FULL pad
-// the unmatched right rows after the last left batch, so they must see the
-// whole left input.
+// Fetch-driven nested-loop join for joins without equi-keys: buffers one input
+// and streams the other through xj_dispatch. The right input is buffered, except
+// for an inner join with `streamRight`. An inner residual is a downstream filter;
+// other types evaluate it in the kernel. RIGHT / FULL need the whole left input.
 class TCrossJoinProcessor {
 public:
     using TFetch = std::function<EJoinFetchResult(TRowSet&)>;

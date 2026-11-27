@@ -171,24 +171,18 @@ enum class EKeylessJoinStrategy {
     Gather,
 };
 
-// Cost of replicating one cell to one receiving lane, in units of one
-// materialized output cell. The copy crosses a connection and, in a cluster, a
-// node boundary, so it is taken as twice an in-memory materialization.
+// Cost of replicating one cell to one receiving lane, in materialized cells:
+// a copy crosses a connection and, in a cluster, a node, so it counts twice.
 inline constexpr double KeylessBroadcastCellCost = 2.0;
 
-// A strategy replaces the default only when its modelled cost is at most this
-// fraction of the default's: the estimates are rough, so a close call keeps
-// the default plan.
-inline constexpr double KeylessMinGain = 0.8;
+// An alternative replaces the default only when its cost is below this
+// fraction of the default's: estimates are rough, so a close call keeps it.
+inline constexpr double KeylessMaxCostRatio = 0.8;
 
-// Picks the strategy of an inner join without keys by modelled cost, in cells:
-//   product work   rows(L) * rows(R) * (columns(L) + columns(R)) / lanes of the
-//                  streamed input (every pair is materialized before a residual)
-//   replication    cells of the broadcast input * receiving lanes
-//   gather         cells moved to the single lane
-// The output has the same rows for every strategy, so only its materialization
-// spread over the streaming lanes counts. Without estimates for both inputs the
-// default is kept.
+// Picks the strategy of an inner join without keys by modelled cost (formulas
+// on the wiki page "Join-implementation"). Lanes count as parallelism and as
+// receivers of a broadcast, whatever the workers and nodes behind them. Without
+// an estimate for either input the default is kept.
 EKeylessJoinStrategy ChooseKeylessInnerJoin(
     const TKeylessJoinSide& left,
     const TKeylessJoinSide& right);

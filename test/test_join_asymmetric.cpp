@@ -1732,12 +1732,6 @@ TEST(OuterStreamJoinPlan, MatchesGeneralPathAcrossPartitions) {
     }
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    NQumir::NCodeGen::TLLVMInitializer initializer;
-    return RUN_ALL_TESTS();
-}
-
 TEST(ChooseKeylessInnerJoin, BroadcastsTheSmallInputAndStreamsTheWideLargeOne) {
     const TKeylessJoinSide small{100, 1, 2};
     const TKeylessJoinSide large{14e6, 3, 128};
@@ -1765,4 +1759,27 @@ TEST(ChooseKeylessInnerJoin, KeepsTheDefaultWithoutEstimates) {
         ChooseKeylessInnerJoin({0, 1, 2}, {14e6, 3, 128}), EKeylessJoinStrategy::BroadcastRight);
     EXPECT_EQ(
         ChooseKeylessInnerJoin({100, 1, 2}, {0, 3, 128}), EKeylessJoinStrategy::BroadcastRight);
+}
+
+TEST(ChooseKeylessInnerJoin, CountsRowsAndLanesWithoutColumns) {
+    // count(*) over a product: no columns, but the pairs still cost work.
+    EXPECT_EQ(
+        ChooseKeylessInnerJoin({32768, 0, 16}, {20000, 0, 1}),
+        EKeylessJoinStrategy::BroadcastRight);
+    EXPECT_EQ(
+        ChooseKeylessInnerJoin({20000, 0, 1}, {32768, 0, 16}),
+        EKeylessJoinStrategy::BroadcastLeft);
+}
+
+TEST(ChooseKeylessInnerJoin, KeepsTheDefaultOnATie) {
+    EXPECT_EQ(
+        ChooseKeylessInnerJoin({1000, 2, 8}, {1000, 2, 8}), EKeylessJoinStrategy::BroadcastRight);
+    EXPECT_EQ(
+        ChooseKeylessInnerJoin({1000, 0, 8}, {1000, 0, 8}), EKeylessJoinStrategy::BroadcastRight);
+}
+
+int main(int argc, char** argv) {
+    ::testing::InitGoogleTest(&argc, argv);
+    NQumir::NCodeGen::TLLVMInitializer initializer;
+    return RUN_ALL_TESTS();
 }
