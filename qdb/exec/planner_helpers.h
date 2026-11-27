@@ -163,12 +163,11 @@ struct TKeylessJoinSide {
 };
 
 // How a keyless inner join places its inputs: the right input is broadcast to
-// the lanes of the left one (the default), the left one to the lanes of the
-// right one, or both inputs are gathered to one lane.
+// the lanes of the left one (the default), or the left one to the lanes of the
+// right one.
 enum class EKeylessJoinStrategy {
     BroadcastRight,
     BroadcastLeft,
-    Gather,
 };
 
 // Cost of replicating one cell to one receiving lane, in materialized cells:

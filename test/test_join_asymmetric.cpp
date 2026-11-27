@@ -1748,12 +1748,6 @@ TEST(ChooseKeylessInnerJoin, KeepsTheDefaultWhenTheSwapGainsNothing) {
         ChooseKeylessInnerJoin({1e6, 1, 16}, {2e6, 1, 1}), EKeylessJoinStrategy::BroadcastRight);
 }
 
-TEST(ChooseKeylessInnerJoin, GathersTinyInputs) {
-    // Replicating two rows to 128 lanes costs more than the product itself.
-    EXPECT_EQ(
-        ChooseKeylessInnerJoin({3, 1, 128}, {2, 1, 128}), EKeylessJoinStrategy::Gather);
-}
-
 TEST(ChooseKeylessInnerJoin, KeepsTheDefaultWithoutEstimates) {
     EXPECT_EQ(
         ChooseKeylessInnerJoin({0, 1, 2}, {14e6, 3, 128}), EKeylessJoinStrategy::BroadcastRight);

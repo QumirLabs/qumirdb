@@ -347,8 +347,8 @@ lane: a right row is unmatched only if no row of the whole left input matches
 it.
 
 An `Inner` join is symmetric, so it chooses by estimated cost between
-broadcasting the right input (the default), broadcasting the left input to the
-lanes of the right one, and gathering both to one lane. The cost counts the
+broadcasting the right input (the default) and broadcasting the left input to the
+lanes of the right one. The cost counts the
 cells of the product spread over the streamed lanes, plus the broadcast cells
 replicated to each of those lanes. The larger input is therefore streamed when
 it has the lanes to spread the product over, and a smaller input with few

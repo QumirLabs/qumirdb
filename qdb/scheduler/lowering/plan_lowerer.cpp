@@ -459,8 +459,6 @@ public:
                 return {.Lanes = leftLanes};
             case EKeylessJoinStrategy::BroadcastLeft:
                 return {.StreamRight = true, .Lanes = rightLanes};
-            case EKeylessJoinStrategy::Gather:
-                return {.Lanes = 1};
         }
         return {.Lanes = leftLanes};
     }
@@ -2255,8 +2253,8 @@ private:
     //   parent gather. The scalar side is lowered, gathered to one lane, and
     //   forwarded into a broadcast connection replicated to every vector lane.
     //   The vector side is the left input, or the right one when an inner join
-    //   chooses so by cost (KeylessJoinPlan). RIGHT / FULL, and an inner join
-    //   of tiny inputs, gather the vector side to one lane.
+    //   chooses so by cost (KeylessJoinPlan). RIGHT / FULL gather the vector
+    //   side to one lane.
     //   Only an inner join filters the product by its residual; the other
     //   types evaluate the residual in the kernel, where it decides matches.
     TLoweredOutput LowerCrossJoin(
