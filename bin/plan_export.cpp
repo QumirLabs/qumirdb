@@ -2211,7 +2211,7 @@ std::optional<llvm::json::Object> BuildSortStageJson(
             {"index", key.Index},
             {"width", key.WidthBytes},
             {"isString", key.IsString},
-            {"isFloat", key.IsFloat},
+            {"workSlots", key.WorkSlots},
             {"desc", key.Desc},
             {"nullsFirst", nullsFirst},
         });
@@ -2278,7 +2278,7 @@ std::optional<llvm::json::Object> BuildWindowStageJson(
             {"index", key.Index},
             {"width", key.WidthBytes},
             {"isString", key.IsString},
-            {"isFloat", key.IsFloat},
+            {"workSlots", key.WorkSlots},
             {"desc", key.Desc},
             {"nullsFirst", nullsFirst},
         });

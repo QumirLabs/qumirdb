@@ -3125,10 +3125,10 @@ function stableSortRowSetForStore(arena, layout, rowSet) {
   };
 }
 
-// i64 work slots per row of the sort kernels, as RadixWorkStride: string and
-// float keys sort {key, rowId} pairs.
+// i64 work slots per row of the sort kernels: the most any key needs, as
+// RadixWorkStride.
 function radixWorkStride(radixKeys) {
-  return radixKeys.some(key => key.isString || key.isFloat) ? 4 : 1;
+  return Math.max(1, ...radixKeys.map(key => key.workSlots));
 }
 
 function runSortKernelRowSets(
