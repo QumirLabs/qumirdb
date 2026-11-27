@@ -1,0 +1,9 @@
+top-sort [d desc nulls-last, id asc] limit 10
+└─ project (id, d) (rows≈13 cost≈828)
+   └─ project (q.id, q.d) (rows≈13 cost≈672)
+      └─ union-all (rows≈13 cost≈516)
+         ├─ project (id, d) (rows≈10 cost≈240)
+         │  └─ source t AS t (rows≈10 cost≈120)
+         └─ project (col0, col1) (rows≈3 cost≈276)
+            └─ filter (call qdb_in_list |t_1.id| 3 4 5) (rows≈3 cost≈240)
+               └─ source t AS t_1 row-groups (call qdb_in_list |t_1.id| 3 4 5) (rows≈10 cost≈120)

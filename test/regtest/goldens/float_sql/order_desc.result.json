@@ -2,6 +2,7 @@
   "schema": "<struct (id i32) (f <named Nullable [f32]>)>",
   "rows": [
     [8, null],
+    [5, {"$float":"nan"}],
     [6, {"$float":"+inf"}],
     [2, 16777216],
     [9, 2.5],

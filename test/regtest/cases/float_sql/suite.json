@@ -27,6 +27,8 @@
     "join.sql": {"order": "ordered"},
     "order_asc.sql": {"order": "ordered"},
     "order_desc.sql": {"order": "ordered"},
+    "order_nan.sql": {"order": "ordered"},
+    "order_nan_limit.sql": {"order": "ordered"},
     "aggregate.sql": {"order": "ordered"},
     "aggregate_group.sql": {"order": "ordered"},
     "aggregate_having.sql": {"order": "ordered"},

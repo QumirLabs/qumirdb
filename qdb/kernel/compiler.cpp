@@ -227,7 +227,8 @@ constexpr const char* CacheSchemaVersion = "v1";
 // row_group_interval.oz gains f32 operand intervals.
 // qumirdb.oz gains the sorted-table lookups of long IN lists (qdb_in_sorted_*).
 // qdb_decimal_from_f32 returns right after an overflow, which returns while row errors are deferred.
-constexpr const char* KernelLibVersion = "69";
+// qumir_radix_key maps every NaN above +inf and -0 to +0; sort comparators compare floats by it.
+constexpr const char* KernelLibVersion = "70";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -645,8 +646,7 @@ void AppendSortLessBody(
     const std::string& leftRow,
     const std::string& rightColumns,
     const std::string& rightRow,
-    NQumir::NAst::TExprPtr equalResult,
-    bool floatTotalOrder = false)
+    NQumir::NAst::TExprPtr equalResult)
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
@@ -695,10 +695,10 @@ void AppendSortLessBody(
 
         auto leftComparable = ComparableValue(leftValue, i64Type);
         auto rightComparable = ComparableValue(rightValue, i64Type);
-        if (floatTotalOrder && TMaybeType<TFloatType>(UnwrapNamedValueType(leftValue.ValueType))) {
-            // The radix sort's key, with NaN above every number and -0 as +0.
-            leftComparable = Oz::Call("qumir_radix_total_key", {std::move(leftComparable)});
-            rightComparable = Oz::Call("qumir_radix_total_key", {std::move(rightComparable)});
+        if (TMaybeType<TFloatType>(UnwrapNamedValueType(leftValue.ValueType))) {
+            // The radix sort's key: `<` would make NaN a peer of every value.
+            leftComparable = Oz::Call("qumir_radix_key", {std::move(leftComparable)});
+            rightComparable = Oz::Call("qumir_radix_key", {std::move(rightComparable)});
         }
         builder.Stmt(Oz::If(
             Oz::Bin(TOperator("<"), leftComparable, rightComparable),
@@ -1866,14 +1866,12 @@ namespace {
 
 // `name`(store, left_id, right_id) -> bool: whether the left row comes first by
 // `keys`. Equal keys compare by packed row id when rowIdTieBreak is set, else
-// the left row does not come first. floatTotalOrder compares floats as
-// qumir_radix_total_key orders them.
+// the left row does not come first.
 NQumir::NAst::TExprPtr BuildRowIdLessAst(
     NQumir::NAst::TTypeFactory& types,
     const std::vector<TSortRadixKeyInput>& keys,
     std::string name,
-    bool rowIdTieBreak,
-    bool floatTotalOrder = false)
+    bool rowIdTieBreak)
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
@@ -1914,8 +1912,7 @@ NQumir::NAst::TExprPtr BuildRowIdLessAst(
         "right_cols", "right_row",
         rowIdTieBreak
             ? Oz::Bin(TOperator("<"), Oz::Ident("left_id"), Oz::Ident("right_id"))
-            : Oz::Bool(types, false),
-        floatTotalOrder);
+            : Oz::Bool(types, false));
 
     return std::move(builder).Build();
 }
@@ -1945,15 +1942,17 @@ NQumir::NAst::TExprPtr BuildHeapTopKProgramAst(
         throw NQumir::TError("BuildHeapTopKProgramAst: empty key list");
     }
 
-    auto library = modules.KernelLibrary("sort", "heap.oz");
-    if (!library) {
-        throw NQumir::TError(
-            "BuildHeapTopKProgramAst: " + library.error().ToString());
-    }
-
+    // radix.oz holds the float key that heap_less compares by.
     std::vector<TExprPtr> programStmts;
-    for (auto& stmt : *library) {
-        programStmts.push_back(std::move(stmt));
+    for (const char* name : {"radix.oz", "heap.oz"}) {
+        auto library = modules.KernelLibrary("sort", name);
+        if (!library) {
+            throw NQumir::TError(
+                "BuildHeapTopKProgramAst: " + library.error().ToString());
+        }
+        for (auto& stmt : *library) {
+            programStmts.push_back(std::move(stmt));
+        }
     }
     programStmts.push_back(BuildSortRowIdLessAst(types, keys));
     programStmts.push_back(BuildHeapTopKEntryAst(types));
@@ -1999,7 +1998,7 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
     if (rangeEntries) {
         // The routing orders rows as the radix sort does, so a range holds
         // whole peer groups (wiki Window-parallelism).
-        programStmts.push_back(BuildRowIdLessAst(types, keys, "window_key_less", false, true));
+        programStmts.push_back(BuildRowIdLessAst(types, keys, "window_key_less", false));
         addLibrary("window_carry.oz", true);
         programStmts.push_back(BuildWindowTailAddAst(types, inputType, funcs));
         programStmts.push_back(BuildWindowCarryStepAst(types, inputType, funcs));
