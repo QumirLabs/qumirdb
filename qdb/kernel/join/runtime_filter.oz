@@ -48,7 +48,7 @@
     (Bloom <ptr u64>)
     (BloomWords i64)>)
 
-  ;; Storage and result of a merge; mirrors TRuntimeFilterPublishState.
+  ;; Storage and result of a merge; mirrors TPublishState in C++.
   ;; Keys holds min(keys, MaxKeys + 1) entries, and the set of SetCapacity
   ;; entries stays at most half full with as many. Table is zeroed and fits
   ;; min(keys, MaxKeys) keys.

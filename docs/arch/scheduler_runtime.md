@@ -392,9 +392,11 @@ merges the contributions and publishes immutable filter data with a release
 store; probes acquire it before reading. No merger mutex is needed. One Bloom
 fragment supplies the result's storage, and the other fragments are OR-ed into
 it. Exact hashes are counted in a hash set only up to the first distinct one
-over the exact limit; then every hash goes to the Bloom filter, so the merge
-stays linear in the hashes it receives. Bloom sizes are powers of two so both scalar and vector probes use a block
-mask instead of division.
+over the exact limit; then every hash goes to the Bloom filter. That is one
+pass over the hashes instead of the eight scatter passes of a radix sort, in
+memory bounded by the limit (a set of at most 2 x (limit + 1) slots, 576 KiB)
+instead of 24 bytes per received hash. Bloom sizes are powers of two so both
+scalar and vector probes use a block mask instead of division.
 
 Each probe task owns its counters, selection scratch buffers, and weak-Bloom
 pause policy. Worker migration does not move this state between tasks. Aggregate
