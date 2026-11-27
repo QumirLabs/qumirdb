@@ -998,20 +998,26 @@ TEST(SchedulerThreaded, BackToBackRunsReuseThePoolThreads) {
     }
 }
 
-// Finishes once every task that shares `all` runs at the same time.
+// Finishes once every task that shares `all` runs at the same time, and then
+// `hold`, if given, is released.
 class TRendezvousTask : public ITask {
 public:
-    explicit TRendezvousTask(std::latch& all)
+    explicit TRendezvousTask(std::latch& all, std::latch* hold = nullptr)
         : All_(all)
+        , Hold_(hold)
     {}
 
     ETaskResult Execute() override {
         All_.arrive_and_wait();
+        if (Hold_) {
+            Hold_->wait();
+        }
         return ETaskResult::FINISHED;
     }
 
 private:
     std::latch& All_;
+    std::latch* Hold_;
 };
 
 // Each run's task waits for the other's, as a query on one node waits for its part on
@@ -1020,20 +1026,47 @@ TEST(SchedulerThreaded, RunsThatWaitForEachOtherGetTheirOwnThreads) {
     // Two idle threads stay after the runs; the other two exit.
     TWorkerPool pool(2);
     std::latch both(2);
+    std::latch hold(1);
     std::vector<std::unique_ptr<TTaskGraph>> graphs;
     std::vector<std::unique_ptr<TThreadedScheduler>> schedulers;
     for (int run = 0; run < 2; ++run) {
         auto& graph = *graphs.emplace_back(std::make_unique<TTaskGraph>());
-        graph.AddOwnedNode(std::make_unique<TRendezvousTask>(both));
+        graph.AddOwnedNode(std::make_unique<TRendezvousTask>(both, &hold));
         schedulers.push_back(std::make_unique<TThreadedScheduler>(graph.Seal(), pool, 2));
         EXPECT_TRUE(schedulers.back()->Start());
     }
+    // The tasks are held, so no thread has left yet.
     EXPECT_EQ(pool.Threads(), 4u);
+    hold.count_down();
     for (auto& scheduler : schedulers) {
         std::string error;
         EXPECT_TRUE(scheduler->Wait(&error)) << error;
     }
+    // The threads over the idle cap exit after Wait, so wait for them.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (pool.Threads() > 2 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
     EXPECT_EQ(pool.Threads(), 2u);
+}
+
+// All jobs meet, so each gets a thread of its own; those over the idle cap exit
+// one after another, each joining the one before. The pool dies right after Wait.
+TEST(SchedulerThreaded, WorkerPoolJoinsEveryExitingThreadOnce) {
+    for (int round = 0; round < 50; ++round) {
+        std::atomic<int> done = 0;
+        {
+            TWorkerPool pool(1);
+            TWorkerPool::TRun run;
+            std::latch all(8);
+            pool.Start(8, [&] {
+                all.arrive_and_wait();
+                done.fetch_add(1);
+            }, run);
+            pool.Wait(run);
+            EXPECT_EQ(done.load(), 8);
+        }
+    }
 }
 
 // Pushes `rows` one-row batches to its outputs, each to a lane among the first

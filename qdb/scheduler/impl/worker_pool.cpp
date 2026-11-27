@@ -35,7 +35,8 @@ void TWorkerPool::Start(size_t count, const std::function<void()>& job, TRun& ru
             HasJob_.notify_one();
         } else {
             Threads_.emplace_back([this, first = TJob{.Work = job, .Run = &run}]() mutable {
-                Loop(std::move(first));
+                // libc++ copies a small std::function on move; exchange empties `first`.
+                Loop(std::exchange(first, {}));
             });
         }
         ++run.Running_;

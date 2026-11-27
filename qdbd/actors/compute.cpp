@@ -87,12 +87,10 @@ struct TComputeActor : public IBehaviorActor {
         : Behavior(this)
         , Resources(std::move(resources))
     {
-        if (Resources) {
-            SchedulerSettings = Resources->Scheduler;
-            Limits = NScheduler::TRemoteStreamLimits::From(Resources->Transport);
-            Limits.SerializeOnIoThreads = Resources->SerializeOnIoThreads;
-            Resources->UsedSlots.fetch_add(1, std::memory_order_relaxed);
-        }
+        SchedulerSettings = Resources->Scheduler;
+        Limits = NScheduler::TRemoteStreamLimits::From(Resources->Transport);
+        Limits.SerializeOnIoThreads = Resources->SerializeOnIoThreads;
+        Resources->UsedSlots.fetch_add(1, std::memory_order_relaxed);
         Become(&Behavior);
     }
 
@@ -229,7 +227,7 @@ struct TComputeActor : public IBehaviorActor {
             }
             // No sink: a compute actor's results leave through its remote sinks.
             graph = NScheduler::MaterializeGraph(
-                spec, nullptr, std::move(slots), nullptr, Resources ? Resources->Tables : nullptr);
+                spec, nullptr, std::move(slots), nullptr, Resources->Tables);
             sealed = graph->Seal(&error);
         } catch (const std::exception& e) {
             error = e.what();

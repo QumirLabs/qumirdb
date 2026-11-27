@@ -34,6 +34,15 @@ TThreadedScheduler::TThreadedScheduler(
     , WorkerCount_(std::max<size_t>(workerCount, 1))
 {}
 
+TThreadedScheduler::~TThreadedScheduler()
+{
+    // After Wait the pool may be gone already: the graph cleaner frees schedulers late.
+    if (HasRun_ && !Waited_) {
+        Cancel();
+        Wait();
+    }
+}
+
 bool TThreadedScheduler::Run(std::string* error) {
     return Start(error) && Wait(error);
 }
@@ -75,6 +84,7 @@ bool TThreadedScheduler::Start(std::string* error) {
 
 bool TThreadedScheduler::Wait(std::string* error) {
     Workers_.Wait(WorkersRun_);
+    Waited_ = true;
     if (Failed_.load(std::memory_order_acquire)) {
         std::lock_guard lock(ErrorMutex_);
         SetError(error, Error_);

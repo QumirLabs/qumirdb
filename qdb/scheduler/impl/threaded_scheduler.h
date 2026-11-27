@@ -31,6 +31,8 @@ public:
         TWorkerPool& workers,
         size_t workerCount,
         size_t readyQueueCapacity = 0);
+    // Stops and waits for a run that was started, so no worker outlives the graph.
+    ~TThreadedScheduler() override;
 
     // Start() and Wait().
     bool Run(std::string* error = nullptr);
@@ -83,6 +85,7 @@ private:
     std::atomic<uint64_t> EmptyReadyPolls_ = 0;
     size_t WorkerCount_;
     bool HasRun_ = false;
+    bool Waited_ = false;
 };
 
 } // namespace NScheduler
