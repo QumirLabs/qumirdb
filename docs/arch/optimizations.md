@@ -621,7 +621,9 @@ See [predicate_pushdown.md](predicate_pushdown.md#parquet-row-group-pruning).
 With the threaded scheduler a Parquet source is split into up to `[scan] max_tasks`
 independent row-group ranges, which is what creates the parallel lanes every
 optimization below builds on. A single-row-group file yields one lane, and the
-parallel variants then do not apply.
+parallel variants then do not apply. The lanes of a scan take the ranges'
+row groups in morsels from a shared queue, so a lane that falls behind does not
+hold up the scan.
 
 Without an explicit limit, each source is sized after column and row-group
 pruning: one task per 1,048,576 rows or 64 MiB of uncompressed selected-column

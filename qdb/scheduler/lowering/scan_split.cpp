@@ -93,6 +93,8 @@ std::vector<TScanSplit> BuildScanSplits(
     const size_t groupCount = rowGroups.size();
     const size_t taskCount = std::min(maxTasks, groupCount);
     const size_t groupsPerTask = (groupCount + taskCount - 1) / taskCount;
+    // With two or more tasks there are two or more splits to share morsels.
+    const auto morselRows = taskCount > 1 ? static_cast<int64_t>(settings.MorselRows) : 0;
 
     std::vector<TScanSplit> splits;
     splits.reserve(taskCount);
@@ -100,10 +102,16 @@ std::vector<TScanSplit> BuildScanSplits(
         const size_t end = std::min(begin + groupsPerTask, groupCount);
         TScanSplit split;
         split.RowGroups.reserve(end - begin);
+        int64_t pendingRows = 0;
         for (size_t i = begin; i < end; ++i) {
             split.RowGroups.push_back(rowGroups[i].RowGroup);
             split.RowCount += rowGroups[i].RowCount;
             split.ByteSize += rowGroups[i].ByteSize;
+            pendingRows += rowGroups[i].RowCount;
+            if (morselRows != 0 && (pendingRows >= morselRows || i + 1 == end)) {
+                split.MorselEnds.push_back(i + 1 - begin);
+                pendingRows = 0;
+            }
         }
         splits.push_back(split);
     }

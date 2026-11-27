@@ -22,6 +22,9 @@ struct TScanSplit {
     int64_t RowCount = 0;
     int64_t ByteSize = 0;
     bool SerialRead = false;
+    // Morsel i is RowGroups[MorselEnds[i - 1], MorselEnds[i]); empty when the
+    // split's own lane reads all of it.
+    std::vector<size_t> MorselEnds;
 };
 
 // Resolve an explicit cap or choose one for a source after pruning. Join inputs
@@ -31,6 +34,7 @@ size_t ChooseScanTaskCount(
     const TSettings& settings,
     bool feedsJoin);
 
+// Several splits get morsels when settings.MorselRows is positive.
 std::vector<TScanSplit> BuildScanSplits(
     const std::vector<TScanRowGroup>& rowGroups,
     const TScanSplitSettings& settings);

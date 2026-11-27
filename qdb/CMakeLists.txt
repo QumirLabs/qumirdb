@@ -110,6 +110,7 @@ add_library(qumirdb
     scheduler/connections/local.cpp
     scheduler/port.cpp
     scheduler/tasks/cte_spool.cpp
+    scheduler/tasks/scan_morsels.cpp
     scheduler/settings/engine_settings.cpp
     scheduler/impl/executor.cpp
     scheduler/graph.cpp

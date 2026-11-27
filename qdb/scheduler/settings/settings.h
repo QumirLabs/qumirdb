@@ -79,6 +79,10 @@ struct TScanSplitSettings {
     size_t TargetRowsPerTask = 1024 * 1024;
     size_t TargetBytesPerTask = 64 * 1024 * 1024;
     size_t TinyInputRowsThreshold = 0;
+    // Lanes of a split scan take morsels of whole row groups with at least this
+    // many rows from a queue of their node; 0 pins every split to its lane.
+    // One parquet reader batch: a smaller morsel would cut batches short.
+    size_t MorselRows = 1 << 18;
 };
 
 // Which hash table an inner equi-join with a fixed build side uses. Row is the

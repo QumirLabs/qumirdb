@@ -11,6 +11,7 @@
 #include <qdb/scheduler/lowering/task_factory.h>
 #include <qdb/scheduler/tasks/cte_spool.h>
 #include <qdb/scheduler/tasks/runtime_adapter.h>
+#include <qdb/scheduler/tasks/scan_morsels.h>
 #include <qdb/utils/binary_io.h>
 
 #include <limits>
@@ -109,13 +110,40 @@ std::unique_ptr<ITask> MakeProcessTask(
         std::move(code), std::make_shared<TUnaryStreamingKernelState>(), input, output);
 }
 
-const ITable& ResolveTable(TNodeTaskContext& context, const std::string& path)
+const std::shared_ptr<const ITable>& ResolveTable(TNodeTaskContext& context, const std::string& path)
 {
     auto& table = context.Tables[path];
     if (!table) {
         table = context.TableCache ? context.TableCache->Open(path) : std::make_shared<TParquetFile>(path);
     }
-    return *table;
+    return table;
+}
+
+// The lane's morsels, which share the queue of its scan in this graph.
+std::shared_ptr<TScanMorselQueue> AddScanMorsels(const TParquetScanNode& node, TNodeTaskContext& context)
+{
+    if (!node.RowGroups) {
+        Invalid("a scan with morsels needs its row groups");
+    }
+    const auto& rowGroups = *node.RowGroups;
+    std::vector<std::vector<int>> morsels;
+    uint32_t begin = 0;
+    for (const auto end : node.Morsels->Ends) {
+        if (end <= begin || end > rowGroups.size()) {
+            Invalid("scan morsels must end in ascending order within the row groups");
+        }
+        morsels.emplace_back(rowGroups.begin() + begin, rowGroups.begin() + end);
+        begin = end;
+    }
+    if (begin != rowGroups.size()) {
+        Invalid("scan morsels must cover the row groups");
+    }
+    auto& queue = context.ScanMorselQueues[node.Morsels->Queue];
+    if (!queue) {
+        queue = std::make_shared<TScanMorselQueue>();
+    }
+    queue->Add(std::move(morsels));
+    return queue;
 }
 
 std::unique_ptr<ITask> MakeParquetScanTask(
@@ -125,8 +153,17 @@ std::unique_ptr<ITask> MakeParquetScanTask(
     if (node.Columns) {
         columns.emplace(node.Columns->begin(), node.Columns->end());
     }
+    const auto& table = ResolveTable(context, node.Path);
+    if (node.Morsels) {
+        auto state = std::make_shared<TMorselSourceState>(TMorselSourceState{
+            .Table = table,
+            .Columns = std::move(columns),
+            .Queue = AddScanMorsels(node, context),
+        });
+        return std::make_unique<TSourceTask>(MakeMorselSourceCode(), std::move(state), output);
+    }
     auto state = std::make_shared<NLowering::TSchedulerSourceState>();
-    state->OwnedSource = ResolveTable(context, node.Path).MakeSource(node.RowGroups, std::move(columns));
+    state->OwnedSource = table->MakeSource(node.RowGroups, std::move(columns));
     state->Source = state->OwnedSource.get();
     return std::make_unique<TSourceTask>(NLowering::MakeSourceCode(), std::move(state), output);
 }
@@ -507,7 +544,7 @@ std::unique_ptr<ITask> MakeNodeTask(
                 std::make_shared<NLowering::TLimitBlockingState>(node.Limit, node.Offset),
                 InputPort(connections, node.In), OutputPort(connections, node.Out));
         } else if constexpr (std::is_same_v<TNode, TLateLookupNode>) {
-            auto lookup = ResolveTable(context, node.Path).MakeLookupSource();
+            auto lookup = ResolveTable(context, node.Path)->MakeLookupSource();
             if (!lookup) {
                 Invalid("a late lookup table has no row locators");
             }

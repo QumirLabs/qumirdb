@@ -107,6 +107,37 @@ TEST(SchedulerScanSplit, PreservesSparseRowGroupIds) {
     EXPECT_EQ(splits[1].RowCount, 30);
 }
 
+TEST(SchedulerScanSplit, CutsEverySplitIntoMorselsOfWholeRowGroups) {
+    TScanSplitSettings settings;
+    settings.Strategy = EScanSplitStrategy::RowGroupRange;
+    settings.MaxScanTasks = 2;
+    settings.MorselRows = 25;
+    auto rowGroups = RowGroups();
+    rowGroups.push_back({.RowGroup = 4, .RowCount = 50, .ByteSize = 500});
+
+    // Splits {0, 1, 2} and {3, 4}: a morsel closes at 25 rows or at the split's end.
+    auto splits = BuildScanSplits(rowGroups, settings);
+    ASSERT_EQ(splits.size(), 2u);
+    EXPECT_EQ(splits[0].MorselEnds, (std::vector<size_t>{2, 3}));
+    EXPECT_EQ(splits[1].MorselEnds, (std::vector<size_t>{1, 2}));
+
+    settings.MorselRows = 1000;
+    splits = BuildScanSplits(rowGroups, settings);
+    EXPECT_EQ(splits[0].MorselEnds, (std::vector<size_t>{3}));
+    EXPECT_EQ(splits[1].MorselEnds, (std::vector<size_t>{2}));
+
+    // Static ranges, and a lone split, have no morsels.
+    settings.MorselRows = 0;
+    EXPECT_TRUE(BuildScanSplits(rowGroups, settings)[0].MorselEnds.empty());
+    settings.MorselRows = 1;
+    settings.MaxScanTasks = 1;
+    EXPECT_TRUE(BuildScanSplits(rowGroups, settings)[0].MorselEnds.empty());
+    settings.MaxScanTasks = 4;
+    const auto lone = BuildScanSplits({rowGroups[0]}, settings);
+    ASSERT_EQ(lone.size(), 1u);
+    EXPECT_TRUE(lone[0].MorselEnds.empty());
+}
+
 TEST(SchedulerScanSplit, AutoSizesEachSourceAndLimitsJoinFanIn) {
     TSettings settings;
     settings.Scheduler.Mode = EExecutionMode::ThreadedScheduler;
