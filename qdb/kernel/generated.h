@@ -146,7 +146,7 @@ struct TGeneratedKernel {
         int32_t Index = 0;
         int32_t WidthBytes = 0;
         bool IsString = false;
-        // i64 work slots per row that this key's sort needs (RadixWorkSlots).
+        // i64 work slots per row that this key's sort needs (RowIdSortOf).
         int32_t WorkSlots = 1;
         bool Desc = false;
     };

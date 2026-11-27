@@ -14,12 +14,7 @@ namespace NQdb {
 // A row is selected unless the batch carries a selection vector that zeroes it.
 bool RowSelected(const TRowSet& batch, int32_t row);
 
-// i64 work slots per row that a sort by one key of this type needs: a string
-// sorts {prefix, rowId} pairs and their copy (4), a bool or 16-byte key its
-// row ids (1), any other key its keys, their copy and the row ids' copy (3).
-size_t RadixWorkSlots(const TValueType& value);
-
-// The work slots per row of a sort by all keyColumns.
+// The work slots per row of a sort by all keyColumns (RowIdSortOf).
 size_t RadixWorkStride(const std::vector<TSortColumnRef>& keyColumns);
 
 } // namespace NQdb

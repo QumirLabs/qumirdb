@@ -15,6 +15,7 @@
 #include <qdb/kernel/lib.h>
 #include <qdb/kernel/query_modules.h>
 #include <qdb/kernel/spec.h>
+#include <qdb/io/row_layouts.h>
 #include <qdb/exec/runtime_context.h>
 #include <qdb/exec/runtime_filter.h>
 #include <qdb/exec/instrumentation/operator.h>
@@ -230,7 +231,8 @@ constexpr const char* CacheSchemaVersion = "v1";
 // qumir_radix_key maps every NaN above +inf and -0 to +0; sort comparators order NaN the same way.
 // sort_rowids.oz gains sort_float_rowids, which sorts (key, row id) pairs.
 // sort_fixed_rowids sorts (key, row id) arrays for every fixed-width key; sort_float_rowids goes.
-constexpr const char* KernelLibVersion = "72";
+// sort_fixed_rowids keeps keys of at most 32 bits in u32 arrays.
+constexpr const char* KernelLibVersion = "73";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -342,6 +344,26 @@ CompileKernelAstToObjectsCached(
         });
 }
 
+TRowIdSort RowIdSortOf(const TValueType& value)
+{
+    using EKind = TRowIdSort::EKind;
+    if (value.Kind == EValueKind::String) {
+        // {prefix, row id} pairs and their scatter copy.
+        return {.Kind = EKind::String, .WorkSlots = 4};
+    }
+    if (value.Kind == EValueKind::Bool) {
+        return {.Kind = EKind::Bool, .WorkSlots = 1};
+    }
+    if (value.Width == 16) {
+        return {.Kind = EKind::BinInt, .WorkSlots = 1};
+    }
+    // Two key arrays and the scattered row ids; two u32 key arrays share a slot.
+    if (value.Width <= 4) {
+        return {.Kind = EKind::Fixed, .KeyBytes = 4, .WorkSlots = 2};
+    }
+    return {.Kind = EKind::Fixed, .KeyBytes = 8, .WorkSlots = 3};
+}
+
 namespace {
 
 
@@ -430,11 +452,18 @@ NQumir::NAst::TExprPtr BuildRowIdSortCall(
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
+    using EKind = TRowIdSort::EKind;
 
+    const auto value = ValueTypeOf(key.Type);
+    if (!value) {
+        throw NQumir::TError(
+            "CompileRadixSortComposite: unsupported key type " + SqlTypeName(key.Type));
+    }
+    const auto sort = RowIdSortOf(*value);
     auto columnIndex = Int64Literal(types, key.ColumnIndex);
     auto ptrU64 = Ptr(types, types.MakeInteger(TIntegerType::U64));
 
-    if (SortKeyIsString(key.Type)) {
+    if (sort.Kind == EKind::String) {
         std::vector<TExprPtr> args{
             Oz::Ident(storeName),
             std::move(columnIndex),
@@ -451,7 +480,7 @@ NQumir::NAst::TExprPtr BuildRowIdSortCall(
             nullable ? "sort_string_rowids_nullable" : "sort_string_rowids",
             std::move(args));
     }
-    if (SortKeyIsBool(key.Type)) {
+    if (sort.Kind == EKind::Bool) {
         std::vector<TExprPtr> args{
             Oz::Ident(storeName),
             std::move(columnIndex),
@@ -469,7 +498,7 @@ NQumir::NAst::TExprPtr BuildRowIdSortCall(
             std::move(args));
     }
 
-    if (SortValueIsBinInt(key.Type)) {
+    if (sort.Kind == EKind::BinInt) {
         // 128-bit decimal: two-word radix (Lo then Hi) inside sort_binint_rowids.
         std::vector<TExprPtr> args{
             Oz::Ident(storeName),
@@ -509,6 +538,9 @@ NQumir::NAst::TExprPtr BuildRowIdSortCall(
         args.push_back(std::move(nullsFirst));
     }
     args.push_back(Cast(Int64Literal(types, 0), Ptr(types, std::move(coreType))));
+    const auto keyType = types.MakeInteger(sort.KeyBytes == 4 ? TIntegerType::U32 : TIntegerType::U64);
+    args.push_back(Cast(Int64Literal(types, 0), Ptr(types, keyType)));
+    args.push_back(Int64Literal(types, sort.KeyBytes));
     return Oz::Call(
         nullable ? "sort_fixed_rowids_nullable" : "sort_fixed_rowids",
         std::move(args));
