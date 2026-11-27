@@ -5,6 +5,7 @@
 #include <qdb/modules/qumirdb_runtime.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -133,6 +134,18 @@ int CompareScalar(T lhs, T rhs) {
     return 0;
 }
 
+// The order of the kernel sort: NaN equals NaN and is above every number, and
+// -0 equals +0, as in PostgreSQL.
+// TODO(#759): a second copy of that order until the merge is a kernel.
+template <class T>
+int CompareFloat(T lhs, T rhs)
+{
+    if (std::isnan(lhs) || std::isnan(rhs)) {
+        return CompareScalar(std::isnan(lhs), std::isnan(rhs));
+    }
+    return CompareScalar(lhs, rhs);
+}
+
 template <class T>
 T Load(const TColumn& col, int32_t row) {
     T value{};
@@ -197,9 +210,9 @@ int CompareValues(const TColumn& left, int32_t leftRow,
             return CompareUnsigned(left, leftRow, right, rightRow, value.Width);
         case EValueKind::Float:
             if (value.Width == sizeof(float)) {
-                return CompareScalar(Load<float>(left, leftRow), Load<float>(right, rightRow));
+                return CompareFloat(Load<float>(left, leftRow), Load<float>(right, rightRow));
             }
-            return CompareScalar(Load<double>(left, leftRow), Load<double>(right, rightRow));
+            return CompareFloat(Load<double>(left, leftRow), Load<double>(right, rightRow));
         case EValueKind::Bool:
             return CompareScalar(BoolAt(left, leftRow), BoolAt(right, rightRow));
         case EValueKind::String:

@@ -227,7 +227,9 @@ constexpr const char* CacheSchemaVersion = "v1";
 // row_group_interval.oz gains f32 operand intervals.
 // qumirdb.oz gains the sorted-table lookups of long IN lists (qdb_in_sorted_*).
 // qdb_decimal_from_f32 returns right after an overflow, which returns while row errors are deferred.
-constexpr const char* KernelLibVersion = "69";
+// qumir_radix_key maps every NaN above +inf and -0 to +0; sort comparators order NaN the same way.
+// sort_rowids.oz gains sort_float_rowids, which sorts (key, row id) pairs.
+constexpr const char* KernelLibVersion = "71";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -492,11 +494,14 @@ NQumir::NAst::TExprPtr BuildRowIdSortCall(
             "CompileRadixSortComposite: unsupported key type " +
             SqlTypeName(key.Type));
     }
+    // A float key sorts (key, row id) pairs, so qumir_radix_key runs once per
+    // row instead of in every pass; the work buffer holds the pairs.
+    const bool floatKey = static_cast<bool>(TMaybeType<TFloatType>(coreType));
     std::vector<TExprPtr> args{
         Oz::Ident(storeName),
         std::move(columnIndex),
         Oz::Ident("row_ids"),
-        Oz::Ident("work"),
+        floatKey ? Cast(Oz::Ident("work"), ptrU64) : Oz::Ident("work"),
         Oz::Ident("counts"),
         Oz::Ident("n"),
         Int64Literal(types, keyBits),
@@ -506,6 +511,11 @@ NQumir::NAst::TExprPtr BuildRowIdSortCall(
         args.push_back(std::move(nullsFirst));
     }
     args.push_back(Cast(Int64Literal(types, 0), Ptr(types, std::move(coreType))));
+    if (floatKey) {
+        return Oz::Call(
+            nullable ? "sort_float_rowids_nullable" : "sort_float_rowids",
+            std::move(args));
+    }
     return Oz::Call(
         nullable ? "sort_fixed_rowids_nullable" : "sort_fixed_rowids",
         std::move(args));
@@ -645,8 +655,7 @@ void AppendSortLessBody(
     const std::string& leftRow,
     const std::string& rightColumns,
     const std::string& rightRow,
-    NQumir::NAst::TExprPtr equalResult,
-    bool floatTotalOrder = false)
+    NQumir::NAst::TExprPtr equalResult)
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
@@ -695,17 +704,25 @@ void AppendSortLessBody(
 
         auto leftComparable = ComparableValue(leftValue, i64Type);
         auto rightComparable = ComparableValue(rightValue, i64Type);
-        if (floatTotalOrder && TMaybeType<TFloatType>(UnwrapNamedValueType(leftValue.ValueType))) {
-            // The radix sort's key, with NaN above every number and -0 as +0.
-            leftComparable = Oz::Call("qumir_radix_total_key", {std::move(leftComparable)});
-            rightComparable = Oz::Call("qumir_radix_total_key", {std::move(rightComparable)});
-        }
         builder.Stmt(Oz::If(
             Oz::Bin(TOperator("<"), leftComparable, rightComparable),
             Oz::Block({Oz::Return(BoolConst(types, !key.Desc))})));
         builder.Stmt(Oz::If(
             Oz::Bin(TOperator("<"), rightComparable, leftComparable),
             Oz::Block({Oz::Return(BoolConst(types, key.Desc))})));
+        if (TMaybeType<TFloatType>(UnwrapNamedValueType(leftValue.ValueType))) {
+            // Neither is less: equal (-0 and +0 too) or a NaN, which sorts above
+            // every number as in qumir_radix_key. `<` first keeps top-N fast.
+            auto isNan = [](const NQumir::NAst::TExprPtr& value) {
+                return Oz::Bin(TOperator("!="), value, value);
+            };
+            builder.Stmt(Oz::If(
+                Oz::Bin(TOperator("&&"), isNan(leftComparable), Unary("!", isNan(rightComparable))),
+                Oz::Block({Oz::Return(BoolConst(types, key.Desc))})));
+            builder.Stmt(Oz::If(
+                Oz::Bin(TOperator("&&"), Unary("!", isNan(leftComparable)), isNan(rightComparable)),
+                Oz::Block({Oz::Return(BoolConst(types, !key.Desc))})));
+        }
     }
 
     builder.Stmt(Oz::Return(std::move(equalResult)));
@@ -1866,14 +1883,12 @@ namespace {
 
 // `name`(store, left_id, right_id) -> bool: whether the left row comes first by
 // `keys`. Equal keys compare by packed row id when rowIdTieBreak is set, else
-// the left row does not come first. floatTotalOrder compares floats as
-// qumir_radix_total_key orders them.
+// the left row does not come first.
 NQumir::NAst::TExprPtr BuildRowIdLessAst(
     NQumir::NAst::TTypeFactory& types,
     const std::vector<TSortRadixKeyInput>& keys,
     std::string name,
-    bool rowIdTieBreak,
-    bool floatTotalOrder = false)
+    bool rowIdTieBreak)
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
@@ -1914,8 +1929,7 @@ NQumir::NAst::TExprPtr BuildRowIdLessAst(
         "right_cols", "right_row",
         rowIdTieBreak
             ? Oz::Bin(TOperator("<"), Oz::Ident("left_id"), Oz::Ident("right_id"))
-            : Oz::Bool(types, false),
-        floatTotalOrder);
+            : Oz::Bool(types, false));
 
     return std::move(builder).Build();
 }
@@ -1999,7 +2013,7 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
     if (rangeEntries) {
         // The routing orders rows as the radix sort does, so a range holds
         // whole peer groups (wiki Window-parallelism).
-        programStmts.push_back(BuildRowIdLessAst(types, keys, "window_key_less", false, true));
+        programStmts.push_back(BuildRowIdLessAst(types, keys, "window_key_less", false));
         addLibrary("window_carry.oz", true);
         programStmts.push_back(BuildWindowTailAddAst(types, inputType, funcs));
         programStmts.push_back(BuildWindowCarryStepAst(types, inputType, funcs));

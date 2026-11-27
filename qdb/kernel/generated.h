@@ -146,6 +146,7 @@ struct TGeneratedKernel {
         int32_t Index = 0;
         int32_t WidthBytes = 0;
         bool IsString = false;
+        bool IsFloat = false;
         bool Desc = false;
     };
     std::vector<TSortKeyMeta> SortKeys;

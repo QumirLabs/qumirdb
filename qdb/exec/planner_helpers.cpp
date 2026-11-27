@@ -124,6 +124,7 @@ std::vector<TGeneratedKernel::TSortKeyMeta> SortKeyMeta(
             .Index = columns[k].Index,
             .WidthBytes = value.Kind == EValueKind::Bool ? 1 : value.Width,
             .IsString = value.Kind == EValueKind::String,
+            .IsFloat = value.Kind == EValueKind::Float,
             .Desc = keys[k].Direction == ESortDirection::Desc,
         });
     }

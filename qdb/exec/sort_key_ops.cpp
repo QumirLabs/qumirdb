@@ -8,7 +8,7 @@ bool RowSelected(const TRowSet& batch, int32_t row) {
 
 size_t RadixWorkStride(const std::vector<TSortColumnRef>& keyColumns) {
     for (const auto& keyColumn : keyColumns) {
-        if (keyColumn.Value.Kind == EValueKind::String) {
+        if (keyColumn.Value.Kind == EValueKind::String || keyColumn.Value.Kind == EValueKind::Float) {
             return 4;
         }
     }

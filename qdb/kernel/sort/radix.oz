@@ -33,9 +33,16 @@
     (block
       (return (^ (bitcast value u64) (<< (: 1 u64) (: 63 u64))))))
 
+  ;; Floats order as in PostgreSQL: every NaN, whatever its sign and payload,
+  ;; is one key above +inf, and -0 is the key of +0.
   (fun qumir_radix_key ((var value f64)) -> u64
     (block
       (var bits = (bitcast value u64))
+      (var magnitude = (& bits (: 9223372036854775807 u64)))
+      (if (> magnitude (: 9218868437227405312 u64))
+        (block (return (bitcast (: -1 i64) u64))))
+      (if (== magnitude (: 0 u64))
+        (block (= bits (: 0 u64))))
       (var mask = (<< (: 1 u64) (: 63 u64)))
       (if (!= (>> bits (: 63 u64)) (: 0 u64))
         (block
@@ -45,32 +52,16 @@
   (fun qumir_radix_key ((var value f32)) -> u64
     (block
       (var bits = (bitcast value u32))
+      (var magnitude = (& bits (: 2147483647 u32)))
+      (if (> magnitude (: 2139095040 u32))
+        (block (return (: 4294967295 u64))))
+      (if (== magnitude (: 0 u32))
+        (block (= bits (: 0 u32))))
       (var mask = (<< (: 1 u32) (: 31 u32)))
       (if (!= (>> bits (: 31 u32)) (: 0 u32))
         (block
           (= mask (bitcast (: -1 i32) u32))))
       (return (cast (^ bits mask) u64))))
-
-  ;; The order of qumir_radix_key with every NaN as one value above every
-  ;; number and -0 as +0, which compare equal. Key ranges of a window route by
-  ;; it, so peers stay in one range.
-  (fun qumir_radix_total_key ((var value f64)) -> u64
-    (block
-      (var magnitude = (& (bitcast value u64) (: 9223372036854775807 u64)))
-      (if (> magnitude (: 9218868437227405312 u64))
-        (block (return (bitcast (: -1 i64) u64))))
-      (if (== magnitude (: 0 u64))
-        (block (return (call qumir_radix_key (: 0.0 f64)))))
-      (return (call qumir_radix_key value))))
-
-  (fun qumir_radix_total_key ((var value f32)) -> u64
-    (block
-      (var magnitude = (& (bitcast value u32) (: 2147483647 u32)))
-      (if (> magnitude (: 2139095040 u32))
-        (block (return (bitcast (: -1 i64) u64))))
-      (if (== magnitude (: 0 u32))
-        (block (return (call qumir_radix_key (: 0.0 f32)))))
-      (return (call qumir_radix_key value))))
 
   (fun qumir_radix_digit ((var key u64) (var digit i64)) -> u32
     (block

@@ -14,8 +14,8 @@ namespace NQdb {
 // A row is selected unless the batch carries a selection vector that zeroes it.
 bool RowSelected(const TRowSet& batch, int32_t row);
 
-// i64 work slots per row for the radix cascade: string keys sort {prefix, rowId}
-// pairs (4 slots), everything else needs one.
+// i64 work slots per row for the radix cascade: string and float keys sort
+// {key, rowId} pairs (4 slots), everything else needs one.
 size_t RadixWorkStride(const std::vector<TSortColumnRef>& keyColumns);
 
 } // namespace NQdb

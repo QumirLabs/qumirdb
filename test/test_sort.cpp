@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <limits>
 #include <numeric>
 #include <random>
@@ -45,15 +46,22 @@ auto RadixKey(T x) {
     return u;
 }
 
+// Every NaN is one key above +inf, and -0 is the key of +0.
 uint32_t RadixKey(float x) {
-    uint32_t u = std::bit_cast<uint32_t>(x);
+    if (std::isnan(x)) {
+        return 0xffffffffU;
+    }
+    uint32_t u = std::bit_cast<uint32_t>(x == 0.0f ? 0.0f : x);
     uint32_t sign = u >> 31;
     uint32_t mask = (-sign) | 0x80000000U;
     return u ^ mask;
 }
 
 uint64_t RadixKey(double x) {
-    uint64_t u = std::bit_cast<uint64_t>(x);
+    if (std::isnan(x)) {
+        return 0xffffffffffffffffULL;
+    }
+    uint64_t u = std::bit_cast<uint64_t>(x == 0.0 ? 0.0 : x);
     uint64_t sign = u >> 63;
     uint64_t mask = (-sign) | 0x8000000000000000ULL;
     return u ^ mask;
@@ -740,9 +748,24 @@ TEST(SortRadixOz, NumericKeysMatchPrototype) {
     auto f64Runner = CompileRadixOperation("test_radix_key_f64", f64Entry);
     ASSERT_NE(f64Entry, nullptr);
     auto f64Key = reinterpret_cast<uint64_t(*)(double)>(f64Entry);
-    for (double value : {-2345.6, -0.0, 0.0, 1.2, 555.99}) {
-        EXPECT_EQ(f64Key(value), RadixKey(value));
+    // Subnormals and DBL_MAX are the neighbours of the zeros and of the infinities.
+    using TLimits = std::numeric_limits<double>;
+    const double inf = TLimits::infinity();
+    const double nan = TLimits::quiet_NaN();
+    const double maxSubnormal = std::nextafter(TLimits::min(), 0.0);
+    const std::vector<double> ascending = {
+        -inf, -TLimits::max(), -2345.6, -TLimits::min(), -maxSubnormal, -TLimits::denorm_min(),
+        0.0, TLimits::denorm_min(), maxSubnormal, TLimits::min(), 1.2, 555.99, TLimits::max(), inf, nan};
+    for (size_t i = 0; i < ascending.size(); ++i) {
+        EXPECT_EQ(f64Key(ascending[i]), RadixKey(ascending[i])) << i;
+        if (i > 0) {
+            EXPECT_LT(f64Key(ascending[i - 1]), f64Key(ascending[i])) << i;
+        }
     }
+    EXPECT_EQ(f64Key(-0.0), f64Key(0.0));
+    const double negNan = std::bit_cast<double>(0xfff8000000000001ULL);
+    EXPECT_EQ(f64Key(negNan), RadixKey(negNan));
+    EXPECT_EQ(f64Key(negNan), f64Key(nan));
 }
 
 TEST(SortRadixOz, F32KeyMatchesPrototypeAndKeepsFloatOrder) {
@@ -750,11 +773,12 @@ TEST(SortRadixOz, F32KeyMatchesPrototypeAndKeepsFloatOrder) {
     auto runner = CompileRadixOperation("test_radix_key_f32", entry);
     ASSERT_NE(entry, nullptr);
     auto f32Key = reinterpret_cast<uint64_t(*)(float)>(entry);
-    // Same bit-pattern order as the f64 key: -0.0 sorts before 0.0, NaN after +inf.
+    // The order of the f64 key: NaN after +inf, -0.0 and 0.0 are one key.
     const float inf = std::numeric_limits<float>::infinity();
+    const float nan = std::numeric_limits<float>::quiet_NaN();
     const std::vector<float> ascending = {
-        -inf, -3.4e38f, -2345.6f, -1.0f, -1e-45f, -0.0f, 0.0f, 1e-45f, 1.2f, 555.99f,
-        3.4e38f, inf, std::numeric_limits<float>::quiet_NaN()};
+        -inf, -3.4e38f, -2345.6f, -1.0f, -1e-45f, 0.0f, 1e-45f, 1.2f, 555.99f,
+        3.4e38f, inf, nan};
     for (size_t i = 0; i < ascending.size(); ++i) {
         EXPECT_EQ(f32Key(ascending[i]), RadixKey(ascending[i])) << i;
         EXPECT_LE(f32Key(ascending[i]), 0xffffffffULL) << i;
@@ -762,10 +786,11 @@ TEST(SortRadixOz, F32KeyMatchesPrototypeAndKeepsFloatOrder) {
             EXPECT_LT(f32Key(ascending[i - 1]), f32Key(ascending[i])) << i;
         }
     }
-    // A NaN with the sign bit set sorts before -inf, like f64.
+    EXPECT_EQ(f32Key(-0.0f), f32Key(0.0f));
+    // A NaN with the sign bit set is the same key as any other NaN.
     const float negNan = std::bit_cast<float>(0xffc00000U);
     EXPECT_EQ(f32Key(negNan), RadixKey(negNan));
-    EXPECT_LT(f32Key(negNan), f32Key(-inf));
+    EXPECT_EQ(f32Key(negNan), f32Key(nan));
 }
 
 TEST(SortRadixOz, SortsU32IndicesAscending) {

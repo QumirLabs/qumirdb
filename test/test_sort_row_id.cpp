@@ -199,10 +199,26 @@ std::vector<int64_t> SortFloatKeyRows(bool desc, int64_t topLimit) {
     return rows;
 }
 
+// The rows of SortFloatKeyRows ascending: NaN above +inf and equal to NaN,
+// -0 equal to 0, the second key ordering the peers.
+std::vector<int64_t> FloatKeyRowsAscending() {
+    return {
+        NQdb::MakeRowId(0, 3), NQdb::MakeRowId(1, 2), NQdb::MakeRowId(1, 0), NQdb::MakeRowId(0, 1),
+        NQdb::MakeRowId(0, 2), NQdb::MakeRowId(1, 1), NQdb::MakeRowId(0, 0), NQdb::MakeRowId(1, 3),
+    };
+}
+
+std::vector<int64_t> FloatKeyRowsDescending() {
+    return {
+        NQdb::MakeRowId(0, 0), NQdb::MakeRowId(1, 3), NQdb::MakeRowId(1, 1), NQdb::MakeRowId(0, 2),
+        NQdb::MakeRowId(1, 0), NQdb::MakeRowId(0, 1), NQdb::MakeRowId(1, 2), NQdb::MakeRowId(0, 3),
+    };
+}
+
 TEST(SortRowId, F32KeyOrdersLikeF64) {
     for (bool desc : {false, true}) {
         auto f32Rows = SortFloatKeyRows<float>(desc, 0);
-        EXPECT_EQ(f32Rows.size(), 8u);
+        EXPECT_EQ(f32Rows, desc ? FloatKeyRowsDescending() : FloatKeyRowsAscending());
         EXPECT_EQ(f32Rows, SortFloatKeyRows<double>(desc, 0));
     }
 }
@@ -210,7 +226,9 @@ TEST(SortRowId, F32KeyOrdersLikeF64) {
 TEST(HeapTopK, F32KeyOrdersLikeF64) {
     for (bool desc : {false, true}) {
         auto f32Rows = SortFloatKeyRows<float>(desc, 5);
-        EXPECT_EQ(f32Rows.size(), 5u);
+        auto expected = desc ? FloatKeyRowsDescending() : FloatKeyRowsAscending();
+        expected.resize(5);
+        EXPECT_EQ(f32Rows, expected);
         EXPECT_EQ(f32Rows, SortFloatKeyRows<double>(desc, 5));
     }
 }
