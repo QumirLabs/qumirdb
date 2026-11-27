@@ -105,9 +105,11 @@ endforeach()
 # The window cases over key ranges (wiki Window-parallelism) with seven ranges:
 # the fixtures are too small for auto to choose them. Four scan tasks give the
 # single scheduler several lanes too. One rowset per queue lane makes a task
-# that holds rows back for a later output block at once.
+# that holds rows back for a later output block at once. Morsels of one row group
+# let a lane take the row groups of a blocked one.
 add_test(NAME test_reg_window_range COMMAND test_reg ${QDB_REG_ARGS}
     --window:range_partition=true --shuffle:partitions=7 --scan:max_tasks=4 --queue:depth=1
+    --scan:morsel_rows=1
     "--gtest_filter=*window*:*rank*"
     --gtest_output=xml:${CMAKE_CURRENT_BINARY_DIR}/test_reg_window_range.xml)
 set_tests_properties(test_reg_window_range PROPERTIES COST 50)

@@ -43,8 +43,9 @@ lanes of a split scan therefore share their work, as in morsel-driven
 parallelism ([Leis et al., SIGMOD 2014](https://doi.org/10.1145/2588555.2610507)).
 Lowering cuts each split into morsels: runs of the split's row groups with at
 least `[scan] morsel_rows` rows, 262,144 by default (one batch of the Parquet
-reader), the last one possibly shorter. A morsel holds whole row groups because
-a reader cannot start inside one without decoding the rows before it.
+reader); the last morsel of each split may be shorter. A morsel holds whole row
+groups because a reader cannot start inside one without decoding the rows
+before it.
 
 The lanes of one scan in one graph put their morsels into a shared queue while
 the graph is built. A lane takes the next morsel whenever it has read the last
