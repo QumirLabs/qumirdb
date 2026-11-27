@@ -1042,11 +1042,7 @@ TEST(SchedulerThreaded, RunsThatWaitForEachOtherGetTheirOwnThreads) {
         std::string error;
         EXPECT_TRUE(scheduler->Wait(&error)) << error;
     }
-    // The threads over the idle cap exit after Wait, so wait for them.
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (pool.Threads() > 2 && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::yield();
-    }
+    // A thread over the idle cap leaves the pool in the step that ends its run.
     EXPECT_EQ(pool.Threads(), 2u);
 }
 

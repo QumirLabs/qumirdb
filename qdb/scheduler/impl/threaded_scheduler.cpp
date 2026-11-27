@@ -37,6 +37,7 @@ TThreadedScheduler::TThreadedScheduler(
 TThreadedScheduler::~TThreadedScheduler()
 {
     // After Wait the pool may be gone already: the graph cleaner frees schedulers late.
+    // So only a scheduler that was never waited for touches the pool here.
     if (HasRun_ && !Waited_) {
         Cancel();
         Wait();
