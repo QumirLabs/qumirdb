@@ -1,5 +1,8 @@
 sort [id asc]
-└─ project (id) (rows≈3 cost≈4.3K)
-   └─ join left_semi [t.id = s.k] residual (== (% |s.v| 2) (% |t.a| 2)) (rows≈3 cost≈4.3K)
-      ├─ source t AS t (rows≈6 cost≈48)
-      └─ source s AS s (rows≈7 cost≈56)
+└─ project (id) (rows≈6 cost≈4.5K)
+   └─ project (t.id) (rows≈6 cost≈4.5K)
+      └─ join left_semi [t.id = s.k, __join_expr_0__ = __join_expr_1__] (rows≈6 cost≈4.5K)
+         ├─ project (t.id, __join_expr_0__) (rows≈6 cost≈96)
+         │  └─ source t AS t (rows≈6 cost≈48)
+         └─ project (s.k, __join_expr_1__) (rows≈7 cost≈112)
+            └─ source s AS s (rows≈7 cost≈56)

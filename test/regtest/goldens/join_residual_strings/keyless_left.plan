@@ -1,4 +1,5 @@
-project (k, k2) (rows≈12 cost≈5.1K)
-└─ join left residual (== (call strcat |sa.s| (cast "x" <named StringView>)) |sb.s|) (rows≈12 cost≈4.9K)
-   ├─ source sa AS sa (rows≈4 cost≈96)
+project (k, k2) (rows≈4 cost≈4.8K)
+└─ join left [__join_expr_0__ = sb.s] (rows≈4 cost≈4.8K)
+   ├─ project (sa.k, __join_expr_0__) (rows≈4 cost≈192)
+   │  └─ source sa AS sa (rows≈4 cost≈96)
    └─ source sb AS sb (rows≈6 cost≈144)

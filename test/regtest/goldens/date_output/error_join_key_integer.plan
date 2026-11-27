@@ -1,0 +1,2 @@
+Error: join key types incompatible: left 't.d' is DATE, right 'u.id' is INTEGER
+

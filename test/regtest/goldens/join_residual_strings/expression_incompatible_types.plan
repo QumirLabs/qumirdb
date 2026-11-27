@@ -1,0 +1,2 @@
+Error: join key types incompatible: left 'sa.s' is string, right (+ |sb.k| 11) is BIGINT @ Line: 1, Byte: 39, Column: 39
+

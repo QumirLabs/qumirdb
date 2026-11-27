@@ -32,6 +32,9 @@ size_t FlattenedArity(const NQumir::NAst::TTypePtr& type);
 // Number of output columns occupied after flattening a struct-valued projection.
 size_t FlattenedProjectionArity(const TProjectionSpec& projection);
 
+// Projections that pass every column of `schema` through under its own name.
+std::vector<TProjectionSpec> PassThroughProjections(const NQumir::NAst::TStructType& schema);
+
 class TProjectOperator : public IOperator {
 public:
     static constexpr const char* OpId = "project";

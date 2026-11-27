@@ -8,8 +8,9 @@ class TConstFolder;
 
 // Rewrites empty-key inner joins into equi-joins by lifting equalities from the
 // surrounding WHERE/ON predicates into join keys (transitive via equivalence
-// classes). Runs after QualifyColumns and AnnotateTypes. Returns the new root
-// (the top filter may be consumed).
+// classes). An equality of expressions over the two inputs keys columns that a
+// projection below the join computes. Runs after QualifyColumns and
+// AnnotateTypes. Returns the new root (the top filter may be consumed).
 TOperatorPtr ExtractEquiJoins(TOperatorPtr root, TConstFolder& folder);
 
 // Both passes push predicates into UNION ALL branches; `folder` folds a

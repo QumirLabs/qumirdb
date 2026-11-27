@@ -19,6 +19,18 @@ size_t FlattenedArity(const NQumir::NAst::TTypePtr& type) {
     return record ? record->Fields.size() : 1;
 }
 
+std::vector<TProjectionSpec> PassThroughProjections(const NQumir::NAst::TStructType& schema) {
+    std::vector<TProjectionSpec> projections;
+    projections.reserve(schema.Fields.size());
+    for (const auto& [name, _] : schema.Fields) {
+        projections.push_back({
+            .Name = name,
+            .Expression = NQumir::MakeIntrusive<NQumir::NAst::TIdentExpr>(NQumir::TLocation{}, name),
+        });
+    }
+    return projections;
+}
+
 size_t FlattenedProjectionArity(const TProjectionSpec& projection) {
     return projection.Expression
         ? FlattenedArity(projection.Expression->Type)

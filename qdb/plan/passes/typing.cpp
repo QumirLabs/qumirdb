@@ -18,6 +18,7 @@
 #include <qdb/kernel/annotate_type.h>
 
 #include <qumir/error.h>
+#include <qumir/parser/core/printer.h>
 #include <qumir/parser/type.h>
 
 #include <algorithm>
@@ -499,15 +500,7 @@ TOperatorPtr AddCastedKey(
     NQumir::NAst::TTypeFactory& types,
     const TOperatorPtr& input, const std::string& column, const TTypePtr& target, const std::string& alias)
 {
-    auto* schema = static_cast<const TStructType*>(input->OutputColumns());
-    std::vector<TProjectionSpec> projections;
-    projections.reserve(schema->Fields.size() + 1);
-    for (const auto& [name, type] : schema->Fields) {
-        projections.push_back({
-            .Name = name,
-            .Expression = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, name),
-        });
-    }
+    auto projections = PassThroughProjections(*input->OutputColumns());
     projections.push_back({
         .Name = alias,
         .Expression = NQumir::MakeIntrusive<TCastExpr>(NQumir::TLocation{},
@@ -578,6 +571,88 @@ TTypePtr CommonKeyType(NQumir::NAst::TTypeFactory& types, const TTypePtr& left, 
     return MakeDecimalType(types, {integerDigits + scale, scale});
 }
 
+// The expression that computes `column` in the rows of `op`, through the joins, filters
+// and renaming projections that pass it on; null for a column no projection computes.
+TExprPtr DefiningExpression(const TOperatorPtr& op, const std::string& column) {
+    if (auto maybeJoin = TMaybeOp<TJoinOperator>(op)) {
+        auto join = maybeJoin.Cast();
+        return DefiningExpression(ColumnType(join->Left(), column) ? join->Left() : join->Right(), column);
+    }
+    if (auto maybeFilter = TMaybeOp<TFilterOperator>(op)) {
+        return DefiningExpression(maybeFilter.Cast()->Input(), column);
+    }
+    if (auto maybeProject = TMaybeOp<TProjectOperator>(op)) {
+        auto project = maybeProject.Cast();
+        for (const auto& projection : project->Projections()) {
+            if (projection.Name != column) {
+                continue;
+            }
+            if (auto ident = TMaybeNode<TIdentExpr>(projection.Expression)) {
+                return DefiningExpression(project->Input(), ident.Cast()->Name);
+            }
+            return projection.Expression;
+        }
+    }
+    return nullptr;
+}
+
+// The integer that holds the day count of a DATE key or of a TIMESTAMP key, else null.
+// qdb types a TIMESTAMP as its INTEGER day count, so only the cast that computes the
+// key tells it apart from an INTEGER.
+const TIntegerType* DayCount(const TTypePtr& type, const TExprPtr& definition) {
+    if (const auto* storage = DateStorageType(type)) {
+        return storage;
+    }
+    auto cast = TMaybeNode<TCastExpr>(definition);
+    if (!cast) {
+        return nullptr;
+    }
+    auto target = TMaybeType<TNamedType>(UnwrapNullableType(cast.Cast()->Type));
+    auto integer = MaybeIntegerType(type);
+    return target && target.Cast()->Name == "TIMESTAMP" && integer
+        ? integer.Cast()
+        : nullptr;
+}
+
+// A DATE key equals a DATE or a TIMESTAMP, as of that day's midnight in PostgreSQL, so
+// both sides key on the DATE of the wider day count. nullptr when the sides share a type
+// or the other side is neither, as PostgreSQL has no DATE = INTEGER.
+TTypePtr CommonDateKeyType(
+    NQumir::NAst::TTypeFactory& types,
+    const TTypePtr& left, const TExprPtr& leftDefinition,
+    const TTypePtr& right, const TExprPtr& rightDefinition)
+{
+    if (left == right) {
+        return nullptr;
+    }
+    const auto* leftDays = DayCount(left, leftDefinition);
+    const auto* rightDays = DayCount(right, rightDefinition);
+    if (!leftDays || !rightDays) {
+        return nullptr;
+    }
+    return MakeDateType(types, leftDays->BitWidth() >= rightDays->BitWidth() ? leftDays->Width : rightDays->Width);
+}
+
+// Key types without a common type, named as the query writes them: a computed key
+// column has an internal name.
+[[noreturn]] void ThrowIncomparableKeys(
+    const TJoinKey& key,
+    const TExprPtr& leftDefinition, const TTypePtr& leftType,
+    const TExprPtr& rightDefinition, const TTypePtr& rightType)
+{
+    auto side = [](const TExprPtr& definition, const std::string& column, const TTypePtr& type) {
+        return (definition ? NQumir::NAst::NCore::PrintAst(definition) : "'" + column + "'")
+            + " is " + SqlTypeName(type);
+    };
+    const auto message = "join key types incompatible: left " + side(leftDefinition, key.Left, leftType)
+        + ", right " + side(rightDefinition, key.Right, rightType);
+    const auto& located = leftDefinition ? leftDefinition : rightDefinition;
+    if (located) {
+        throw NQumir::TError(located->Location, message);
+    }
+    throw NQumir::TError(message);
+}
+
 // `aliasCounter` spans the whole plan: the types of the joins below are stale
 // until re-annotation, so an alias cannot be checked against their schemas.
 void CoerceJoinKeys(NQumir::NAst::TTypeFactory& types, TOperatorPtr& root, size_t& aliasCounter) {
@@ -591,21 +666,24 @@ void CoerceJoinKeys(NQumir::NAst::TTypeFactory& types, TOperatorPtr& root, size_
     bool coerced = false;
     // A semi or anti join outputs one input as is, so nothing above it drops a key
     // alias added to that input (INTERSECT, EXCEPT); project the original columns back.
-    std::vector<TProjectionSpec> restored;
-    for (const auto& [name, _] : static_cast<const TStructType*>(root->OutputColumns())->Fields) {
-        restored.push_back({
-            .Name = name,
-            .Expression = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, name),
-        });
-    }
+    auto restored = PassThroughProjections(*root->OutputColumns());
     for (auto& key : join.Cast()->MutableKeys()) {
         const auto leftType = ColumnType(join.Cast()->Left(), key.Left);
         const auto rightType = ColumnType(join.Cast()->Right(), key.Right);
         if (!leftType || !rightType) {
             continue;
         }
-        const auto common = CommonKeyType(types, UnwrapNullableType(leftType), UnwrapNullableType(rightType));
+        const auto leftValue = UnwrapNullableType(leftType);
+        const auto rightValue = UnwrapNullableType(rightType);
+        const auto leftDefinition = DefiningExpression(join.Cast()->Left(), key.Left);
+        const auto rightDefinition = DefiningExpression(join.Cast()->Right(), key.Right);
+        const auto common = IsDateType(leftValue) || IsDateType(rightValue)
+            ? CommonDateKeyType(types, leftValue, leftDefinition, rightValue, rightDefinition)
+            : CommonKeyType(types, leftValue, rightValue);
         if (!common) {
+            if (leftValue != rightValue) {
+                ThrowIncomparableKeys(key, leftDefinition, leftValue, rightDefinition, rightValue);
+            }
             continue;
         }
         // A side that already has the common type is left alone; the other side is cast.

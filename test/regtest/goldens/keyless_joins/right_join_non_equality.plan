@@ -1,4 +1,5 @@
-project (id, x) (rows≈6 cost≈4.3K)
-└─ join right residual (== (+ |t.id| 1) |u.x|) (rows≈6 cost≈4.2K)
-   ├─ source t AS t (rows≈4 cost≈32)
+project (id, x) (rows≈3 cost≈4.4K)
+└─ join right [__join_expr_0__ = u.x] (rows≈3 cost≈4.3K)
+   ├─ project (t.id, __join_expr_0__) (rows≈4 cost≈96)
+   │  └─ source t AS t (rows≈4 cost≈32)
    └─ source u AS u (rows≈3 cost≈24)

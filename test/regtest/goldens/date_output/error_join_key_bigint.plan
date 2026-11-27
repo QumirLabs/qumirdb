@@ -1,0 +1,2 @@
+Error: join key types incompatible: left 't.d' is DATE, right (+ (cast |date_values.id| i64) 18262) is BIGINT @ Line: 1, Byte: 45, Column: 45
+
