@@ -189,10 +189,19 @@ TSortPlanData BuildSortPlanData(
     TKernelCompilerOptions options);
 
 // Compiles the window kernel and returns the plan data the task binds it from.
+// rangeEntries adds the entries of the range scheme (wiki Window-parallelism).
 TWindowPlanData BuildWindowPlanData(
     NQumir::NAst::TTypeFactory& types,
     TWindowOperator& window,
     const NQumir::NAst::TTypePtr& inputType,
-    TKernelCompilerOptions options);
+    TKernelCompilerOptions options,
+    bool rangeEntries = false);
+
+// The partitions of a window from the NDVs of its PARTITION BY keys, as
+// EstimateAggregateGroupCount; 1 without PARTITION BY.
+std::optional<uint64_t> EstimateWindowPartitionCount(const TWindowOperator& window);
+
+// Whether the range scheme has carries for every function of the window.
+bool WindowSupportsRanges(const TWindowOperator& window);
 
 } // namespace NQdb

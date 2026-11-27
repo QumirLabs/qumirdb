@@ -356,7 +356,9 @@ public:
             if (childLanes == 0 || window->Partial()) {
                 return childLanes;
             }
-            if (!window->PartitionKeys().empty() && childLanes > 1) {
+            if (childLanes > 1 &&
+                (!window->PartitionKeys().empty() || UsesWindowRanges(*window, childLanes)))
+            {
                 return JoinPartitions(childLanes);
             }
             return 1;
@@ -2568,6 +2570,27 @@ private:
         };
     }
 
+    // Whether a window over childLanes > 1 lanes takes key ranges of its sort
+    // key instead of hash partitions (wiki Window-parallelism): auto does when
+    // its partitions are too few to spread over the tasks, which hashing
+    // balances only when there are many more partitions than tasks.
+    bool UsesWindowRanges(const TWindowOperator& window, size_t childLanes) const {
+        const auto mode = Settings_.Window.RangePartition;
+        if (mode == NScheduler::EWindowRangeMode::Off || !WindowSupportsRanges(window)) {
+            return false;
+        }
+        if (mode == NScheduler::EWindowRangeMode::On) {
+            return true;
+        }
+        const auto& stats = window.Input()->Stats_;
+        if (!stats || stats->RowCount < Settings_.Window.RangeMinRows) {
+            return false;
+        }
+        constexpr uint64_t MinPartitionsPerTask = 16;
+        const auto partitions = EstimateWindowPartitionCount(window);
+        return partitions && *partitions < MinPartitionsPerTask * JoinPartitions(childLanes);
+    }
+
     TLoweredOutput LowerWindow(
         TWindowOperator& window,
         NScheduler::IConnection& outConn,
@@ -2593,6 +2616,9 @@ private:
                 outLaneOffset);
         }
 
+        if (childLanes > 1 && UsesWindowRanges(window, childLanes)) {
+            return LowerWindowRanges(window, childLanes, execStageId, windowGroup, outConn, outLaneOffset);
+        }
         if (childLanes <= 1 || window.PartitionKeys().empty()) {
             return LowerBlocking(
                 window.Input(),
@@ -2650,6 +2676,140 @@ private:
             });
             for (size_t s = 0; s < childLanes; ++s) {
                 Graph_.AddEdge(*shuf.Nodes[s], node, *shuf.Partitions[m], s, 0);
+            }
+            result.Producers.push_back(&node);
+        }
+        return result;
+    }
+
+    // The range scheme (wiki Window-parallelism):
+    //   child[N] -> window-sample[N] -rows-> window-route[N] -> window[P]
+    //   window-sample -sample-> sort[1] -broadcast-> window-route
+    // Each route lane sends range r its rows and then its partial carry.
+    TLoweredOutput LowerWindowRanges(
+        TWindowOperator& window,
+        size_t lanes,
+        TExecStageId execStageId,
+        const std::string& windowGroup,
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset)
+    {
+        const size_t ranges = JoinPartitions(lanes);
+        auto& childConn = AddConn<NScheduler::TOneToOneConnection>(
+            lanes, lanes, "window-sample-input");
+        auto childOut = Lower(window.Input(), childConn);
+        const auto childType = childOut.OutputType;
+
+        TWindowPlanData plan;
+        TSortPlanData samplePlan;
+        {
+            TStageDiagnosticsScope diagnosticsScope(Diagnostics_, windowGroup);
+            plan = BuildWindowPlanData(
+                *Types_, window, childType, KernelOptions(windowGroup, execStageId), true);
+            samplePlan = BuildSortPlanData(
+                *Types_, childType, plan.Keys, "sort", std::nullopt, KernelOptions(windowGroup, execStageId));
+        }
+        const auto outputType = ComputeWindowOutputType(*Types_, childType, window.Functions());
+
+        const auto layouts = RowLayouts(childType);
+        // A carry is one i64: the rows of the range's leading partition before it.
+        const std::vector<TValueLayout> carryLayouts = {{.Width = 8}};
+        auto& rowsConn = AddConn<NScheduler::TOneToOneConnection>(lanes, lanes, "window-sample-rows");
+        auto& sampleConn = AddConn<NScheduler::TGatherConnection>(lanes, 1, "window-sample");
+        auto& splitterConn = AddConn<NScheduler::TBroadcastConnection>(1, lanes, "window-splitters");
+        rowsConn.SetRowLayouts(layouts);
+        sampleConn.SetRowLayouts(layouts);
+        splitterConn.SetRowLayouts(layouts);
+        std::vector<NScheduler::IConnection*> rangeConns;
+        std::vector<NScheduler::IConnection*> carryConns;
+        for (size_t r = 0; r < ranges; ++r) {
+            rangeConns.push_back(&AddConn<NScheduler::TGatherConnection>(lanes, 1, "window-range"));
+            rangeConns.back()->SetRowLayouts(layouts);
+            carryConns.push_back(&AddConn<NScheduler::TGatherConnection>(lanes, 1, "window-range-carry"));
+            carryConns.back()->SetRowLayouts(carryLayouts);
+        }
+
+        // About 64 sampled rows per range keep the largest range close to the mean.
+        constexpr uint64_t SampleRowsPerRange = 64;
+        const uint64_t sampleRows = (SampleRowsPerRange * ranges + lanes - 1) / lanes;
+        const auto sampleGroup = NewTaskGroup();
+        std::vector<NScheduler::TTaskNode*> samples;
+        for (size_t p = 0; p < lanes; ++p) {
+            auto& node = AddNode({
+                .TaskGroupId = sampleGroup,
+                .DebugKind = "window-sample",
+                .DebugLabel = "window-sample",
+                .Body = NScheduler::TWindowSampleNode{
+                    .In = PortSpec(Graph_, &childConn, p),
+                    .Out = {PortSpec(Graph_, &rowsConn, p), PortSpec(Graph_, &sampleConn, p)},
+                    .Kernel = plan.Kernel,
+                    .SampleRows = sampleRows,
+                },
+            });
+            Graph_.AddEdge(*childOut.Producers[p], node, childConn, p, p);
+            samples.push_back(&node);
+        }
+
+        auto& sampleSort = AddNode({
+            .TaskGroupId = NewTaskGroup(),
+            .DebugKind = "window-sample-sort",
+            .DebugLabel = "window-sample-sort",
+            .Body = NScheduler::TSortNode{
+                .In = PortSpec(Graph_, &sampleConn, 0),
+                .Out = PortSpec(Graph_, &splitterConn, 0),
+                .Plan = samplePlan,
+            },
+        });
+        for (size_t p = 0; p < lanes; ++p) {
+            Graph_.AddEdge(*samples[p], sampleSort, sampleConn, p, 0);
+        }
+
+        const auto routeGroup = NewTaskGroup();
+        std::vector<NScheduler::TTaskNode*> routes;
+        for (size_t p = 0; p < lanes; ++p) {
+            std::vector<NScheduler::TPortSpec> outputs;
+            for (auto* conn : rangeConns) {
+                outputs.push_back(PortSpec(Graph_, conn, p));
+            }
+            for (auto* conn : carryConns) {
+                outputs.push_back(PortSpec(Graph_, conn, p));
+            }
+            auto& node = AddNode({
+                .TaskGroupId = routeGroup,
+                .DebugKind = "window-route",
+                .DebugLabel = "window-route",
+                .Body = NScheduler::TWindowRouteNode{
+                    .Left = PortSpec(Graph_, &splitterConn, p),
+                    .Right = PortSpec(Graph_, &rowsConn, p),
+                    .Out = std::move(outputs),
+                    .Kernel = plan.Kernel,
+                },
+            });
+            Graph_.AddEdge(sampleSort, node, splitterConn, 0, p);
+            Graph_.AddEdge(*samples[p], node, rowsConn, p, p);
+            routes.push_back(&node);
+        }
+
+        SetRowType(outConn, outputType);
+        TLoweredOutput result;
+        result.OutputType = outputType;
+        result.Producers.reserve(ranges);
+        for (size_t r = 0; r < ranges; ++r) {
+            auto& node = AddNode({
+                .ExecStageId = execStageId,
+                .TaskGroupId = execStageId,
+                .DebugKind = "window",
+                .DebugLabel = "window",
+                .Body = NScheduler::TWindowRangeNode{
+                    .Left = PortSpec(Graph_, carryConns[r], 0),
+                    .Right = PortSpec(Graph_, rangeConns[r], 0),
+                    .Out = PortSpec(Graph_, &outConn, r + outLaneOffset),
+                    .Plan = plan,
+                },
+            });
+            for (size_t p = 0; p < lanes; ++p) {
+                Graph_.AddEdge(*routes[p], node, *rangeConns[r], p, 0);
+                Graph_.AddEdge(*routes[p], node, *carryConns[r], p, 0);
             }
             result.Producers.push_back(&node);
         }
@@ -3018,6 +3178,7 @@ void PrintGraphDiagnostics(
         << (settings.Aggregate.EnablePartial ? "auto" : "off")
         << " aggregate_table=" << AggregateTableKindName(settings.Aggregate.Table)
         << " cascade_global=" << GlobalCascadeModeName(settings.Aggregate.CascadeGlobal)
+        << " window_range=" << WindowRangeModeName(settings.Window.RangePartition)
         << "\n";
     graph.Print(out);
     out << "=====================================\n";

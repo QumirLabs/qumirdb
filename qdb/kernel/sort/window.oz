@@ -316,7 +316,8 @@
 
   ;; rank() OVER (PARTITION BY optional_i64 ORDER BY fixed-width). Peers with
   ;; the same order key keep the same rank; the next distinct peer gets its
-  ;; 1-based row position inside the partition.
+  ;; 1-based row position inside the partition. rows_before rows of the first
+  ;; partition precede the slice in other ranges (the range scheme's carry).
   (fun window_fill_rank
        ((var store <ptr TRowSet>)
         (var row_ids <ptr i64>)
@@ -324,11 +325,12 @@
         (var n i64)
         (var out_col <ref TColumn>)
         (var out <ref TRowSet>)
-        (var data_owner_idx i64))
+        (var data_owner_idx i64)
+        (var rows_before i64))
     (block
       (var data = (call window_init_i64_output n out_col out data_owner_idx))
-      (var rank = (: 1 i64))
-      (var pos = (: 1 i64))
+      (var rank = (+ rows_before 1))
+      (var pos = (+ rows_before 1))
       (var i = (: 0 i64))
       (while (< i n)
         (block
@@ -350,7 +352,8 @@
           (= i (+ i (: 1 i64)))))))
 
   ;; row_number() OVER (PARTITION BY ... [ORDER BY ...]): the 1-based row
-  ;; position inside the partition; peers get distinct numbers.
+  ;; position inside the partition; peers get distinct numbers. rows_before as
+  ;; in window_fill_rank.
   (fun window_fill_row_number
        ((var store <ptr TRowSet>)
         (var row_ids <ptr i64>)
@@ -358,10 +361,11 @@
         (var n i64)
         (var out_col <ref TColumn>)
         (var out <ref TRowSet>)
-        (var data_owner_idx i64))
+        (var data_owner_idx i64)
+        (var rows_before i64))
     (block
       (var data = (call window_init_i64_output n out_col out data_owner_idx))
-      (var pos = 1)
+      (var pos = (+ rows_before 1))
       (var i = 0)
       (while (< i n)
         (block
@@ -588,4 +592,5 @@
               (= data [j] acc)
               (= j (+ j (: 1 i64)))))
           (= i run_end)))))
+
 )

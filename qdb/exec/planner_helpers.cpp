@@ -827,7 +827,8 @@ TWindowPlanData BuildWindowPlanData(
     NQumir::NAst::TTypeFactory& types,
     TWindowOperator& window,
     const NQumir::NAst::TTypePtr& inputType,
-    TKernelCompilerOptions options)
+    TKernelCompilerOptions options,
+    bool rangeEntries)
 {
     using namespace NQumir::NAst;
     auto* inputStruct = static_cast<const TStructType*>(inputType);
@@ -1003,7 +1004,8 @@ TWindowPlanData BuildWindowPlanData(
     auto* sink = options.Sink;
     const size_t sinkBefore = sink ? sink->size() : 0;
     TKernelCompiler compiler(std::move(options));
-    auto dispatch = compiler.CompileWindow(radixKeys, *inputStruct, partitionRadixKeys, orderRadixKeys, funcs);
+    auto dispatch = compiler.CompileWindow(
+        radixKeys, *inputStruct, partitionRadixKeys, orderRadixKeys, funcs, rangeEntries);
     const uint32_t kernelIndex = dispatch.Kernel;
     auto keyColumns = SortColumnRefs(radixKeys);
     if (sink) {
@@ -1018,6 +1020,36 @@ TWindowPlanData BuildWindowPlanData(
         .KeyColumns = std::move(keyColumns),
         .Kernel = kernelIndex,
     };
+}
+
+std::optional<uint64_t> EstimateWindowPartitionCount(const TWindowOperator& window)
+{
+    const auto inputStats = window.Input()->Stats_;
+    if (!inputStats) {
+        return std::nullopt;
+    }
+    uint64_t partitions = 1;
+    for (const auto& key : window.PartitionKeys()) {
+        auto it = inputStats->ColumnStats.find(key);
+        if (it == inputStats->ColumnStats.end() ||
+            !it->second || !it->second->Ndv || *it->second->Ndv == 0)
+        {
+            return std::nullopt;
+        }
+        const uint64_t ndv = *it->second->Ndv;
+        if (partitions > inputStats->RowCount / ndv) {
+            return inputStats->RowCount;
+        }
+        partitions *= ndv;
+    }
+    return std::min(partitions, std::max<uint64_t>(inputStats->RowCount, 1));
+}
+
+bool WindowSupportsRanges(const TWindowOperator& window)
+{
+    return !window.OrderKeys().empty() && std::ranges::all_of(window.Functions(), [](const TWindowFunc& fn) {
+        return fn.Func == "rank" || fn.Func == "row_number";
+    });
 }
 
 namespace {

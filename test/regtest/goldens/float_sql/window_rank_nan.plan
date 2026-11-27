@@ -1,0 +1,7 @@
+sort [id asc]
+└─ project (id, d, r_desc_nl, r_desc_nf, r_asc_nf, r_asc_nl)
+   └─ window order=[t.d asc nulls-last] fns=[w_3=rank]
+      └─ window order=[t.d asc nulls-first] fns=[w_2=rank]
+         └─ window order=[t.d desc nulls-first] fns=[w_1=rank]
+            └─ window order=[t.d desc nulls-last] fns=[w_0=rank]
+               └─ source t AS t (rows≈10 cost≈120)

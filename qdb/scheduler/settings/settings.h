@@ -227,6 +227,48 @@ struct TAggregateSettings {
     EAggregateTableKind Table = EAggregateTableKind::Auto;
 };
 
+// Lowering of a window: hash partitions by its PARTITION BY keys, or key ranges
+// of its sort key (wiki Window-parallelism).
+enum class EWindowRangeMode {
+    Auto = 0,
+    On = 1,
+    Off = 2,
+};
+
+inline constexpr std::string_view WindowRangeModeNames = "auto, true, false";
+
+inline std::optional<EWindowRangeMode> ParseWindowRangeMode(std::string_view name) {
+    if (name == "auto") {
+        return EWindowRangeMode::Auto;
+    }
+    if (name == "true") {
+        return EWindowRangeMode::On;
+    }
+    if (name == "false") {
+        return EWindowRangeMode::Off;
+    }
+    return std::nullopt;
+}
+
+inline std::string_view WindowRangeModeName(EWindowRangeMode mode) {
+    switch (mode) {
+        case EWindowRangeMode::Auto:
+            return "auto";
+        case EWindowRangeMode::On:
+            return "true";
+        case EWindowRangeMode::Off:
+            return "false";
+    }
+    return "unknown";
+}
+
+struct TWindowSettings {
+    // Auto takes key ranges for an input of at least RangeMinRows estimated
+    // rows whose partitions are too few to spread over the window tasks.
+    EWindowRangeMode RangePartition = EWindowRangeMode::Auto;
+    size_t RangeMinRows = 1024 * 1024;
+};
+
 struct TJitSettings {
     // Persistent cache of compiled kernel dependencies; empty disables it.
     std::string CacheDir;
@@ -252,6 +294,7 @@ struct TSettings {
     THashShuffleSettings HashShuffle;
     TJoinSettings Join;
     TAggregateSettings Aggregate;
+    TWindowSettings Window;
     TJitSettings Jit;
     TKernelSettings Kernel;
     TInstrumentationSettings Instrumentation;

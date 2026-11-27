@@ -80,6 +80,13 @@
     "big_top_i_asc.sql": {"order": "ordered"},
     "big_top_f_desc_offset.sql": {"order": "ordered"},
     "big_top_s_desc_offset.sql": {"order": "ordered"},
-    "big_top_multi_key.sql": {"order": "ordered"}
+    "big_top_multi_key.sql": {"order": "ordered"},
+    "big_window_rank_few_partitions.sql": {"order": "ordered"},
+    "big_window_rank_one_partition.sql": {"order": "ordered"},
+    "big_window_rank_string_key.sql": {"order": "ordered"},
+    "big_window_rank_skew.sql": {"order": "ordered"},
+    "big_window_rank_many_partitions.sql": {"order": "ordered"},
+    "big_window_rank_null_partition.sql": {"order": "ordered"},
+    "big_window_row_number_correlated_limit.sql": {"order": "ordered"}
   }
 }

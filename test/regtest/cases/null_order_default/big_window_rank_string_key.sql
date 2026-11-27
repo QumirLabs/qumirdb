@@ -1,0 +1,1 @@
+SELECT id, rank() OVER (ORDER BY s NULLS FIRST, id DESC) AS r FROM big ORDER BY id;

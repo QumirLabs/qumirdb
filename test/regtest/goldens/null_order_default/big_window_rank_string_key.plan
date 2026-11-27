@@ -1,0 +1,4 @@
+sort [id asc]
+└─ project (id, r)
+   └─ window order=[big.s asc nulls-first, big.id desc] fns=[w_0=rank]
+      └─ source big AS big (rows≈400 cost≈9.6K)

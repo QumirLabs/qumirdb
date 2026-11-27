@@ -13,6 +13,7 @@
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/cte_consumer.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/ops/window.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/plan/plan_print.h>
 #include <qdb/plan/passes/runtime_filters.h>
@@ -28,6 +29,7 @@
 #include <expected>
 #include <functional>
 #include <numeric>
+#include <optional>
 #include <ranges>
 #include <sstream>
 #include <stdexcept>
@@ -800,6 +802,97 @@ TEST(ExecPlanBuilder, WindowGraphRunsFromItsSerializedSpec) {
             EXPECT_EQ(CountNodes<NScheduler::TWindowNode>(spec), 1u);
         });
     EXPECT_GT(rows.size(), 100u);
+}
+
+NScheduler::TSettings WindowRangeSettings(NScheduler::EWindowRangeMode mode)
+{
+    auto settings = MultiSettings();
+    settings.Window.RangePartition = mode;
+    return settings;
+}
+
+TEST(ExecPlanBuilder, RangeWindowGraphRunsFromItsSerializedSpec) {
+    const std::string sql =
+        "SELECT id, rank() OVER (PARTITION BY id % 3 ORDER BY d9 DESC, id) AS r FROM t";
+    auto ranges = ExpectQueryFromSpec(
+        sql, WindowRangeSettings(NScheduler::EWindowRangeMode::On), false,
+        [](const NScheduler::TGraphSpec& spec) {
+            const size_t lanes = CountNodes<NScheduler::TWindowSampleNode>(spec);
+            EXPECT_GT(lanes, 1u);
+            EXPECT_EQ(CountNodes<NScheduler::TWindowRouteNode>(spec), lanes);
+            const size_t windows = CountNodes<NScheduler::TWindowRangeNode>(spec);
+            EXPECT_EQ(windows, 2u);
+            EXPECT_EQ(CountNodes<NScheduler::TWindowNode>(spec), 0u);
+            for (const auto& node : spec.Nodes) {
+                if (const auto* route = std::get_if<NScheduler::TWindowRouteNode>(&node.Body)) {
+                    EXPECT_EQ(route->Out.size(), 2 * windows);
+                }
+            }
+        });
+    auto hash = ExpectQueryFromSpec(
+        sql, WindowRangeSettings(NScheduler::EWindowRangeMode::Off), false,
+        [](const NScheduler::TGraphSpec& spec) {
+            EXPECT_EQ(CountNodes<NScheduler::TWindowSampleNode>(spec), 0u);
+        });
+    std::ranges::sort(ranges);
+    std::ranges::sort(hash);
+    EXPECT_EQ(ranges, hash);
+}
+
+TWindowOperator* FindWindow(const TOperatorPtr& node) {
+    if (auto window = TMaybeOp<TWindowOperator>(node)) {
+        return window.Cast().Get();
+    }
+    for (const auto& child : node->Inputs()) {
+        if (auto* window = FindWindow(child)) {
+            return window;
+        }
+    }
+    return nullptr;
+}
+
+// The route tasks of the window of `sql` under `settings`; `ndv` sets the NDV
+// of every PARTITION BY key in the statistics of the window's input.
+size_t WindowRoutes(
+    const std::string& sql, const NScheduler::TSettings& settings, std::optional<uint64_t> ndv = std::nullopt)
+{
+    auto source = std::make_unique<TParquetFile>(
+        QDB_TEST_DATA_DIR "/regtest/cases/decimal_parquet/tables/decimals.parquet");
+    const std::unordered_map<std::string, ITable*> sources{{"t", source.get()}};
+    auto plan = BuildSqlPlan(sql, sources);
+    auto* window = FindWindow(plan);
+    if (!window || !window->Input()->Stats_) {
+        ADD_FAILURE() << "no window with input statistics in " << sql;
+        return 0;
+    }
+    if (ndv) {
+        auto stats = std::make_shared<TStats>(*window->Input()->Stats_);
+        for (const auto& key : window->PartitionKeys()) {
+            auto column = std::make_shared<TStats::TColumnStats>();
+            column->Ndv = *ndv;
+            stats->ColumnStats[key] = std::move(column);
+        }
+        window->MutableInput()->Stats_ = std::move(stats);
+    }
+    auto lowered = NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), settings, nullptr, TestAnnotation());
+    const auto spec = NScheduler::ExtractLoweredGraphSpec(lowered, nullptr);
+    return spec ? CountNodes<NScheduler::TWindowRouteNode>(*spec) : 0;
+}
+
+TEST(ExecPlanBuilder, WindowRangeAutoRule) {
+    // 256 input rows over four lanes and two window tasks.
+    auto settings = MultiSettings();
+    settings.Window.RangeMinRows = 100;
+    const std::string global = "SELECT id, rank() OVER (ORDER BY d9) AS r FROM t";
+    const std::string partitioned = "SELECT id, rank() OVER (PARTITION BY s ORDER BY d9) AS r FROM t";
+    EXPECT_GT(WindowRoutes(global, settings), 0u);
+    // Fewer than 16 partitions per task take ranges; many or an unknown count keep hashing.
+    EXPECT_GT(WindowRoutes(partitioned, settings, 3), 0u);
+    EXPECT_EQ(WindowRoutes(partitioned, settings, 1000), 0u);
+    EXPECT_EQ(WindowRoutes(partitioned, settings), 0u);
+    settings.Window.RangeMinRows = 1000;
+    EXPECT_EQ(WindowRoutes(global, settings), 0u);
+    EXPECT_EQ(WindowRoutes(partitioned, settings, 3), 0u);
 }
 
 TEST(ExecPlanBuilder, ParallelTopSortLimitGraphRunsFromItsSerializedSpec) {

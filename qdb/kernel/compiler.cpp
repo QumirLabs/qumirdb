@@ -645,7 +645,8 @@ void AppendSortLessBody(
     const std::string& leftRow,
     const std::string& rightColumns,
     const std::string& rightRow,
-    NQumir::NAst::TExprPtr equalResult)
+    NQumir::NAst::TExprPtr equalResult,
+    bool floatTotalOrder = false)
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
@@ -694,6 +695,11 @@ void AppendSortLessBody(
 
         auto leftComparable = ComparableValue(leftValue, i64Type);
         auto rightComparable = ComparableValue(rightValue, i64Type);
+        if (floatTotalOrder && TMaybeType<TFloatType>(UnwrapNamedValueType(leftValue.ValueType))) {
+            // The radix sort's key, with NaN above every number and -0 as +0.
+            leftComparable = Oz::Call("qumir_radix_total_key", {std::move(leftComparable)});
+            rightComparable = Oz::Call("qumir_radix_total_key", {std::move(rightComparable)});
+        }
         builder.Stmt(Oz::If(
             Oz::Bin(TOperator("<"), leftComparable, rightComparable),
             Oz::Block({Oz::Return(BoolConst(types, !key.Desc))})));
@@ -961,7 +967,8 @@ NQumir::NAst::TExprPtr BuildSortMaterializeWrapperAst(
     const std::string& entryName = "sort_materialize_row_ids",
     int64_t extraColumnCount = 0,
     int64_t extraOwnerCount = 0,
-    const TExtraColumnEmitter& emitExtraColumns = {})
+    const TExtraColumnEmitter& emitExtraColumns = {},
+    const std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>>& extraParams = {})
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
@@ -991,7 +998,11 @@ NQumir::NAst::TExprPtr BuildSortMaterializeWrapperAst(
         .Param("store", rowSetPtrType)
         .Param("row_ids", ptrI64Type)
         .Param("start", i64Type)
-        .Param("limit", i64Type)
+        .Param("limit", i64Type);
+    for (const auto& [name, type] : extraParams) {
+        builder.Param(name, type);
+    }
+    builder
         .Param("out_rowset", rowSetRefType)
         .Return(i64Type)
         .Var("n", i64Type)
@@ -1087,6 +1098,25 @@ NQumir::NAst::TExprPtr BuildSortMaterializeWrapperAst(
     return std::move(builder).Build();
 }
 
+// The calls that sort `row_ids` by `keys`, least significant key first.
+std::vector<NQumir::NAst::TExprPtr> BuildRowIdSortStmts(
+    NQumir::NAst::TTypeFactory& types,
+    const std::vector<TSortRadixKeyInput>& keys,
+    bool nullable)
+{
+    namespace Oz = NKernel::NOz;
+    std::vector<NQumir::NAst::TExprPtr> sortStmts;
+    for (size_t k = keys.size(); k > 0; --k) {
+        const size_t keyIdx = k - 1;
+        auto desc = Oz::Index("descs", Int64Literal(types, static_cast<int64_t>(keyIdx)));
+        auto nullsFirst = Oz::Index(
+            "nulls_firsts", Int64Literal(types, static_cast<int64_t>(keyIdx)));
+        sortStmts.push_back(BuildRowIdSortCall(
+            types, keys[keyIdx], nullable, std::move(desc), std::move(nullsFirst), "store"));
+    }
+    return sortStmts;
+}
+
 // Builds a `runName` stage entry (sort ABI): optionally sorts the row-ids by
 // `keys`, then materializes the [start, limit) slice via `materializeEntry`.
 // Shared by sort (sort_materialize_row_ids) and window (window_materialize_row_ids).
@@ -1095,7 +1125,8 @@ NQumir::NAst::TExprPtr BuildSortRunWrapperAst(
     const std::string& runName,
     const std::vector<TSortRadixKeyInput>& keys,
     bool nullable,
-    const std::string& materializeEntry)
+    const std::string& materializeEntry,
+    std::vector<NQumir::NAst::TExprPtr> materializeExtraArgs = {})
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
@@ -1124,24 +1155,60 @@ NQumir::NAst::TExprPtr BuildSortRunWrapperAst(
         .Param("out_rowset", rowSetRefType)
         .Return(i64Type);
 
-    std::vector<TExprPtr> sortStmts;
-    for (size_t k = keys.size(); k > 0; --k) {
-        const size_t keyIdx = k - 1;
-        auto desc = Oz::Index("descs", Int64Literal(types, static_cast<int64_t>(keyIdx)));
-        auto nullsFirst = Oz::Index(
-            "nulls_firsts", Int64Literal(types, static_cast<int64_t>(keyIdx)));
-        sortStmts.push_back(BuildRowIdSortCall(
-            types, keys[keyIdx], nullable, std::move(desc), std::move(nullsFirst), "store"));
-    }
-    builder.Stmt(Oz::If(Oz::Ident("do_sort"), Oz::Block(std::move(sortStmts))));
+    builder.Stmt(Oz::If(Oz::Ident("do_sort"), Oz::Block(BuildRowIdSortStmts(types, keys, nullable))));
     builder.Stmt(Oz::If(
         Oz::Bin(TOperator("<="), Oz::Ident("limit"), Int64Literal(types, 0)),
         Oz::Block({Oz::Return(Int64Literal(types, 0))})));
-    builder.Stmt(Oz::Return(Oz::Call(materializeEntry, {
+    std::vector<TExprPtr> materializeArgs = {
         Oz::Ident("store"),
         Oz::Ident("row_ids"),
         Oz::Ident("start"),
         Oz::Ident("limit"),
+    };
+    for (auto& arg : materializeExtraArgs) {
+        materializeArgs.push_back(std::move(arg));
+    }
+    materializeArgs.push_back(Oz::Ident("out_rowset"));
+    builder.Stmt(Oz::Return(Oz::Call(materializeEntry, std::move(materializeArgs))));
+    return std::move(builder).Build();
+}
+
+// qdb_window_run_carried: the range scheme's window run. Sorts all n row ids,
+// folds the partial carries of the range and materializes every row.
+NQumir::NAst::TExprPtr BuildWindowCarriedRunAst(
+    NQumir::NAst::TTypeFactory& types,
+    const std::vector<TSortRadixKeyInput>& keys,
+    bool nullable)
+{
+    using namespace NQumir::NAst;
+    namespace Oz = NKernel::NOz;
+
+    auto i64Type = types.MakeInteger();
+    auto rowSetPtrType = Ptr(types, QumirDbNamedType(types, "TRowSet"));
+    auto rowSetRefType = types.MakeReference(QumirDbNamedType(types, "TRowSet"));
+
+    Oz::TFunBuilder builder("qdb_window_run_carried");
+    builder
+        .Param("store", rowSetPtrType)
+        .Param("row_ids", Ptr(types, i64Type))
+        .Param("work", Ptr(types, i64Type))
+        .Param("counts", Ptr(types, types.MakeInteger(TIntegerType::U32)))
+        .Param("n", i64Type)
+        .Param("descs", Ptr(types, types.Make<TBoolType>()))
+        .Param("nulls_firsts", Ptr(types, types.Make<TBoolType>()))
+        .Param("carries", rowSetPtrType)
+        .Param("carry_count", i64Type)
+        .Param("out_rowset", rowSetRefType)
+        .Return(i64Type);
+    for (auto& stmt : BuildRowIdSortStmts(types, keys, nullable)) {
+        builder.Stmt(std::move(stmt));
+    }
+    builder.Stmt(Oz::Return(Oz::Call("window_materialize_row_ids", {
+        Oz::Ident("store"),
+        Oz::Ident("row_ids"),
+        Int64Literal(types, 0),
+        Oz::Ident("n"),
+        Oz::Call("window_carry_rows_before", {Oz::Ident("carries"), Oz::Ident("carry_count")}),
         Oz::Ident("out_rowset"),
     })));
     return std::move(builder).Build();
@@ -1215,6 +1282,7 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
                     Oz::Ident("n"),
                     column(static_cast<size_t>(inputColumnCount) + f),
                     Oz::Ident("out_rowset"), Int64Literal(types, dataOwner),
+                    Oz::Ident("rows_before"),
                 }));
             } else if (funcs[f].Func == "avg_partition") {
                 const int64_t maskOwner = ownerIdx++;
@@ -1360,7 +1428,8 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
         "window_materialize_row_ids",
         static_cast<int64_t>(funcs.size()),
         extraOwnerCount,
-        emitWindowColumns);
+        emitWindowColumns,
+        {{"rows_before", types.MakeInteger()}});
 }
 
 NQumir::NAst::TExprPtr BuildWindowKeyComparatorAst(
@@ -1566,25 +1635,28 @@ void AppendJoinKeyDecls(
 
 } // namespace
 
-NQumir::NAst::TExprPtr BuildSortRowIdLessAst(
+namespace {
+
+// `name`(store, left_id, right_id) -> bool: whether the left row comes first by
+// `keys`. Equal keys compare by packed row id when rowIdTieBreak is set, else
+// the left row does not come first. floatTotalOrder compares floats as
+// qumir_radix_total_key orders them.
+NQumir::NAst::TExprPtr BuildRowIdLessAst(
     NQumir::NAst::TTypeFactory& types,
-    const std::vector<TSortRadixKeyInput>& keys)
+    const std::vector<TSortRadixKeyInput>& keys,
+    std::string name,
+    bool rowIdTieBreak,
+    bool floatTotalOrder = false)
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
-
-    if (keys.empty()) {
-        throw NQumir::TError("BuildSortRowIdLessAst: empty key list");
-    }
 
     auto i64Type = types.MakeInteger();
     auto rowSetType = QumirDbNamedType(types, "TRowSet");
     auto rowSetPtrType = Ptr(types, rowSetType);
     auto columnPtrType = Ptr(types, QumirDbNamedType(types, "TColumn"));
 
-    // Overloads heap_less on the store pointer, so the heap items stay bare
-    // packed row ids instead of carrying the store in every element.
-    Oz::TFunBuilder builder("heap_less");
+    Oz::TFunBuilder builder(std::move(name));
     builder
         .Param("store", rowSetPtrType)
         .Param("left_id", i64Type)
@@ -1613,9 +1685,26 @@ NQumir::NAst::TExprPtr BuildSortRowIdLessAst(
         types, builder, keys,
         "left_cols", "left_row",
         "right_cols", "right_row",
-        Oz::Bin(TOperator("<"), Oz::Ident("left_id"), Oz::Ident("right_id")));
+        rowIdTieBreak
+            ? Oz::Bin(TOperator("<"), Oz::Ident("left_id"), Oz::Ident("right_id"))
+            : Oz::Bool(types, false),
+        floatTotalOrder);
 
     return std::move(builder).Build();
+}
+
+} // namespace
+
+NQumir::NAst::TExprPtr BuildSortRowIdLessAst(
+    NQumir::NAst::TTypeFactory& types,
+    const std::vector<TSortRadixKeyInput>& keys)
+{
+    if (keys.empty()) {
+        throw NQumir::TError("BuildSortRowIdLessAst: empty key list");
+    }
+    // Overloads heap_less on the store pointer, so the heap items stay bare
+    // packed row ids instead of carrying the store in every element.
+    return BuildRowIdLessAst(types, keys, "heap_less", true);
 }
 
 NQumir::NAst::TExprPtr BuildHeapTopKProgramAst(
@@ -1651,7 +1740,8 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
     const NQumir::NAst::TStructType& inputType,
     const std::vector<TSortRadixKeyInput>& partitionKeys,
     const std::vector<TSortRadixKeyInput>& orderKeys,
-    const std::vector<TWindowFuncInput>& funcs)
+    const std::vector<TWindowFuncInput>& funcs,
+    bool rangeEntries)
 {
     using namespace NQumir::NAst;
     auto& types = modules.Types();
@@ -1679,6 +1769,12 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
     programStmts.push_back(BuildWindowKeyComparatorAst(
         types, "window_same_order", orderKeys));
     addLibrary("window.oz", true);
+    if (rangeEntries) {
+        // The routing orders rows as the radix sort does, so a range holds
+        // whole peer groups (wiki Window-parallelism).
+        programStmts.push_back(BuildRowIdLessAst(types, keys, "window_key_less", false, true));
+        addLibrary("window_range.oz", true);
+    }
     programStmts.push_back(BuildWindowMaterializeWrapperAst(
         types, inputType, funcs));
     // Nullable keys need the null-aware radix (nulls segregated to FIRST/LAST);
@@ -1687,7 +1783,13 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
     const bool nullable = std::any_of(keys.begin(), keys.end(),
         [](const TSortRadixKeyInput& key) { return IsNullableType(key.Type); });
     programStmts.push_back(BuildSortRunWrapperAst(
-        types, "qdb_window_run", keys, nullable, "window_materialize_row_ids"));
+        types, "qdb_window_run", keys, nullable, "window_materialize_row_ids",
+        {Int64Literal(types, 0)}));
+    if (rangeEntries) {
+        programStmts.push_back(BuildWindowCarriedRunAst(types, keys, nullable));
+        programStmts.push_back(BuildSortMaterializeWrapperAst(
+            types, inputType, "qdb_window_range_gather"));
+    }
     return NQumir::MakeIntrusive<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
 }
 
@@ -1997,7 +2099,8 @@ TKernelCompiler::CompileWindow(
     const NQumir::NAst::TStructType& inputType,
     const std::vector<TSortRadixKeyInput>& partitionKeys,
     const std::vector<TSortRadixKeyInput>& orderKeys,
-    const std::vector<TWindowFuncInput>& funcs)
+    const std::vector<TWindowFuncInput>& funcs,
+    bool rangeEntries)
 {
     using namespace NQumir::NAst;
     if (keys.empty()) {
@@ -2005,12 +2108,22 @@ TKernelCompiler::CompileWindow(
     }
 
     auto program = BuildWindowProgramAst(
-        *Annotation_.Modules, keys, inputType, partitionKeys, orderKeys, funcs);
+        *Annotation_.Modules, keys, inputType, partitionKeys, orderKeys, funcs, rangeEntries);
     PrintKernelAst(Diagnostics_, "window.run.fused", program);
 
+    std::vector<std::string> entries = {"qdb_window_run"};
+    if (rangeEntries) {
+        // In TWindowRangeDispatch order.
+        entries.insert(entries.end(), {
+            "qdb_window_run_carried",
+            "qdb_window_range_route",
+            "qdb_window_range_carries",
+            "qdb_window_range_gather",
+        });
+    }
     auto kernel = EmitKernel(
         "window.run.fused",
-        {"qdb_window_run"},
+        std::move(entries),
         std::move(program));
     FinishKernelDiagnostics(Diagnostics_);
 
@@ -2089,6 +2202,11 @@ TKernelCompiler::TSortRadixCompositeDispatch BindSortRadixComposite(
     return {.Slot = std::move(slot)};
 }
 
+TKernelCompiler::TWindowRangeDispatch BindWindowRange(std::shared_ptr<TKernelSlot> slot)
+{
+    return {.Slot = std::move(slot)};
+}
+
 TKernelCompiler::TTopSortDispatch BindTopSort(std::shared_ptr<TKernelSlot> slot)
 {
     return {.Slot = std::move(slot)};
@@ -2110,6 +2228,43 @@ int64_t TKernelCompiler::TSortRadixCompositeDispatch::operator()(
     return Slot->Call<TSortFn>(0,
         store, rowIds, work, counts, n, descs, nullsFirsts,
         doSort, start, limit, output);
+}
+
+int64_t TKernelCompiler::TWindowRangeDispatch::RunCarried(
+    TRowSet* store, int64_t* rowIds, int64_t* work, uint32_t* counts,
+    int64_t n, bool* descs, bool* nullsFirsts,
+    TRowSet* carries, int64_t carryCount, TRowSet* output) const
+{
+    using TFn = int64_t(*)(
+        TRowSet*, int64_t*, int64_t*, uint32_t*, int64_t, bool*, bool*,
+        TRowSet*, int64_t, TRowSet*);
+    return Slot->Call<TFn>(1,
+        store, rowIds, work, counts, n, descs, nullsFirsts, carries, carryCount, output);
+}
+
+int64_t TKernelCompiler::TWindowRangeDispatch::Route(
+    TRowSet* store, int64_t* splitters, int64_t splitterCount, int64_t batch,
+    int64_t* ranges, int64_t* offsets, int64_t* rowIds, int64_t* tails) const
+{
+    using TFn = int64_t(*)(
+        TRowSet*, int64_t*, int64_t, int64_t, int64_t*, int64_t*, int64_t*, int64_t*);
+    return Slot->Call<TFn>(2,
+        store, splitters, splitterCount, batch, ranges, offsets, rowIds, tails);
+}
+
+int64_t TKernelCompiler::TWindowRangeDispatch::Carries(
+    TRowSet* store, int64_t* splitters, int64_t splitterCount,
+    int64_t* tails, int64_t* carries) const
+{
+    using TFn = int64_t(*)(TRowSet*, int64_t*, int64_t, int64_t*, int64_t*);
+    return Slot->Call<TFn>(3, store, splitters, splitterCount, tails, carries);
+}
+
+int64_t TKernelCompiler::TWindowRangeDispatch::Gather(
+    TRowSet* store, int64_t* rowIds, int64_t start, int64_t limit, TRowSet* output) const
+{
+    using TFn = int64_t(*)(TRowSet*, int64_t*, int64_t, int64_t, TRowSet*);
+    return Slot->Call<TFn>(4, store, rowIds, start, limit, output);
 }
 
 int64_t TKernelCompiler::TTopSortDispatch::operator()(

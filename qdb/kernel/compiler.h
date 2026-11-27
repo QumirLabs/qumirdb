@@ -175,7 +175,8 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
     const NQumir::NAst::TStructType& inputType,
     const std::vector<TSortRadixKeyInput>& partitionKeys,
     const std::vector<TSortRadixKeyInput>& orderKeys,
-    const std::vector<TWindowFuncInput>& funcs);
+    const std::vector<TWindowFuncInput>& funcs,
+    bool rangeEntries = false);
 
 // agg_dispatch(ref HashTable ht, ref TRowSet batch, i64 arg, i64 op) -> i64,
 // with op an EAggregateKernelOp. `ht` must point to a caller-owned,
@@ -511,6 +512,33 @@ public:
 
     using TSortRadixCompositeNullableDispatch = TSortRadixCompositeDispatch;
 
+    // The range-scheme entries of a window program (wiki Window-parallelism).
+    struct TWindowRangeDispatch {
+        // Sorts all n row ids, folds the range's partial carries, materializes.
+        int64_t RunCarried(
+            TRowSet* store, int64_t* rowIds, int64_t* work, uint32_t* counts,
+            int64_t n, bool* descs, bool* nullsFirsts,
+            TRowSet* carries, int64_t carryCount, TRowSet* output) const;
+        // Groups the rows of store[batch] by range (qdb_window_range_route).
+        int64_t Route(
+            TRowSet* store, int64_t* splitters, int64_t splitterCount, int64_t batch,
+            int64_t* ranges, int64_t* offsets, int64_t* rowIds, int64_t* tails) const;
+        // A lane's partial carries from its tail counts.
+        int64_t Carries(
+            TRowSet* store, int64_t* splitters, int64_t splitterCount,
+            int64_t* tails, int64_t* carries) const;
+        // Materializes the input columns of rowIds[start, start + limit).
+        int64_t Gather(
+            TRowSet* store, int64_t* rowIds, int64_t start, int64_t limit, TRowSet* output) const;
+
+        explicit operator bool() const
+        {
+            return Slot != nullptr;
+        }
+
+        std::shared_ptr<TKernelSlot> Slot;
+    };
+
     struct TTopSortDispatch {
         int64_t operator()(
             TRowSet* state, TRowSet* batch, int64_t* rowIds, int64_t* work,
@@ -594,12 +622,14 @@ public:
     // Window kernel (entry qdb_window_run, reuses the sort dispatch ABI): sorts
     // by `keys` (partition ++ order), then materializes input columns followed
     // by one column per window function.
+    // With rangeEntries the program also has the TWindowRangeDispatch entries.
     TSortRadixCompositeDispatch CompileWindow(
         const std::vector<TSortRadixKeyInput>& keys,
         const NQumir::NAst::TStructType& inputType,
         const std::vector<TSortRadixKeyInput>& partitionKeys,
         const std::vector<TSortRadixKeyInput>& orderKeys,
-        const std::vector<TWindowFuncInput>& funcs);
+        const std::vector<TWindowFuncInput>& funcs,
+        bool rangeEntries = false);
 
     // Compiles the per-query generic update and finalize programs for `aggs`
     // grouped by `groupKeys`, over rows of `inputType`.
@@ -696,6 +726,9 @@ TKernelCompiler::TAggregateHashDispatch BindAggregateHash(
 // functions end with these calls. BindSortRadixComposite also binds the
 // nullable sort and the window kernel.
 TKernelCompiler::TSortRadixCompositeDispatch BindSortRadixComposite(
+    std::shared_ptr<TKernelSlot> slot);
+
+TKernelCompiler::TWindowRangeDispatch BindWindowRange(
     std::shared_ptr<TKernelSlot> slot);
 
 TKernelCompiler::TTopSortDispatch BindTopSort(
