@@ -22,6 +22,8 @@
     "join_key_max_date.sql": {"order": "unordered"},
     "join_key_max_date_timestamp.sql": {"order": "unordered"},
     "join_key_date_plus_max.sql": {"order": "unordered"},
-    "join_key_date_timestamp.sql": {"order": "unordered"}
+    "join_key_date_timestamp.sql": {"order": "unordered"},
+    "error_join_key_bigint.sql": {"expect_error": true},
+    "error_join_key_integer.sql": {"expect_error": true}
   }
 }

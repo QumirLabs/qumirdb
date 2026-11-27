@@ -531,25 +531,13 @@ int32_t IntegerDecimalDigits(const TIntegerType& type) {
 
 // Type both join key sides are cast to so that equal values have equal bytes:
 // DOUBLE for a float key against any other number, as PostgreSQL's `=` compares REAL only
-// with REAL; a DATE for a DATE key; the common integer type; or for a decimal key
-// (against a decimal or an integer) the decimal with the larger scale and the larger
-// integer part. nullptr when the sides already share a type or no common key type exists;
-// throws when the common decimal would need more than 38 digits, as a wrapping cast would
-// equate unequal keys.
+// with REAL; the common integer type; or for a decimal key (against a decimal or an
+// integer) the decimal with the larger scale and the larger integer part. nullptr when the
+// sides already share a type or no common key type exists; throws when the common
+// decimal would need more than 38 digits, as a wrapping cast would equate unequal keys.
 TTypePtr CommonKeyType(NQumir::NAst::TTypeFactory& types, const TTypePtr& left, const TTypePtr& right) {
     if (left == right) {
         return nullptr;
-    }
-    auto leftInt = MaybeIntegerType(left);
-    auto rightInt = MaybeIntegerType(right);
-    // PostgreSQL compares a DATE with a TIMESTAMP as that day's midnight, and qdb types
-    // a TIMESTAMP as its day count: both sides key on the day count of the wider integer.
-    if (IsDateType(left) || IsDateType(right)) {
-        if (!leftInt || !rightInt) {
-            return nullptr;
-        }
-        const auto days = UnifyIntegers(types, *leftInt.Cast(), *rightInt.Cast());
-        return days ? MakeDateType(types, MaybeIntegerType(days).Cast()->Width) : nullptr;
     }
     const auto isNumber = [](const TTypePtr& type) {
         return IsIntType(type) || IsFloatType(type) || DecimalSpecOfValueType(type);
@@ -557,6 +545,8 @@ TTypePtr CommonKeyType(NQumir::NAst::TTypeFactory& types, const TTypePtr& left, 
     if ((IsFloatType(left) || IsFloatType(right)) && isNumber(left) && isNumber(right)) {
         return types.MakeFloat(TFloatType::F64);
     }
+    auto leftInt = MaybeIntegerType(left);
+    auto rightInt = MaybeIntegerType(right);
     if (leftInt && rightInt) {
         return UnifyIntegers(types, *leftInt.Cast(), *rightInt.Cast());
     }
@@ -581,38 +571,86 @@ TTypePtr CommonKeyType(NQumir::NAst::TTypeFactory& types, const TTypePtr& left, 
     return MakeDecimalType(types, {integerDigits + scale, scale});
 }
 
-// The expression that the projection right below the join computes key `column`
-// from, or null for a column of the input.
-TExprPtr ComputedKey(const TOperatorPtr& input, const std::string& column) {
-    auto maybeProject = TMaybeOp<TProjectOperator>(input);
-    if (!maybeProject) {
-        return nullptr;
+// The expression that computes `column` in the rows of `op`, through the joins, filters
+// and renaming projections that pass it on; null for a column no projection computes.
+TExprPtr DefiningExpression(const TOperatorPtr& op, const std::string& column) {
+    if (auto maybeJoin = TMaybeOp<TJoinOperator>(op)) {
+        auto join = maybeJoin.Cast();
+        return DefiningExpression(ColumnType(join->Left(), column) ? join->Left() : join->Right(), column);
     }
-    for (const auto& projection : maybeProject.Cast()->Projections()) {
-        if (projection.Name == column) {
-            return TMaybeNode<TIdentExpr>(projection.Expression) ? nullptr : projection.Expression;
+    if (auto maybeFilter = TMaybeOp<TFilterOperator>(op)) {
+        return DefiningExpression(maybeFilter.Cast()->Input(), column);
+    }
+    if (auto maybeProject = TMaybeOp<TProjectOperator>(op)) {
+        auto project = maybeProject.Cast();
+        for (const auto& projection : project->Projections()) {
+            if (projection.Name != column) {
+                continue;
+            }
+            if (auto ident = TMaybeNode<TIdentExpr>(projection.Expression)) {
+                return DefiningExpression(project->Input(), ident.Cast()->Name);
+            }
+            return projection.Expression;
         }
     }
     return nullptr;
 }
 
-// A computed key column has an internal name, so key types without a common type
-// are reported with the expressions of the query. The join kernel reports a pair
-// of plain columns by name.
-void RequireComparableKeys(
-    const TJoinOperator& join, const TJoinKey& key, const TTypePtr& leftType, const TTypePtr& rightType)
-{
-    const auto leftExpr = ComputedKey(join.Left(), key.Left);
-    const auto rightExpr = ComputedKey(join.Right(), key.Right);
-    if ((!leftExpr && !rightExpr) || leftType == rightType) {
-        return;
+// The integer that holds the day count of a DATE key or of a TIMESTAMP key, else null.
+// qdb types a TIMESTAMP as its INTEGER day count, so only the cast that computes the
+// key tells it apart from an INTEGER.
+const TIntegerType* DayCount(const TTypePtr& type, const TExprPtr& definition) {
+    if (const auto* storage = DateStorageType(type)) {
+        return storage;
     }
-    auto side = [](const TExprPtr& expr, const std::string& column, const TTypePtr& type) {
-        return (expr ? NQumir::NAst::NCore::PrintAst(expr) : "'" + column + "'") + " is " + SqlTypeName(type);
+    auto cast = TMaybeNode<TCastExpr>(definition);
+    if (!cast) {
+        return nullptr;
+    }
+    auto target = TMaybeType<TNamedType>(UnwrapNullableType(cast.Cast()->Type));
+    auto integer = MaybeIntegerType(type);
+    return target && target.Cast()->Name == "TIMESTAMP" && integer
+        ? integer.Cast()
+        : nullptr;
+}
+
+// A DATE key equals a DATE or a TIMESTAMP, as of that day's midnight in PostgreSQL, so
+// both sides key on the DATE of the wider day count. nullptr when the sides share a type
+// or the other side is neither, as PostgreSQL has no DATE = INTEGER.
+TTypePtr CommonDateKeyType(
+    NQumir::NAst::TTypeFactory& types,
+    const TTypePtr& left, const TExprPtr& leftDefinition,
+    const TTypePtr& right, const TExprPtr& rightDefinition)
+{
+    if (left == right) {
+        return nullptr;
+    }
+    const auto* leftDays = DayCount(left, leftDefinition);
+    const auto* rightDays = DayCount(right, rightDefinition);
+    if (!leftDays || !rightDays) {
+        return nullptr;
+    }
+    return MakeDateType(types, leftDays->BitWidth() >= rightDays->BitWidth() ? leftDays->Width : rightDays->Width);
+}
+
+// Key types without a common type, named as the query writes them: a computed key
+// column has an internal name.
+[[noreturn]] void ThrowIncomparableKeys(
+    const TJoinKey& key,
+    const TExprPtr& leftDefinition, const TTypePtr& leftType,
+    const TExprPtr& rightDefinition, const TTypePtr& rightType)
+{
+    auto side = [](const TExprPtr& definition, const std::string& column, const TTypePtr& type) {
+        return (definition ? NQumir::NAst::NCore::PrintAst(definition) : "'" + column + "'")
+            + " is " + SqlTypeName(type);
     };
-    throw NQumir::TError((leftExpr ? leftExpr : rightExpr)->Location,
-        "join key types incompatible: left " + side(leftExpr, key.Left, leftType)
-        + ", right " + side(rightExpr, key.Right, rightType));
+    const auto message = "join key types incompatible: left " + side(leftDefinition, key.Left, leftType)
+        + ", right " + side(rightDefinition, key.Right, rightType);
+    const auto& located = leftDefinition ? leftDefinition : rightDefinition;
+    if (located) {
+        throw NQumir::TError(located->Location, message);
+    }
+    throw NQumir::TError(message);
 }
 
 // `aliasCounter` spans the whole plan: the types of the joins below are stale
@@ -635,9 +673,17 @@ void CoerceJoinKeys(NQumir::NAst::TTypeFactory& types, TOperatorPtr& root, size_
         if (!leftType || !rightType) {
             continue;
         }
-        const auto common = CommonKeyType(types, UnwrapNullableType(leftType), UnwrapNullableType(rightType));
+        const auto leftValue = UnwrapNullableType(leftType);
+        const auto rightValue = UnwrapNullableType(rightType);
+        const auto leftDefinition = DefiningExpression(join.Cast()->Left(), key.Left);
+        const auto rightDefinition = DefiningExpression(join.Cast()->Right(), key.Right);
+        const auto common = IsDateType(leftValue) || IsDateType(rightValue)
+            ? CommonDateKeyType(types, leftValue, leftDefinition, rightValue, rightDefinition)
+            : CommonKeyType(types, leftValue, rightValue);
         if (!common) {
-            RequireComparableKeys(*join.Cast(), key, UnwrapNullableType(leftType), UnwrapNullableType(rightType));
+            if (leftValue != rightValue) {
+                ThrowIncomparableKeys(key, leftDefinition, leftValue, rightDefinition, rightValue);
+            }
             continue;
         }
         // A side that already has the common type is left alone; the other side is cast.
