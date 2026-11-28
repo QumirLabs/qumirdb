@@ -67,6 +67,8 @@ struct TQueryState {
     std::unique_ptr<TCsvSink> Sink;
     TQueryTiming Timing;
     TClock::time_point ExecuteStart;
+    // Set by a cancel that comes while the collector gathers the compute actors.
+    bool Cancelled = false;
 };
 
 struct TBaseBehavior {
@@ -100,6 +102,11 @@ struct TBaseBehavior {
 
     void Fail(std::string message, TActorContext::TPtr& ctx) {
         Complete(std::unexpected(NQumir::TError(NQumir::TLocation{}, std::move(message))), ctx);
+    }
+
+    void Cancel(TActorContext::TPtr& ctx) {
+        Logger("Query: cancelled");
+        Fail("query cancelled: nobody waits for the answer", ctx);
     }
 
     void Execute(TExecuteQuery& req, TActorContext::TPtr& ctx) {
@@ -260,7 +267,9 @@ struct TBaseBehavior {
 };
 
 struct TQueryActor : public IBehaviorActor {
-    struct TStartQuery : public TBaseBehavior, public TBehavior<TStartQuery, TExecuteQuery, TSpawnComputeActorResponse> {
+    struct TStartQuery : public TBaseBehavior,
+        public TBehavior<TStartQuery, TExecuteQuery, TSpawnComputeActorResponse, TCancelQuery>
+    {
         TStartQuery(TQueryState* state, IBehaviorActor* parent, std::function<void(const std::string&)> logger)
             : TBaseBehavior(state, parent, logger)
         { }
@@ -280,10 +289,14 @@ struct TQueryActor : public IBehaviorActor {
                 ctx->Self(), std::move(req.ActorIds), count)));
             Parent->Become(&static_cast<TQueryActor*>(Parent)->WaitComputeActors);
         }
+
+        void Receive(TCancelQuery&&, TBlob, TActorContext::TPtr ctx) {
+            Cancel(ctx);
+        }
     };
 
     struct TWaitComputeActors : public TBaseBehavior,
-        public TBehavior<TWaitComputeActors, TSpawnComputeActorResponse>
+        public TBehavior<TWaitComputeActors, TSpawnComputeActorResponse, TCancelQuery>
     {
         TWaitComputeActors(TQueryState* state, IBehaviorActor* parent, std::function<void(const std::string&)> logger)
             : TBaseBehavior(state, parent, logger)
@@ -297,15 +310,25 @@ struct TQueryActor : public IBehaviorActor {
                 Complete(std::unexpected(NQumir::TError(response.Error)), ctx, true);
                 return;
             }
+            if (State->Cancelled) {
+                State->ComputeActors = std::move(response.ActorIds);
+                Cancel(ctx);
+                return;
+            }
             if (StartGraph(response.ActorIds, ctx)) {
                 Parent->Become(&static_cast<TQueryActor*>(Parent)->MonitorQuery);
             }
+        }
+
+        // Stopping now would leave the actors of the replies still on their way.
+        void Receive(TCancelQuery&&, TBlob, TActorContext::TPtr) {
+            State->Cancelled = true;
         }
     };
 
     // Takes the rows of the result sink and confirms them, as a remote source would.
     struct TMonitorQuery : public TBaseBehavior,
-        public TBehavior<TMonitorQuery, TDataChunk, TFinish, TComputeStatus, TComputeError>
+        public TBehavior<TMonitorQuery, TDataChunk, TFinish, TComputeStatus, TComputeError, TCancelQuery>
     {
         TMonitorQuery(TQueryState* state, IBehaviorActor* parent, std::function<void(const std::string&)> logger)
             : TBaseBehavior(state, parent, logger)
@@ -336,6 +359,10 @@ struct TQueryActor : public IBehaviorActor {
 
         void Receive(TComputeError&& error, TBlob, TActorContext::TPtr ctx) {
             Fail(std::move(error.Message), ctx);
+        }
+
+        void Receive(TCancelQuery&&, TBlob, TActorContext::TPtr ctx) {
+            Cancel(ctx);
         }
     };
 

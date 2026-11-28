@@ -8,7 +8,7 @@
 namespace NQdb {
 namespace NRemote {
 
-// Client entry-point
+// Client entry-point: spawns a query actor for each query.
 // `settings` lower the queries.
 NNet::NActors::IActor* CreateGatewayActor(
     TCompilerFactory compilerFactory,

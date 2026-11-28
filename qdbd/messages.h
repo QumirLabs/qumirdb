@@ -189,6 +189,25 @@ struct TTaskGraphMessage {
 // TODO: Fetch is local, do we need a message for it ?
 
 // client-side
+// Client -> gateway: a query actor for one query. The client then sends it
+// TExecuteQuery and, once nobody waits for the answer, TCancelQuery.
+struct TSpawnQueryActor {
+    static constexpr NNet::NActors::TMessageId MessageId = 1002;
+    using LocalMessage = void;
+};
+
+struct TSpawnQueryActorResponse {
+    static constexpr NNet::NActors::TMessageId MessageId = 1003;
+    using LocalMessage = void;
+    NNet::NActors::TActorId ActorId;
+};
+
+// The query stops its compute actors on every node and answers with an error.
+struct TCancelQuery {
+    static constexpr NNet::NActors::TMessageId MessageId = 1004;
+    using LocalMessage = void;
+};
+
 struct TExecuteQuery {
     static constexpr NNet::NActors::TMessageId MessageId = 1000;
     using LocalMessage = void;
@@ -234,6 +253,9 @@ inline void RegisterMessages(TMessagesFactory& factory) {
     factory.template RegisterSerializer<TComputeStatus>();
     factory.template RegisterSerializer<TComputeError>();
     factory.template RegisterSerializer<TTaskGraphMessage>();
+    factory.template RegisterSerializer<TSpawnQueryActor>();
+    factory.template RegisterSerializer<TSpawnQueryActorResponse>();
+    factory.template RegisterSerializer<TCancelQuery>();
     factory.template RegisterSerializer<TExecuteQuery>();
     factory.template RegisterSerializer<TExecuteQueryResponse>();
 }
