@@ -38,6 +38,7 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -264,7 +265,7 @@ std::vector<std::pair<int64_t, int64_t>> RunJoin(TProcessor& processor)
 const std::vector<std::pair<int64_t, int64_t>> ExpectedJoinPairs =
     {{10, 100}, {10, 200}, {30, 100}, {30, 200}};
 
-std::vector<std::shared_ptr<TKernelSlot>> LoadImageSlots(std::vector<TGeneratedKernel>& kernels)
+std::vector<std::shared_ptr<TKernelSlot>> LoadImageSlots(std::vector<TGeneratedKernel>& kernels, bool perf = false)
 {
     NKernel::TQueryModules modules(TestTypes(), TestModuleBase());
     const auto bytes = SerializeKernelImage(CompileKernelImage(kernels, modules));
@@ -272,8 +273,23 @@ std::vector<std::shared_ptr<TKernelSlot>> LoadImageSlots(std::vector<TGeneratedK
     for (const auto& kernel : kernels) {
         slots.push_back(kernel.Slot);
     }
-    LoadKernelImage(DeserializeKernelImage(bytes), slots);
+    LoadKernelImage(DeserializeKernelImage(bytes), slots, perf);
     return slots;
+}
+
+// The jitdumps of this process mapped as markers for perf record.
+std::set<std::string> MappedJitdumps()
+{
+    const auto dump = "/jit-" + std::to_string(::getpid()) + ".dump";
+    std::set<std::string> paths;
+    std::ifstream maps("/proc/self/maps");
+    std::string line;
+    while (std::getline(maps, line)) {
+        if (line.find(dump) != std::string::npos) {
+            paths.insert(line.substr(line.find('/')));
+        }
+    }
+    return paths;
 }
 
 std::pair<std::vector<uint64_t>, std::vector<uint64_t>> RunJoinHash(const TJoinHashKernels& hash)
@@ -545,19 +561,28 @@ TEST(KernelImage, DefaultLinkWritesNoPerfJitdump)
 #ifndef __linux__
     GTEST_SKIP() << "the perf JIT plugin exists only on Linux";
 #endif
-    std::vector<TGeneratedKernel> kernels;
-    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Sink = &kernels, .BindNow = false});
-    auto aggregate = compiler.CompileAggregate(AggregateSpec());
-    const auto slots = LoadImageSlots(kernels);
-    EXPECT_EQ(RunAggregate(std::move(aggregate)), ExpectedSums);
-
-    const auto dump = "/jit-" + std::to_string(::getpid()) + ".dump";
-    std::ifstream maps("/proc/self/maps");
-    ASSERT_TRUE(maps);
-    std::string line;
-    while (std::getline(maps, line)) {
-        EXPECT_EQ(line.find(dump), std::string::npos) << line;
+    auto link = [](bool perf) {
+        std::vector<TGeneratedKernel> kernels;
+        TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Sink = &kernels, .BindNow = false});
+        auto aggregate = compiler.CompileAggregate(AggregateSpec());
+        auto slots = LoadImageSlots(kernels, perf);
+        EXPECT_EQ(RunAggregate(std::move(aggregate)), ExpectedSums);
+        return slots;
+    };
+    // Control: a requested jitdump is visible. One JIT on one thread does not race (#779).
+    const auto dumpDir = std::filesystem::temp_directory_path() / ("qdb_jitdump_" + std::to_string(::getpid()));
+    ASSERT_EQ(::setenv("JITDUMPDIR", dumpDir.c_str(), 1), 0);
+    {
+        const auto slots = link(true);
+        EXPECT_FALSE(MappedJitdumps().empty());
     }
+    ::unsetenv("JITDUMPDIR");
+
+    const auto before = MappedJitdumps();
+    const auto slots = link(false);
+    EXPECT_EQ(MappedJitdumps(), before);
+    std::error_code ec;
+    std::filesystem::remove_all(dumpDir, ec);
 }
 
 TEST(KernelImage, JoinBindsFromImageSlot)
