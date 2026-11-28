@@ -282,9 +282,12 @@ bool CanPublishRuntimeFilter(const TJoinOperator& join, EJoinFilterSide side) {
             // Only the right input can drop rows of a left outer join.
             return side == EJoinFilterSide::Left;
         case EJoinType::LeftSemi:
-            // Either input can discard keys absent from the other. A residual
-            // requires row marks on the left build side.
-            return !join.Filter();
+            // A residual needs the left row marks rather than a table of right keys.
+            return side == EJoinFilterSide::Left || !join.Filter();
+        case EJoinType::LeftAnti:
+            // This path already builds the left input to evaluate the residual.
+            // A right row with no left key cannot mark any left row.
+            return side == EJoinFilterSide::Left && join.Filter();
         default:
             return false;
     }

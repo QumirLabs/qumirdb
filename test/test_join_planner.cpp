@@ -483,46 +483,52 @@ TEST(JoinPlanner, RuntimeFilterRejectsRowsWithOneLanePerSide) {
     }
 }
 
-TEST(JoinPlanner, LeftBuildSemiRuntimeFilterKeepsDuplicateMatches) {
-    std::vector<int64_t> lk = {1, 2, 1, 1}, lv = {10, 20, 30, 40};
-    std::vector<int64_t> rk = {1, 1, 3, 2}, rv = {100, 101, 300, 200};
-    std::vector<TColumn> lcols, rcols;
-    uint8_t validity = 0b0111;
-    auto leftBatch = KeyValBatch(lk.data(), lv.data(), 4, lcols);
-    auto rightBatch = KeyValBatch(rk.data(), rv.data(), 4, rcols);
-    lcols[0].Mask = &validity;
-    rcols[0].Mask = &validity;
-    const auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
-    const std::vector<TTypePtr> types = {MakeNullableType(TestTypes(), i64), i64};
-    TMockSource left({"lk", "lv"}, {leftBatch}, types);
-    TMockSource right({"rk", "rv"}, {rightBatch}, types);
-    auto bindings = std::make_shared<TCountingFilterBindingFactory>();
-    NScheduler::TSettings settings;
-    settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
-    settings.Scheduler.WorkerCount = 2;
-    settings.Queue.RowsetCapacityPerLane = 1;
-    settings.HashShuffle.PartitionCount = 2;
+TEST(JoinPlanner, LeftBuildRuntimeFilterPreservesSemiAndAntiMatches) {
+    for (const auto& [clauses, expected] : {
+             std::pair{"(left_semi)", std::vector<int64_t>{10, 30}},
+             std::pair{"(left_semi) (residual (< lv rv))", std::vector<int64_t>{10}},
+             std::pair{"(left_anti) (residual (< lv rv))", std::vector<int64_t>{20, 30, 40}}}) {
+        SCOPED_TRACE(clauses);
+        std::vector<int64_t> lk = {1, 2, 1, 1}, lv = {10, 20, 30, 40};
+        std::vector<int64_t> rk = {1, 1, 3, 2}, rv = {25, 25, 300, 200};
+        std::vector<TColumn> lcols, rcols;
+        uint8_t validity = 0b0111;
+        auto leftBatch = KeyValBatch(lk.data(), lv.data(), 4, lcols);
+        auto rightBatch = KeyValBatch(rk.data(), rv.data(), 4, rcols);
+        lcols[0].Mask = &validity;
+        rcols[0].Mask = &validity;
+        const auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+        const std::vector<TTypePtr> types = {MakeNullableType(TestTypes(), i64), i64};
+        TMockSource left({"lk", "lv"}, {leftBatch}, types);
+        TMockSource right({"rk", "rv"}, {rightBatch}, types);
+        auto bindings = std::make_shared<TCountingFilterBindingFactory>();
+        NScheduler::TSettings settings;
+        settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
+        settings.Scheduler.WorkerCount = 2;
+        settings.Queue.RowsetCapacityPerLane = 1;
+        settings.HashShuffle.PartitionCount = 2;
 
-    auto plan = PlanJoin(
-        "(rel join (rel source \"L\") (rel source \"R\") "
-        "((lk rk)) (left_semi) (emit-filter 7 left))",
-        left, right, settings, bindings);
+        auto plan = PlanJoin(
+            "(rel join (rel source \"L\") (rel source \"R\") ((lk rk)) "
+                + std::string(clauses) + " (emit-filter 7 left))",
+            left, right, settings, bindings);
 
-    std::vector<int64_t> values;
-    TRowSet out{};
-    while (plan->Next(out)) {
-        for (int64_t row = 0; row < out.RowCount; ++row) {
-            if (!out.Selection || out.Selection[row]) {
-                values.push_back(reinterpret_cast<const int64_t*>(out.Columns[1].Data)[row]);
+        std::vector<int64_t> values;
+        TRowSet out{};
+        while (plan->Next(out)) {
+            for (int64_t row = 0; row < out.RowCount; ++row) {
+                if (!out.Selection || out.Selection[row]) {
+                    values.push_back(reinterpret_cast<const int64_t*>(out.Columns[1].Data)[row]);
+                }
             }
+            Release(&out);
         }
-        Release(&out);
+        std::sort(values.begin(), values.end());
+        EXPECT_EQ(values, expected);
+        ASSERT_TRUE(bindings->Filter);
+        EXPECT_EQ(bindings->Filter->StatsSnapshot().ProbeRows, 4u);
+        EXPECT_GE(bindings->Filter->StatsSnapshot().RejectedRows, 1u);
     }
-    std::sort(values.begin(), values.end());
-    EXPECT_EQ(values, (std::vector<int64_t>{10, 30}));
-    ASSERT_TRUE(bindings->Filter);
-    EXPECT_EQ(bindings->Filter->StatsSnapshot().ProbeRows, 4u);
-    EXPECT_GE(bindings->Filter->StatsSnapshot().RejectedRows, 1u);
 }
 
 TEST(JoinPlanner, LeftOuterRuntimeFilterPreservesUnmatchedRows) {

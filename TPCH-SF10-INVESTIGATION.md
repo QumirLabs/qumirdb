@@ -157,3 +157,56 @@ existing result expectation. Browser plan-export integration passed.
 The browser SQL suite passed 797 cases and failed the Rust external-module
 case, which also fails on the baseline because the local toolchain is
 missing the standard-library sources needed to build that fixture.
+
+## Follow-up: publish from the left build of residual joins
+
+Q21 has a semi join and an anti join with a supplier inequality as their
+residual. They already build the left side, which keeps the individual rows
+and marks those with an accepted match. A right row whose order key is
+absent from the left cannot set a mark in either join. The runtime filter
+pass can now publish those left keys for both joins and filter their right
+inputs before repartitioning. The residual still decides which pairs match.
+
+This was the only changed optimized plan among the 22 TPC-H queries. The
+two right exchanges fell from **59.99 million and 37.93 million** rows to
+**3.52 million and 2.45 million**. Their combined logical payload fell from
+783.3 MB to 47.8 MB. The baseline includes the Q4 improvement. The same
+build configuration, SQL, 12 workers, CSV sink and JIT cache were used in
+both binaries. After one warmup per binary, the order alternated within
+each pair. All pairs returned identical CSV.
+
+| Pair | Baseline execution (s) | Left filters execution (s) |
+| --- | ---: | ---: |
+| 1 | 1.927 | 1.442 |
+| 2 | 1.951 | 1.414 |
+| 3 | 2.065 | 1.506 |
+| 4 | 2.023 | 1.422 |
+| 5 | 1.796 | 1.386 |
+| 6 | 1.972 | 1.838 |
+| 7 | 1.945 | 1.630 |
+| **Median** | **1.951** | **1.442** |
+
+Q21 execution dropped by **26%**. Median execution CPU time fell from
+21.518 s to 16.048 s. The paired timings and separate operator profiles are
+under `build/tpch-q21-runtime-filters/`.
+
+The native suite changed three expected plans (TPC-H Q21 and TPC-DS Q16
+and Q94). Those tests passed after updating only the plan goldens. The
+focused join tests cover residual rejection, nullable keys and duplicate
+matches. Browser plan-export integration and the selected browser
+semi-join regressions passed.
+
+## Experiment: always honor the selection in computed projections
+
+A native prototype passed the input mask to the existing projection kernel
+on every call. In five paired trials on the same setup, Q6 went from 0.530 s
+to 0.427 s median. On Q1, where about 98% of rows pass the filter, the median
+rose from 1.199 s to 1.301 s. The other controls were Q12 (0.878 to 0.842 s),
+Q14 (0.479 to 0.484 s), and Q19 (1.472 to 1.393 s). All pairs returned the
+same CSV. The prototype was reverted. The raw trials are under
+`build/tpch-project-selection/`.
+
+An adaptive version could keep the dense loop for nearly full batches and
+use the mask for sparse ones. Q6 also still decodes all its projected
+Parquet columns and allocates output for the full batch. Avoiding either
+of those costs is separate from skipping arithmetic on rejected rows.

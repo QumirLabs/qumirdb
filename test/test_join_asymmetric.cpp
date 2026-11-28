@@ -877,17 +877,30 @@ TEST(AttachRuntimeFilters, EquiSemiPublishesFromEitherSide) {
         (std::vector<std::string>{"rk"}));
 }
 
-TEST(AttachRuntimeFilters, SkipsResidualSemi) {
-    auto join = JoinOfType(EJoinType::LeftSemi);
-    ASSERT_TRUE(join);
-    auto* j = static_cast<TJoinOperator*>(join.Get());
-    j->Left()->Stats_ = RowsWithKeyNdv(400000, "lk", 400000);
-    j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 10000);
-    j->MutableFilter() = NQumir::MakeIntrusive<TBinaryExpr>(
-        NQumir::TLocation{}, TOperator("!="),
-        NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "lv"),
-        NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "rv"));
-    EXPECT_FALSE(AttachTo(join).has_value());
+TEST(AttachRuntimeFilters, ResidualSemiAndAntiPublishOnlyFromLeft) {
+    for (auto type : {EJoinType::LeftSemi, EJoinType::LeftAnti}) {
+        SCOPED_TRACE(JoinTypeName(type));
+        auto join = JoinOfType(type);
+        ASSERT_TRUE(join);
+        auto* j = static_cast<TJoinOperator*>(join.Get());
+        j->MutableFilter() = NQumir::MakeIntrusive<TBinaryExpr>(
+            NQumir::TLocation{}, TOperator("!="),
+            NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "lv"),
+            NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "rv"));
+
+        j->Left()->Stats_ = RowsWithKeyNdv(400000, "lk", 400000);
+        j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 10000);
+        EXPECT_FALSE(AttachTo(join).has_value());
+
+        j->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 10000);
+        j->Right()->Stats_ = RowsWithKeyNdv(400000, "rk", 400000);
+        const auto emitted = AttachTo(join);
+        ASSERT_TRUE(emitted.has_value());
+        EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Left);
+        EXPECT_TRUE(j->Left()->RuntimeFilterUses.empty());
+        ASSERT_EQ(j->Right()->RuntimeFilterUses.size(), 1u);
+        EXPECT_EQ(j->Right()->RuntimeFilterUses[0].Id, emitted->Id);
+    }
 }
 
 TEST(AttachRuntimeFilters, IdsComeFromTheCallersAllocator) {

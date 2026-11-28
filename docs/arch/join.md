@@ -175,9 +175,11 @@ Semi and anti joins have the same three options: build the right input, build
 the left one, or run symmetric. Lowering builds the input estimated
 `JoinAsymmetryRatio` (10) times smaller, as for an inner join, and runs the
 symmetric path otherwise or without estimates. A residual requires the left
-build side. An equi-semi join can publish a runtime filter from either input.
-The producer becomes the build side. When it is the left input, the filter
-removes right rows that cannot mark any left row as matched.
+build side. A semi join without a residual can publish a runtime filter from
+either input, making its producer the build side. A semi or anti join with a
+residual can publish from its left build side. The filter removes right rows
+whose keys cannot mark any left row. A key match still has to pass the
+residual before the join marks the left row.
 
 ## Execution by join type
 
