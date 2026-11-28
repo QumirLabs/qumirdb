@@ -68,14 +68,20 @@ struct TActorsCollector : public IBehaviorActor,
             .Error = std::move(error),
         });
         Actors.clear();
+        if (AllReplied()) {
+            Leave(ctx);
+        } else {
+            // The missing replies still bring actors, and only this collector can stop them.
+            Deadline = Clock->CurrentTime() + CollectorDrainTimeout;
+        }
+    }
+
+    void Leave(TActorContext::TPtr& ctx) {
         ctx->Cancel(CheckEvent);
         ctx->Send<TPoison>(ctx->Self(), TPoison{});
     }
 
     void Receive(TSpawnComputeActorResponse&& response, TBlob, TActorContext::TPtr ctx) {
-        if (Completed) {
-            return;
-        }
         auto found = std::find_if(Placements.begin(), Placements.end(), [&](const auto& placement) {
             return placement.Scheduler == ctx->Sender();
         });
@@ -93,7 +99,13 @@ struct TActorsCollector : public IBehaviorActor,
                 Actors.push_back(actor);
             }
         }
-        if (Clock->CurrentTime() >= Deadline) {
+        if (Completed) {
+            // The query has its answer, so nobody else knows these actors.
+            StopActors(ctx);
+            if (AllReplied()) {
+                Leave(ctx);
+            }
+        } else if (Clock->CurrentTime() >= Deadline) {
             Complete("compute actor allocation timed out", ctx);
         } else if (!response.Error.empty()) {
             Complete(std::move(response.Error), ctx);
@@ -109,14 +121,14 @@ struct TActorsCollector : public IBehaviorActor,
     }
 
     void Receive(TWakeUp&&, TBlob, TActorContext::TPtr ctx) {
-        if (Completed) {
-            return;
-        }
         if (Clock->CurrentTime() >= Deadline) {
+            if (Completed) {
+                Leave(ctx);
+                return;
+            }
             Complete("compute actor allocation timed out", ctx);
-        } else {
-            ScheduleCheck(ctx);
         }
+        ScheduleCheck(ctx);
     }
 
     void AfterRegister(TActorContext::TPtr ctx) override {
