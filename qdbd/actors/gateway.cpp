@@ -14,7 +14,7 @@ using namespace NNet::NActors;
 namespace {
 
 struct TGatewayActor : public IBehaviorActor {
-    struct TDefaultBehavior : public TBehavior<TDefaultBehavior, TExecuteQuery> {
+    struct TDefaultBehavior : public TBehavior<TDefaultBehavior, TSpawnQueryActor> {
         TDefaultBehavior(
             TCompilerFactory compilerFactory,
             NScheduler::TSettings settings,
@@ -24,11 +24,11 @@ struct TGatewayActor : public IBehaviorActor {
             , Logger(logger)
         { }
 
-        void Receive(TExecuteQuery&& req, TBlob, TActorContext::TPtr ctx) {
+        void Receive(TSpawnQueryActor&&, TBlob, TActorContext::TPtr ctx) {
             auto* queryActor = CreateQueryActor(CompilerFactory, Settings, Logger);
             auto queryActorId = ctx->Register(std::unique_ptr<IActor>(queryActor));
             Logger("Gateway: got request");
-            ctx->Forward<TExecuteQuery>(queryActorId, std::move(req));
+            ctx->Send<TSpawnQueryActorResponse>(ctx->Sender(), TSpawnQueryActorResponse{.ActorId = queryActorId});
         }
 
         void HandleUnknownMessage(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx) {

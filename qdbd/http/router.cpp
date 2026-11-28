@@ -10,6 +10,7 @@
 #include <charconv>
 #include <optional>
 #include <string_view>
+#include <system_error>
 
 using namespace NNet;
 using namespace NNet::NActors;
@@ -76,10 +77,14 @@ struct TRouter final : public IRouter {
                 }
             }
 
-            auto res = co_await ActorSystem->Ask<TExecuteQueryResponse>(GatewayId, TExecuteQuery {
+            const auto query = (co_await ActorSystem->Ask<TSpawnQueryActorResponse>(
+                GatewayId, TSpawnQueryActor{})).ActorId;
+            auto reply = ActorSystem->Ask<TExecuteQueryResponse>(query, TExecuteQuery {
                 .Query = std::move(body),
                 .PlanWidth = planWidth,
             });
+            const auto cancel = CancelOnHangUp(request, query);
+            auto res = co_await reply;
 
             if (res.Response) {
                 if (res.Timing) {
@@ -98,6 +103,17 @@ struct TRouter final : public IRouter {
         }
 
         co_await SendText(response, "Not Found", "text/plain; charset=utf-8", 404);
+    }
+
+    // A client that hangs up cancels its query, whose answer then ends the request. A poller
+    // without hang-up reports (select, uring) lets the query run to its end.
+    TFuture<void> CancelOnHangUp(TRequest& request, TActorId query) {
+        try {
+            co_await request.WaitHangUp();
+        } catch (const std::system_error&) {
+            co_return;
+        }
+        ActorSystem->Send<TCancelQuery>(TActorId{}, query, TCancelQuery{});
     }
 
     TFuture<void> SendText(

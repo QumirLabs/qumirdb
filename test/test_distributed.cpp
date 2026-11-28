@@ -5,6 +5,7 @@
 #include <qdbd/actors.h>
 #include <qdbd/actors/compute.h>
 #include <qdbd/actors/collector.h>
+#include <qdbd/actors/gateway.h>
 #include <qdbd/actors/runtime_resources.h>
 #include <qdbd/actors/query.h>
 #include <qdbd/actors/local_scheduler.h>
@@ -46,6 +47,7 @@
 #include <atomic>
 #include <bit>
 #include <chrono>
+#include <coroutine>
 #include <cstring>
 #include <deque>
 #include <expected>
@@ -782,6 +784,7 @@ private:
 
 enum class EReply { Result, QueryError, Unavailable };
 
+// Plays the gateway and the query actor it spawns.
 class TQueryReplyProbe : public IActor {
 public:
     explicit TQueryReplyProbe(EReply mode)
@@ -789,6 +792,10 @@ public:
     {}
 
     void Receive(TMessageId messageId, TBlob, TActorContext::TPtr ctx) override {
+        if (messageId == TSpawnQueryActor::MessageId) {
+            ctx->Send<TSpawnQueryActorResponse>(ctx->Sender(), TSpawnQueryActorResponse{.ActorId = ctx->Self()});
+            return;
+        }
         ASSERT_EQ(messageId, TExecuteQuery::MessageId);
         TExecuteQueryResponse response{
             .Response = Mode_ != EReply::Result
@@ -1922,7 +1929,7 @@ TEST(DistributedHttp, QueryResultAndErrorKeepTheirStatusCodes) {
 
 namespace {
 
-// Plays the gateway: keeps the plan width of the query it gets and answers.
+// Plays the gateway and its query actor: keeps the plan width of the query it gets and answers.
 class TPlanWidthProbe : public IActor {
 public:
     explicit TPlanWidthProbe(std::vector<std::optional<size_t>>& widths)
@@ -1930,6 +1937,10 @@ public:
     {}
 
     void Receive(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx) override {
+        if (messageId == TSpawnQueryActor::MessageId) {
+            ctx->Send<TSpawnQueryActorResponse>(ctx->Sender(), TSpawnQueryActorResponse{.ActorId = ctx->Self()});
+            return;
+        }
         ASSERT_EQ(messageId, TExecuteQuery::MessageId);
         Widths_.push_back(DeserializeNear<TExecuteQuery>(blob).PlanWidth);
         ctx->Send<TExecuteQueryResponse>(ctx->Sender(), TExecuteQueryResponse{.Response = "ok"});
@@ -4383,6 +4394,236 @@ TEST(DistributedScheduler, QueryActorsShareTheWorkerThreadsOfEachNode) {
     const auto answer = cluster.Run(compiler, sql, std::nullopt, log);
     ASSERT_TRUE(answer);
     EXPECT_EQ(cluster.WorkerThreads(), threads);
+}
+
+namespace {
+
+// 256^5 joined rows: the query runs far longer than a test.
+constexpr const char* EndlessCrossJoinSql = "SELECT sum(a.id + b.id + c.id + d.id + e.id) AS total FROM t a, t b, t c, t d, t e";
+
+// Plays the client of a query actor: keeps every answer.
+class TAnswersProbe : public IActor {
+public:
+    explicit TAnswersProbe(std::vector<TExecuteQueryResponse>& answers)
+        : Answers_(answers)
+    {}
+
+    void Receive(TMessageId messageId, TBlob blob, TActorContext::TPtr) override {
+        ASSERT_EQ(messageId, TExecuteQueryResponse::MessageId);
+        Answers_.push_back(DeserializeNear<TExecuteQueryResponse>(blob));
+    }
+
+private:
+    std::vector<TExecuteQueryResponse>& Answers_;
+};
+
+// What a request waits on for its client to hang up; resuming Waiter hangs up.
+struct THangUp {
+    std::coroutine_handle<> Waiter;
+
+    bool await_ready() const noexcept
+    {
+        return false;
+    }
+
+    void await_suspend(std::coroutine_handle<> waiter) noexcept
+    {
+        Waiter = waiter;
+    }
+
+    void await_resume() const noexcept
+    {
+    }
+};
+
+} // namespace
+
+// A client that hangs up while its query runs cancels it: the compute actors of both
+// nodes stop, and their workers are back in the pools for the next query.
+TEST(DistributedScheduler, QueryActorStopsEveryNodeWhenItsClientHangsUp) {
+    TQueryCluster cluster;
+    ASSERT_NO_FATAL_FAILURE(cluster.Start());
+    TDecimalsCompiler compiler;
+    std::vector<std::string> log;
+    auto& follower = cluster.Cluster.Follower;
+    const auto gateway = follower.Register(std::unique_ptr<IActor>(CreateGatewayActor(
+        [&] { return compiler.MakeQueryCompiler(); }, cluster.Settings,
+        [&](const std::string& line) { log.push_back(line); })));
+    const auto followerActors = follower.ActorsSize();
+    auto router = NHttp::CreateRouter(&follower, gateway);
+    const std::string sql = EndlessCrossJoinSql;
+    std::string_view body = sql;
+    THangUp hangUp;
+    NNet::TRequest request("POST /api/run HTTP/1.1\r\nContent-Length: " + std::to_string(sql.size()) + "\r\n\r\n",
+        [&body](char* buffer, size_t size) -> NNet::TFuture<ssize_t> {
+            const auto copied = std::min(size, body.size());
+            std::memcpy(buffer, body.data(), copied);
+            body.remove_prefix(copied);
+            co_return static_cast<ssize_t>(copied);
+        },
+        {},
+        [&hangUp]() -> NNet::TFuture<void> {
+            co_await hangUp;
+        });
+    std::string output;
+    NNet::TResponse response([&](const void* data, size_t size) -> NNet::TFuture<ssize_t> {
+        output.append(static_cast<const char*>(data), size);
+        co_return size;
+    });
+    auto handled = router->HandleRequest(request, response);
+    const auto started = [&] {
+        return std::ranges::contains(log, std::string("Query: started 2 fragments"));
+    };
+    // The deadlines only guard against a hang.
+    auto deadline = NNet::TClock::now() + std::chrono::seconds(60);
+    while (!started() && !handled.done() && NNet::TClock::now() < deadline) {
+        cluster.Cluster.Pump();
+    }
+    ASSERT_TRUE(started());
+    ASSERT_FALSE(handled.done());
+    ASSERT_TRUE(hangUp.Waiter);
+    std::exchange(hangUp.Waiter, {}).resume();
+    deadline = NNet::TClock::now() + std::chrono::seconds(60);
+    while (!handled.done() && NNet::TClock::now() < deadline) {
+        cluster.Cluster.Pump();
+    }
+    ASSERT_TRUE(handled.done());
+    ASSERT_NO_THROW(handled.await_resume());
+    EXPECT_EQ(response.StatusCode(), 400);
+    EXPECT_NE(output.find("query cancelled"), std::string::npos);
+    EXPECT_TRUE(std::ranges::contains(log, std::string("Query: cancelled")));
+    // Over sockets the stops take a few steps.
+    deadline = NNet::TClock::now() + std::chrono::seconds(10);
+    do {
+        cluster.Cluster.Pump();
+    } while ((cluster.Cluster.Leader.ActorsSize() != cluster.LeaderActors || follower.ActorsSize() != followerActors)
+        && NNet::TClock::now() < deadline);
+    EXPECT_EQ(cluster.Cluster.Leader.ActorsSize(), cluster.LeaderActors);
+    EXPECT_EQ(follower.ActorsSize(), followerActors);
+    for (const auto& resources : cluster.Resources) {
+        EXPECT_EQ(resources->UsedSlots.load(), 0u);
+    }
+    const std::string next = "SELECT id, d9 FROM t WHERE id % 3 <> 0 ORDER BY id DESC LIMIT 10";
+    std::vector<std::string> nextLog;
+    const auto answer = cluster.Run(compiler, next, std::nullopt, nextLog);
+    ASSERT_TRUE(answer);
+    ASSERT_TRUE(answer->Response) << answer->Response.error().ToString();
+    EXPECT_EQ(*answer->Response, RunLocally(next, cluster.Settings));
+    EXPECT_EQ(cluster.WorkerThreads(), std::vector<size_t>(2, cluster.Settings.Scheduler.WorkerCount));
+}
+
+// A cancel while the collector gathers the compute actors waits for its answer and stops
+// the actors it names, so a reply still on its way leaves no actor behind.
+TEST(DistributedScheduler, QueryActorCancelledWhileItGathersComputeActorsStopsThem) {
+    TTestCluster cluster;
+    const auto worker = cluster.AddWorker(true, 10);
+    cluster.Worker(worker).DropReply = true;
+    cluster.Ping(worker);
+    TDecimalsCompiler compiler;
+    NQdb::NScheduler::TSettings settings;
+    std::vector<std::string> log;
+    std::optional<TExecuteQueryResponse> answer;
+    const auto client = cluster.Follower.Register(std::make_unique<TAnswerProbe>(answer));
+    const auto query = cluster.Follower.Register(std::unique_ptr<IActor>(CreateQueryActor(
+        [&] { return compiler.MakeQueryCompiler(); }, settings,
+        [&](const std::string& line) { log.push_back(line); })));
+    cluster.Follower.Send<TExecuteQuery>(client, query, TExecuteQuery{.Query = "SELECT id FROM t"});
+    const auto deadline = NNet::TClock::now() + std::chrono::seconds(10);
+    while (!cluster.Worker(worker).LastResponse && NNet::TClock::now() < deadline) {
+        cluster.Pump();
+    }
+    ASSERT_TRUE(cluster.Worker(worker).LastResponse);
+    cluster.Follower.Send<TCancelQuery>(client, query, TCancelQuery{});
+    cluster.Pump();
+    EXPECT_FALSE(answer);
+    EXPECT_EQ(cluster.Worker(worker).Resources->UsedSlots.load(), 1u);
+    cluster.Reply(worker, *cluster.Worker(worker).LastResponse);
+    cluster.Pump();
+    ASSERT_TRUE(answer);
+    ASSERT_FALSE(answer->Response);
+    EXPECT_NE(answer->Response.error().ToString().find("query cancelled"), std::string::npos);
+    EXPECT_FALSE(std::ranges::contains(log, std::string("Query: started 1 fragments")));
+    EXPECT_EQ(cluster.Worker(worker).Resources->UsedSlots.load(), 0u);
+}
+
+// The end of a query and a cancel in one pass: the query answers once, with its end, and
+// stops the compute actors of both nodes.
+TEST(DistributedScheduler, QueryActorAnswersOnceWhenItsEndMeetsACancel) {
+    TQueryCluster cluster;
+    ASSERT_NO_FATAL_FAILURE(cluster.Start());
+    TDecimalsCompiler compiler;
+    auto& follower = cluster.Cluster.Follower;
+    for (const bool failed : {false, true}) {
+        SCOPED_TRACE(failed ? "compute error" : "finish");
+        std::vector<std::string> log;
+        std::vector<TExecuteQueryResponse> answers;
+        const auto followerActors = follower.ActorsSize();
+        const auto client = follower.Register(std::make_unique<TAnswersProbe>(answers));
+        const auto query = follower.Register(std::unique_ptr<IActor>(CreateQueryActor(
+            [&] { return compiler.MakeQueryCompiler(); }, cluster.Settings,
+            [&](const std::string& line) { log.push_back(line); })));
+        follower.Send<TExecuteQuery>(client, query, TExecuteQuery{.Query = EndlessCrossJoinSql});
+        const auto started = [&] {
+            return std::ranges::contains(log, std::string("Query: started 2 fragments"));
+        };
+        // The deadlines only guard against a hang.
+        auto deadline = NNet::TClock::now() + std::chrono::seconds(60);
+        while (!started() && answers.empty() && NNet::TClock::now() < deadline) {
+            cluster.Cluster.Pump();
+        }
+        ASSERT_TRUE(started());
+        ASSERT_TRUE(answers.empty());
+        // Both wait in the query actor's mailbox until the next pass.
+        if (failed) {
+            follower.Send<TComputeError>(client, query, TComputeError{.Message = "fragment failed"});
+        } else {
+            follower.Send<TFinish>(client, query, TFinish{});
+        }
+        follower.Send<TCancelQuery>(client, query, TCancelQuery{});
+        deadline = NNet::TClock::now() + std::chrono::seconds(10);
+        do {
+            cluster.Cluster.Pump();
+        } while ((cluster.Cluster.Leader.ActorsSize() != cluster.LeaderActors
+                     || follower.ActorsSize() != followerActors + 1)
+            && NNet::TClock::now() < deadline);
+        ASSERT_EQ(answers.size(), 1u);
+        EXPECT_EQ(answers.front().Response.has_value(), !failed);
+        EXPECT_FALSE(std::ranges::contains(log, std::string("Query: cancelled")));
+        EXPECT_EQ(cluster.Cluster.Leader.ActorsSize(), cluster.LeaderActors);
+        EXPECT_EQ(follower.ActorsSize(), followerActors + 1);
+        for (const auto& resources : cluster.Resources) {
+            EXPECT_EQ(resources->UsedSlots.load(), 0u);
+        }
+        follower.Send<TPoison>(client, client, TPoison{});
+        cluster.Cluster.Pump();
+    }
+}
+
+// A cancel queued before the scheduler's answer: the query stops without asking the nodes
+// for compute actors, so none is left behind.
+TEST(DistributedScheduler, QueryActorCancelledBeforeItsPlacementAsksNoNode) {
+    TTestCluster cluster;
+    const auto worker = cluster.AddWorker(true, 10);
+    cluster.Ping(worker);
+    TDecimalsCompiler compiler;
+    NQdb::NScheduler::TSettings settings;
+    std::vector<TExecuteQueryResponse> answers;
+    const auto client = cluster.Follower.Register(std::make_unique<TAnswersProbe>(answers));
+    const auto query = cluster.Follower.Register(std::unique_ptr<IActor>(CreateQueryActor(
+        [&] { return compiler.MakeQueryCompiler(); }, settings, [](const std::string&) {})));
+    // One pass: the query asks the scheduler, then the cancel and an answer naming the worker come.
+    cluster.Follower.Send<TExecuteQuery>(client, query, TExecuteQuery{.Query = "SELECT id FROM t"});
+    cluster.Follower.Send<TCancelQuery>(client, query, TCancelQuery{});
+    cluster.Follower.Send<TSpawnComputeActorResponse>(client, query, TSpawnComputeActorResponse{.ActorIds = {worker}});
+    // A collector would ask the worker within a few steps.
+    for (int i = 0; i < 20; ++i) {
+        cluster.Pump();
+    }
+    ASSERT_EQ(answers.size(), 1u);
+    ASSERT_FALSE(answers.front().Response);
+    EXPECT_NE(answers.front().Response.error().ToString().find("query cancelled"), std::string::npos);
+    EXPECT_FALSE(cluster.Worker(worker).LastRequest);
+    EXPECT_EQ(cluster.Worker(worker).Resources->UsedSlots.load(), 0u);
 }
 
 // Joins whose build lanes and probes the split puts on both nodes: each node's
