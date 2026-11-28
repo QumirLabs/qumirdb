@@ -45,6 +45,7 @@ TEST(EngineSettings, SchemaDefaultsAreTheDefaultsOfTheSettings) {
     EXPECT_EQ(config.GetDouble("late_materialization", "min_savings"), 2.0);
     EXPECT_EQ(config.GetString("io", "arrow_memory_pool"), "auto");
     EXPECT_EQ(config.GetString("jit", "cache_dir"), "");
+    EXPECT_FALSE(config.GetBool("jit", "perf"));
     EXPECT_EQ(config.GetString("kernel", "backend"), "llvm");
     EXPECT_EQ(config.GetString("net", "poller"), "auto");
     EXPECT_EQ(config.GetInt("net", "io_threads"), 0);
@@ -118,6 +119,7 @@ TEST(EngineSettings, OverridesReachTheirFields) {
              "optimizer:cbo=false",
              "optimizer:dump_passes=true",
              "jit:cache_dir=/tmp/jit",
+             "jit:perf=true",
              "kernel:backend=vm",
              "io:arrow_memory_pool=system",
              "transport:outbox_row_sets=3",
@@ -154,6 +156,7 @@ TEST(EngineSettings, OverridesReachTheirFields) {
     EXPECT_FALSE(settings.Optimizer.EnableCbo);
     EXPECT_EQ(settings.Optimizer.DumpPasses, &std::cerr);
     EXPECT_EQ(settings.Scheduler.Jit.CacheDir, "/tmp/jit");
+    EXPECT_TRUE(settings.Scheduler.Jit.Perf);
     EXPECT_EQ(settings.Scheduler.Kernel.Backend, EKernelBackend::Vm);
     EXPECT_EQ(settings.ArrowMemoryPool, EArrowMemoryPool::System);
     EXPECT_EQ(settings.Scheduler.Transport.OutboxRowSets, 3u);

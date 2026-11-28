@@ -22,6 +22,8 @@ struct TRuntimeResources {
     std::shared_ptr<TTableCache> Tables;
     // net:io_threads > 0: the I/O threads serialize the chunks the compute actors send.
     bool SerializeOnIoThreads = false;
+    // jit:perf: the kernel image links write perf jitdump records.
+    bool PerfJit = false;
     // The threads of the compute actors' schedulers, kept between queries. Declared
     // before GraphCleaner, so it is joined after the cleaner's thread (see bin/daemon.cpp).
     NScheduler::TWorkerPool Workers;

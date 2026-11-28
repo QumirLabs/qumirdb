@@ -234,6 +234,9 @@ TEngineConfigBuilder BuildEngineConfig() {
     b.Section("jit");
     b.String("cache_dir", [](auto& s) -> auto& { return s.Scheduler.Jit.CacheDir; },
         "Persistent cache of compiled kernel dependencies; empty disables it.");
+    b.Bool("perf", [](auto& s) -> auto& { return s.Scheduler.Jit.Perf; },
+        "Write perf jitdump records of the linked kernels under ~/.debug/jit, for perf inject --jit "
+        "(Linux only).");
 
     b.Section("kernel");
     b.Enum("backend", KernelBackendNames, ParseKernelBackend,

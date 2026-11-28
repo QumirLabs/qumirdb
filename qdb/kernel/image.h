@@ -37,8 +37,10 @@ TKernelImage CompileKernelImage(
     EKernelBackend backend = EKernelBackend::Llvm,
     const std::string& cacheDir = {});
 
-// Links the image into this process and binds slots[i] to kernel i.
-void LoadKernelImage(const TKernelImage& image, std::span<const std::shared_ptr<TKernelSlot>> slots);
+// Links the image into this process and binds slots[i] to kernel i. perf writes
+// perf jitdump records of the linked code (Linux).
+void LoadKernelImage(
+    const TKernelImage& image, std::span<const std::shared_ptr<TKernelSlot>> slots, bool perf = false);
 
 std::string SerializeKernelImage(const TKernelImage& image);
 // Throws std::runtime_error on truncated input.

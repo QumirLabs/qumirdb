@@ -223,7 +223,7 @@ struct TComputeActor : public IBehaviorActor {
             }
             // An image without kernels has nothing to link.
             if (!slots.empty()) {
-                LoadKernelImage(image, slots);
+                LoadKernelImage(image, slots, Resources->PerfJit);
             }
             // No sink: a compute actor's results leave through its remote sinks.
             graph = NScheduler::MaterializeGraph(

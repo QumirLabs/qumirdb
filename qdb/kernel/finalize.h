@@ -22,13 +22,15 @@ struct TAnnotationContext;
 // the query's context. `types` owns that factory; each bound slot keeps it.
 // Already-bound slots are skipped; a slot bound for the other backend is a
 // logic error. A non-empty cacheDir persists the compiled LLVM dependencies
-// there. Throws on compilation failure.
+// there. perf writes perf jitdump records of the linked code (Linux). Throws on
+// compilation failure.
 void FinalizeKernels(
     std::span<TGeneratedKernel> kernels,
     std::shared_ptr<NQumir::NAst::TTypeFactory> types,
     const NKernel::TAnnotationContext& annotation,
     EKernelBackend backend,
     std::ostream* diagnostics = nullptr,
-    const std::string& cacheDir = {});
+    const std::string& cacheDir = {},
+    bool perf = false);
 
 } // namespace NQdb
