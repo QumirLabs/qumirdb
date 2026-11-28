@@ -538,6 +538,28 @@ TEST(KernelImage, AggregateBindsFromImageSlot)
     EXPECT_EQ(expected, ExpectedSums);
 }
 
+// The perf JIT plugin is opt-in (#779). A perf-enabled link keeps its jitdump
+// mapped, as the marker for perf record, while the linked code is alive.
+TEST(KernelImage, DefaultLinkWritesNoPerfJitdump)
+{
+#ifndef __linux__
+    GTEST_SKIP() << "the perf JIT plugin exists only on Linux";
+#endif
+    std::vector<TGeneratedKernel> kernels;
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Annotation = TestAnnotation(), .Sink = &kernels, .BindNow = false});
+    auto aggregate = compiler.CompileAggregate(AggregateSpec());
+    const auto slots = LoadImageSlots(kernels);
+    EXPECT_EQ(RunAggregate(std::move(aggregate)), ExpectedSums);
+
+    const auto dump = "/jit-" + std::to_string(::getpid()) + ".dump";
+    std::ifstream maps("/proc/self/maps");
+    ASSERT_TRUE(maps);
+    std::string line;
+    while (std::getline(maps, line)) {
+        EXPECT_EQ(line.find(dump), std::string::npos) << line;
+    }
+}
+
 TEST(KernelImage, JoinBindsFromImageSlot)
 {
     TKernelCompiler jit({.Types = SharedTestTypes(), .Annotation = TestAnnotation()});

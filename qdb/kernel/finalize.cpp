@@ -40,7 +40,8 @@ void FinalizeKernels(
     const NKernel::TAnnotationContext& annotation,
     EKernelBackend backend,
     std::ostream* diagnostics,
-    const std::string& cacheDir)
+    const std::string& cacheDir,
+    bool perf)
 {
     const auto& externalCatalog = annotation.ExternalCatalog;
     auto [unique, bindings] = DeduplicateKernels(kernels, [&](const TGeneratedKernel& kernel) {
@@ -106,7 +107,7 @@ void FinalizeKernels(
     auto options = KernelRunnerOptions();
     options.CoreInput = !(externalCatalog && externalCatalog->HasKumirModules());
     options.NativeCode = true;
-    options.EnablePerfJitEventListener = true;
+    options.EnablePerfJitEventListener = perf;
     options.PrintIr = diagnostics != nullptr;
     options.PrintLlvm = diagnostics != nullptr;
     std::unique_ptr<NQumir::NCodeGen::ICodegenBackend> codegen;

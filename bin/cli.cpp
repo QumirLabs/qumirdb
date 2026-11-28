@@ -220,7 +220,7 @@ int ExecutePlan(
     auto llvmStart = std::chrono::steady_clock::now();
     NQdb::FinalizeKernels(
         lowered.Kernels, lowered.Types, lowered.Annotation, backend, diagnostics,
-        config.Engine.Scheduler.Jit.CacheDir);
+        config.Engine.Scheduler.Jit.CacheDir, config.Engine.Scheduler.Jit.Perf);
     auto llvmElapsed = std::chrono::steady_clock::now() - llvmStart;
 
     const auto schema = SchemaFromType(lowered.OutputType);

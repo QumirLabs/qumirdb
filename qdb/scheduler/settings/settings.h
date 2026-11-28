@@ -276,6 +276,8 @@ struct TWindowSettings {
 struct TJitSettings {
     // Persistent cache of compiled kernel dependencies; empty disables it.
     std::string CacheDir;
+    // Write perf jitdump records of the linked kernels (Linux).
+    bool Perf = false;
 };
 
 struct TKernelSettings {

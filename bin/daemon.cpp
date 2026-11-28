@@ -125,6 +125,7 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
     resources->Transport = EngineSettings.Scheduler.Transport;
     resources->Tables = tablesCache;
     resources->SerializeOnIoThreads = EngineSettings.IoThreads > 0;
+    resources->PerfJit = EngineSettings.Scheduler.Jit.Perf;
     // Frees the graphs of finished queries off the actor thread; at most two wait for it.
     resources->GraphCleaner = std::make_shared<NScheduler::TGraphCleaner>(2);
     // At exit the actor system stops the compute actors, whose workers are back in the pool then;

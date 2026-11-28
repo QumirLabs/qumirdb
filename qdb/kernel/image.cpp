@@ -141,7 +141,7 @@ TKernelImage CompileKernelImage(
     return image;
 }
 
-void LoadKernelImage(const TKernelImage& image, std::span<const std::shared_ptr<TKernelSlot>> slots)
+void LoadKernelImage(const TKernelImage& image, std::span<const std::shared_ptr<TKernelSlot>> slots, bool perf)
 {
     // TODO: check that the image was compiled by the same binary and CPU.
     // TODO: check that the slot count matches and the slots are not bound yet;
@@ -152,7 +152,7 @@ void LoadKernelImage(const TKernelImage& image, std::span<const std::shared_ptr<
     for (const auto& kernelNames : image.Entrypoints) {
         names.insert(names.end(), kernelNames.begin(), kernelNames.end());
     }
-    NQumir::NCodeGen::TLlvmRunner linker({.EnablePerfJitEventListener = true});
+    NQumir::NCodeGen::TLlvmRunner linker({.EnablePerfJitEventListener = perf});
     std::string error;
     auto blobs = image.Dependencies;
     blobs.push_back(image.Object);

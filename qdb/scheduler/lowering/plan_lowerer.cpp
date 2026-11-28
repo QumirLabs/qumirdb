@@ -3640,7 +3640,7 @@ bool RunPlanIntoSink(
     }
     FinalizeKernels(
         lowered.Kernels, lowered.Types, lowered.Annotation, settings.Kernel.Backend, diagnostics,
-        settings.Jit.CacheDir);
+        settings.Jit.CacheDir, settings.Jit.Perf);
     lowered.Graph->SetConnectionStatsEnabled(settings.Queue.EnableDebugCounters);
     if (diagnostics) {
         PrintGraphDiagnostics(*diagnostics, *lowered.Graph, settings);
