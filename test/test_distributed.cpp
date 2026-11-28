@@ -1368,7 +1368,7 @@ TEST(DistributedAllocation, FailureStopsAllActorsAlreadyReported) {
     EXPECT_EQ(cluster.Worker(first).Resources->UsedSlots.load(), 0);
 }
 
-TEST(DistributedAllocation, CollectorExitsOnErrorWithoutWaitingForLateReplies) {
+TEST(DistributedAllocation, CollectorAnswersAnErrorAtOnceAndStopsTheActorsOfALateReply) {
     TTestCluster cluster;
     const auto first = cluster.AddWorker(true, 10);
     const auto second = cluster.AddWorker(false, 9);
@@ -1381,11 +1381,31 @@ TEST(DistributedAllocation, CollectorExitsOnErrorWithoutWaitingForLateReplies) {
     ASSERT_EQ(cluster.Responses.size(), 1);
     EXPECT_FALSE(cluster.Responses.back().Error.empty());
     EXPECT_EQ(cluster.Worker(second).Resources->UsedSlots.load(), 1);
-    EXPECT_EQ(cluster.Follower.ActorsSize(), before + 1);
+    EXPECT_EQ(cluster.Follower.ActorsSize(), before + 2);
     cluster.Reply(second, *cluster.Worker(second).LastResponse);
-    EXPECT_EQ(cluster.Worker(second).Resources->UsedSlots.load(), 1);
-    EXPECT_EQ(cluster.Follower.ActorsSize(), before + 1);
+    EXPECT_EQ(cluster.Worker(second).Resources->UsedSlots.load(), 0);
+    EXPECT_EQ(cluster.Follower.ActorsSize(), before);
     EXPECT_EQ(cluster.Responses.size(), 1);
+}
+
+TEST(DistributedAllocation, CollectorStopsTheActorsOfAReplyThatFollowsAnotherNodesError) {
+    TTestCluster cluster;
+    // The error comes from the collector's own node, so it is handled before the remote reply.
+    const auto failing = cluster.AddWorker(false, 9);
+    const auto replying = cluster.AddWorker(true, 10);
+    cluster.Worker(failing).Error = "worker failed";
+    cluster.Ping(failing);
+    cluster.Ping(replying);
+    const auto leaderBefore = cluster.Leader.ActorsSize();
+    const auto followerBefore = cluster.Follower.ActorsSize();
+    cluster.BeginAllocation(2);
+    ASSERT_EQ(cluster.Responses.size(), 1);
+    EXPECT_EQ(cluster.Responses.back().Error, "worker failed");
+    ASSERT_TRUE(cluster.Worker(replying).LastResponse.has_value());
+    EXPECT_EQ(cluster.Worker(replying).LastResponse->ActorIds.size(), 1);
+    EXPECT_EQ(cluster.Worker(replying).Resources->UsedSlots.load(), 0);
+    EXPECT_EQ(cluster.Leader.ActorsSize(), leaderBefore);
+    EXPECT_EQ(cluster.Follower.ActorsSize(), followerBefore);
 }
 
 TEST(DistributedAllocation, DuplicateRepliesDoNotReplaceAMissingNode) {
@@ -1405,7 +1425,7 @@ TEST(DistributedAllocation, DuplicateRepliesDoNotReplaceAMissingNode) {
     EXPECT_EQ(cluster.Responses.back().Error, "compute actor allocation timed out");
     EXPECT_EQ(cluster.Worker(first).Resources->UsedSlots.load(), 0);
     cluster.Reply(second, *cluster.Worker(second).LastResponse);
-    EXPECT_EQ(cluster.Worker(second).Resources->UsedSlots.load(), 1);
+    EXPECT_EQ(cluster.Worker(second).Resources->UsedSlots.load(), 0);
     EXPECT_EQ(cluster.Responses.size(), 1);
 }
 
@@ -1467,7 +1487,7 @@ TEST(DistributedAllocation, CollectorCreatesActorsWithoutSchedulerParticipation)
     EXPECT_EQ(cluster.Requests, (std::vector<TActorId>{first, second}));
 }
 
-TEST(DistributedAllocation, CollectorExitsOnTimeoutWithAMissingReply) {
+TEST(DistributedAllocation, CollectorAnswersATimeoutAtOnceAndStopsTheActorsOfALateReply) {
     TTestCluster cluster;
     const auto first = cluster.AddWorker(true, 10);
     const auto second = cluster.AddWorker(false, 9);
@@ -1482,9 +1502,33 @@ TEST(DistributedAllocation, CollectorExitsOnTimeoutWithAMissingReply) {
     cluster.Wake(collector);
     ASSERT_EQ(cluster.Responses.size(), 1);
     EXPECT_EQ(cluster.Responses.back().Error, "compute actor allocation timed out");
-    EXPECT_EQ(cluster.Follower.ActorsSize(), before + 1);
+    EXPECT_EQ(cluster.Follower.ActorsSize(), before + 2);
     EXPECT_EQ(cluster.Worker(first).Resources->UsedSlots.load(), 0);
     EXPECT_EQ(cluster.Worker(second).Resources->UsedSlots.load(), 1);
+    cluster.Reply(second, *cluster.Worker(second).LastResponse);
+    EXPECT_EQ(cluster.Worker(second).Resources->UsedSlots.load(), 0);
+    EXPECT_EQ(cluster.Follower.ActorsSize(), before);
+    EXPECT_EQ(cluster.Responses.size(), 1);
+}
+
+TEST(DistributedAllocation, CollectorStopsWaitingForALateReplyAfterItsBound) {
+    TTestCluster cluster;
+    const auto first = cluster.AddWorker(true, 10);
+    const auto second = cluster.AddWorker(false, 9);
+    cluster.Worker(first).Error = "worker failed";
+    cluster.Worker(second).DropReply = true;
+    cluster.Ping(first);
+    cluster.Ping(second);
+    const auto collector = cluster.BeginAllocation(2);
+    ASSERT_EQ(cluster.Responses.size(), 1);
+    const auto waiting = cluster.Follower.ActorsSize();
+    cluster.Clock.Now += CollectorDrainTimeout - std::chrono::milliseconds(1);
+    cluster.Wake(collector);
+    EXPECT_EQ(cluster.Follower.ActorsSize(), waiting);
+    cluster.Clock.Now += std::chrono::milliseconds(1);
+    cluster.Wake(collector);
+    EXPECT_EQ(cluster.Follower.ActorsSize(), waiting - 1);
+    EXPECT_EQ(cluster.Responses.size(), 1);
 }
 
 TEST(DistributedAllocation, EmptyAndInvalidPlacementsDoNotCreateActors) {
