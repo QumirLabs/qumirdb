@@ -992,6 +992,49 @@ TEST(ExecPlanBuilder, GroupedAggregateGraphRunsFromItsSerializedSpec) {
     EXPECT_EQ(rows.size(), 1u + 7u);
 }
 
+constexpr std::string_view GroupedLeftJoinInput =
+    " FROM (SELECT id % 8 AS k FROM t) a "
+    "LEFT JOIN (SELECT id % 8 AS k FROM t WHERE id % 2 = 0) b ON a.k = b.k";
+
+TEST(ExecPlanBuilder, GroupedAggregateReusesPreservedJoinPartitions) {
+    auto settings = MultiSettings();
+    settings.Aggregate.PartialMinInputRows = 0;
+    const auto rows = ExpectQueryFromSpec(
+        "SELECT a.k AS k, COUNT(b.k) AS n" + std::string(GroupedLeftJoinInput) + " GROUP BY a.k",
+        settings, false, [](const NScheduler::TGraphSpec& spec) {
+            EXPECT_EQ(CountNodes<NScheduler::THashShuffleNode>(spec), 8u);
+            EXPECT_EQ(CountNodes<NScheduler::TPartialAggregateNode>(spec), 0u);
+            EXPECT_EQ(CountNodes<NScheduler::TAggregateNode>(spec), 2u);
+            size_t inputs = 0;
+            for (const auto& edge : spec.Edges) {
+                if (std::holds_alternative<NScheduler::TAggregateNode>(spec.Nodes[edge.Dst].Body)) {
+                    ASSERT_TRUE(edge.Connection);
+                    EXPECT_EQ(spec.Nodes[edge.Src].DebugKind, "join");
+                    EXPECT_EQ(spec.Connections[*edge.Connection].Kind, NScheduler::EConnectionKind::OneToOne);
+                    EXPECT_EQ(edge.SrcLane, edge.DstLane);
+                    ++inputs;
+                }
+            }
+            EXPECT_EQ(inputs, 2u);
+        });
+    EXPECT_EQ(rows, (std::vector<std::string>{
+        "0,1024", "1,0", "2,1024", "3,0", "4,1024", "5,0", "6,1024", "7,0", "k,n"}));
+}
+
+TEST(ExecPlanBuilder, GroupedAggregateExchangesNullExtendedJoinKeys) {
+    auto settings = MultiSettings();
+    settings.Aggregate.EnablePartial = false;
+    const auto rows = ExpectQueryFromSpec(
+        "SELECT b.k AS k, COUNT(*) AS n" + std::string(GroupedLeftJoinInput) + " GROUP BY b.k",
+        settings, false, [](const NScheduler::TGraphSpec& spec) {
+            // Unmatched left keys from different lanes form one NULL group.
+            EXPECT_EQ(CountNodes<NScheduler::THashShuffleNode>(spec), 10u);
+            EXPECT_EQ(CountNodes<NScheduler::TAggregateNode>(spec), 2u);
+        });
+    EXPECT_EQ(rows, (std::vector<std::string>{
+        "0,1024", "2,1024", "4,1024", "6,1024", "NULL,128", "k,n"}));
+}
+
 // The grouped cascade: a partial aggregate per scan lane, the shuffle, then
 // two final aggregates.
 std::vector<std::string> ExpectPartialAggregateFromSpec(NScheduler::TSettings settings)

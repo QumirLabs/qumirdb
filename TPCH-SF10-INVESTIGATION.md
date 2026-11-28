@@ -210,3 +210,48 @@ An adaptive version could keep the dense loop for nearly full batches and
 use the mask for sparse ones. Q6 also still decodes all its projected
 Parquet columns and allocates output for the full batch. Avoiding either
 of those costs is separate from skipping arithmetic on rejected rows.
+
+## Follow-up: aggregate on the existing join partitions
+
+In Q13 the first aggregate groups by `customer.c_custkey`, the preserved
+key of the preceding left join. All rows in each of those groups are on
+one join lane already. The lowerer now connects each of the six join
+lanes to a complete aggregate with a one-to-one connection. The partial
+aggregate and exchange that sent **10.04 million rows (120.4 MB)** to a
+combine stage are gone. The second aggregate still exchanges the
+1.5 million customer counts by `c_count`.
+
+The proof applies when all the keys used to partition the join on one
+eligible output side are present in the grouping. It holds across
+filters. Grouping by a NULL-extended key can combine rows from several
+lanes, so such a group still needs the exchange.
+[Aggregation lowering](docs/arch/aggregation.md#partial-aggregate-plan)
+
+The baseline includes the Q4 and Q21 improvements. Both binaries used
+the same build configuration, Q13 SQL, 12 workers, CSV sink and JIT
+cache. Each ran one warmup. The order alternated within pairs and
+operator instrumentation ran separately. The CSV matched in every pair.
+
+| Pair | Baseline execution (s) | Aggregate on join partitions (s) |
+| --- | ---: | ---: |
+| 1 | 1.589 | 1.586 |
+| 2 | 1.572 | 1.553 |
+| 3 | 1.395 | 1.377 |
+| 4 | 1.686 | 1.377 |
+| 5 | 1.412 | 1.469 |
+| 6 | 1.717 | 1.706 |
+| 7 | 1.509 | 1.433 |
+| **Median** | **1.572** | **1.469** |
+
+The two execution medians differ by **6.6%**. Execution was faster in
+six of seven pairs, with a median within-pair improvement of **1.2%**.
+Execution CPU time fell from a median of 14.464 s to 13.193 s, with a
+median within-pair improvement of 4.0%. The outer join remains the most
+expensive stage. Individual timings and profiles are under
+`build/tpch-q13-local-aggregate/`.
+
+The graph tests check the direct edge by lane, results with duplicate join
+keys, and a single NULL group when grouping by the null-extended side of a
+left join. Both graphs also run from their serialized specs. The native SQL
+regressions and browser plan-export integration passed. Five distributed
+tests needed a separate run with loopback sockets enabled and passed there.

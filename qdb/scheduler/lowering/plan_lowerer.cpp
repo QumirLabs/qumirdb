@@ -250,6 +250,41 @@ bool CanReuseRuntimeFilterHash(const TOperatorPtr& probe, uint32_t filterId) {
     return true;
 }
 
+bool CanAggregateOnJoinPartitions(const TAggregateOperator& aggregate) {
+    if (aggregate.IsGlobal() || aggregate.GroupKeys().empty() || !aggregate.GroupingSets().empty()) {
+        return false;
+    }
+    auto input = aggregate.Input();
+    while (auto filter = TMaybeOp<TFilterOperator>(input)) {
+        input = filter.Cast()->Input();
+    }
+    auto join = TMaybeOp<TJoinOperator>(input);
+    if (!join || join.Cast()->Keys().empty()) {
+        return false;
+    }
+
+    const auto& groups = aggregate.GroupKeys();
+    auto containsPartitionKeys = [&](auto keyColumn) {
+        return std::ranges::all_of(join.Cast()->Keys(), [&](const std::string& key) {
+            return std::ranges::find(groups, key) != groups.end();
+        }, keyColumn);
+    };
+    // Equal group keys must imply equal partition keys. Null extension can
+    // erase the keys that routed unmatched rows, so only use preserved sides.
+    switch (join.Cast()->JoinType()) {
+        case EJoinType::Inner:
+            return containsPartitionKeys(&TJoinKey::Left) || containsPartitionKeys(&TJoinKey::Right);
+        case EJoinType::Left:
+        case EJoinType::LeftSemi:
+        case EJoinType::LeftAnti:
+            return containsPartitionKeys(&TJoinKey::Left);
+        case EJoinType::Right:
+            return containsPartitionKeys(&TJoinKey::Right);
+        default:
+            return false;
+    }
+}
+
 class TSchedulerGraphLowerer {
 public:
     struct TFilterConsumerTasks {
@@ -336,11 +371,11 @@ public:
             if (childLanes == 0) {
                 return 0;
             }
-            // Grouped aggregate over a parallel input is hash-shuffled by group
-            // key into partition-local aggregates (disjoint groups), so its
-            // output keeps the shuffle partition count. Global aggregates
-            // (`__group__` constant) stay single. Grouping sets shuffle their
-            // partials by (__grouping_id__ + keys), so they too keep the count.
+            if (CanAggregateOnJoinPartitions(*n.Cast())) {
+                return childLanes;
+            }
+            // Grouped aggregates keep their shuffle width. Global aggregates
+            // stay single, except for grouping sets that exchange by set and key.
             if (!n.Cast()->IsGlobal() &&
                 !n.Cast()->GroupKeys().empty() && childLanes > 1)
             {
@@ -1827,6 +1862,23 @@ private:
                 [&, group](const NQumir::NAst::TTypePtr& childType) {
                     return BuildAggregateStage(
                         childType, aggregate, group, execStageId);
+                },
+                outConn,
+                outLaneOffset);
+        }
+
+        if (CanAggregateOnJoinPartitions(aggregate)) {
+            const auto execStageId = NewExecStage(&aggregate, EExecPlanNodeKind::Aggregate);
+            auto group = StageLabel("aggregate", execStageId);
+            return LowerUnary(
+                aggregate.Input(),
+                "aggregate",
+                group,
+                execStageId,
+                [&](const NQumir::NAst::TTypePtr& childType) {
+                    return BuildAggregateStage(
+                        childType, aggregate, group, execStageId,
+                        EstimateAggregateTask(aggregate, childLanes));
                 },
                 outConn,
                 outLaneOffset);

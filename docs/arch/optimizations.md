@@ -715,6 +715,11 @@ join with a residual. Those right rows cannot mark any left row as matched.
 The join still checks key equality and the residual and makes its original
 per-row decision for every left row.
 
+During physical lowering, a grouped aggregate can reuse the join partitions
+if each group is guaranteed to stay on one lane. It then runs one complete
+aggregate per input lane and skips the aggregate exchange.
+See [aggregation.md](aggregation.md#partial-aggregate-plan).
+
 ```
 SELECT big.c, u.d FROM big, u WHERE big.a = u.a;   -- threaded, 4 scan tasks
 

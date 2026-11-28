@@ -322,8 +322,22 @@ also releases initialized state and any pending output.
 
 ## Partial aggregate plan
 
-The threaded scheduler has two plans for a grouped aggregate. The first plan
-sends raw rows to partitions. Each partition then builds complete groups:
+An equi-join already sends rows with the same join key to one lane. A
+following plain grouped aggregate can use those lanes directly if it groups by
+all the partition keys from either side of an inner join, the preserved
+side of a left or right join, or the output side of a semi or anti join.
+A filter between the join and aggregate preserves this guarantee. The
+lowerer connects each join lane to one complete aggregate with a
+one-to-one connection. Each aggregate computes its own table hashes.
+
+Null extension can erase the partition key from unmatched rows. Grouping
+by the right key of a left join can put all unmatched rows in one NULL
+group even though they arrived from several lanes. The planner still
+repartitions in that case, after a full join, and when it cannot prove
+that each group stays on one lane.
+
+When a grouped aggregate needs an exchange, the threaded scheduler can
+send raw rows to partitions. Each partition then builds complete groups:
 
 ```text
 input[N] -> repartition(group keys, N -> P) -> aggregate(single)[P]
