@@ -517,3 +517,156 @@ runs 2 and 3.
 
 ‡ ClickHouse failed q72 with `MEMORY_LIMIT_EXCEEDED` (server limit 5.89 GiB)
 while broadcasting `inventory` under `distributed_product_mode=global`.
+
+## Distributed runs, TPDE (1, 2 and 4 × CCX53)
+
+Runs on 1, 2 and 4 Hetzner CCX53 nodes were made on 2026-11-27 and 2026-11-28
+at scale 100, qdb only. They are separate from the single-machine results above
+and are not included in the benchmark index summary.
+
+### Cluster
+
+- **Hardware:** Hetzner Cloud CCX53 (32 dedicated vCPU, 128 GB RAM), location
+  fsn1, private network between the nodes, image ubuntu-26.04 (kernel
+  7.0.0-44). The same stand ran 4 nodes, then 2 (nodes 3 and 4 removed), then
+  1. The CPU model was not recorded.
+- **Data:** TPC-DS SF100 Parquet with decimals stored as double, a full copy on
+  every node.
+- **qdb:** `qdbd` from master `e559e317`, Debian packages 0.5.1-38 from
+  Actions run 46073444784, flags `--kernel:backend=tpde --net:io_threads=2`
+  (kernels built by TPDE, two network I/O threads). The plan width is
+  nodes × 32. The 1-node runs use the same `qdbd` cluster with one node.
+  Queries are the `benchmark/tpcds` templates; qdb runs the original TPC-DS SQL.
+- **Measurement:** execution time only (`X-Qdb-Execute-Seconds`). Each query
+  is the best of 3 hot runs after 1 cold run; the page cache is dropped on all
+  nodes before the cold run. Planning, kernel build and wall time are
+  excluded. Totals are the sums of the per-query values; the last column is
+  the 1-node time divided by the 4-node time. Ratios use the rounded values
+  shown.
+
+### Scale 100
+
+103 query executions (99 queries; q14, q23, q24 and q39 have two parts, shown
+separately), all completed in all three configurations. The answers were
+compared with an earlier qdb run on the same data (no DuckDB check at scale
+100): all equal, except row order of ties in q31, q65 and q71 and a tie at the
+`LIMIT` boundary in q44. Peak `qdbd` RSS per node: 63.8 GiB on 1 node, 33.6 GiB
+on 2, 19.8 GiB on 4 (all in q78).
+
+| Query | 1 node (s) | 2 nodes (s) | 4 nodes (s) | 1 node ÷ 4 nodes |
+| --- | --- | --- | --- | --- |
+| q01 | 0.383 | 0.641 | 0.553 | 0.69× |
+| q02 | 5.812 | 3.046 | 1.907 | 3.05× |
+| q03 | 0.674 | 0.410 | 0.259 | 2.60× |
+| q04 | 14.062 | 20.001 | 13.514 | 1.04× |
+| q05 | 6.556 | 3.563 | 1.874 | 3.50× |
+| q06 | 0.781 | 0.547 | 0.498 | 1.57× |
+| q07 | 1.519 | 1.063 | 0.840 | 1.81× |
+| q08 | 1.309 | 0.640 | 0.551 | 2.38× |
+| q09 | 13.967 | 7.421 | 3.562 | 3.92× |
+| q10 | 1.177 | 0.762 | 0.554 | 2.12× |
+| q11 | 8.399 | 11.404 | 7.996 | 1.05× |
+| q12 | 0.335 | 0.208 | 0.217 | 1.54× |
+| q13 | 6.215 | 3.735 | 2.291 | 2.71× |
+| q14_1 | 9.967 | 7.521 | 5.718 | 1.74× |
+| q14_2 | 20.177 | 21.256 | 15.707 | 1.28× |
+| q15 | 0.628 | 0.626 | 0.576 | 1.09× |
+| q16 | 1.295 | 1.202 | 0.875 | 1.48× |
+| q17 | 1.411 | 0.906 | 0.553 | 2.55× |
+| q18 | 1.750 | 1.052 | 0.722 | 2.42× |
+| q19 | 1.135 | 0.708 | 0.443 | 2.56× |
+| q20 | 0.406 | 0.239 | 0.187 | 2.17× |
+| q21 | 0.858 | 0.590 | 0.374 | 2.29× |
+| q22 | 7.533 | 3.443 | 1.852 | 4.07× |
+| q23_1 | 18.467 | 15.257 | 11.260 | 1.64× |
+| q23_2 | 18.662 | 15.427 | 11.050 | 1.69× |
+| q24_1 | 1.310 | 1.026 | 0.794 | 1.65× |
+| q24_2 | 1.303 | 0.983 | 0.755 | 1.73× |
+| q25 | 1.633 | 0.901 | 0.587 | 2.78× |
+| q26 | 0.816 | 0.682 | 0.470 | 1.74× |
+| q27 | 1.493 | 1.028 | 0.803 | 1.86× |
+| q28 | 18.764 | 10.051 | 4.820 | 3.89× |
+| q29 | 1.265 | 0.787 | 0.591 | 2.14× |
+| q30 | 0.703 | 0.593 | 0.614 | 1.14× |
+| q31 | 1.746 | 1.160 | 0.874 | 2.00× |
+| q32 | 0.562 | 0.309 | 0.206 | 2.73× |
+| q33 | 1.439 | 0.781 | 0.478 | 3.01× |
+| q34 | 1.384 | 1.018 | 0.807 | 1.71× |
+| q35 | 1.423 | 0.988 | 0.633 | 2.25× |
+| q36 | 1.621 | 1.014 | 0.772 | 2.10× |
+| q37 | 0.718 | 0.425 | 0.310 | 2.32× |
+| q38 | 3.954 | 2.966 | 2.610 | 1.51× |
+| q39_1 | 1.060 | 0.949 | 0.663 | 1.60× |
+| q39_2 | 1.063 | 0.890 | 0.608 | 1.75× |
+| q40 | 2.486 | 2.649 | 1.628 | 1.53× |
+| q41 | 0.486 | 0.501 | 0.530 | 0.92× |
+| q42 | 0.774 | 0.465 | 0.276 | 2.80× |
+| q43 | 1.944 | 1.174 | 0.760 | 2.56× |
+| q44 | 3.195 | 1.623 | 0.844 | 3.79× |
+| q45 | 0.809 | 0.809 | 0.729 | 1.11× |
+| q46 | 2.276 | 1.407 | 0.946 | 2.41× |
+| q47 | 5.435 | 5.622 | 4.049 | 1.34× |
+| q48 | 6.014 | 3.309 | 2.254 | 2.67× |
+| q49 | 2.861 | 1.665 | 0.799 | 3.58× |
+| q50 | 1.002 | 0.666 | 0.486 | 2.06× |
+| q51 | 7.333 | 4.347 | 2.624 | 2.79× |
+| q52 | 0.797 | 0.455 | 0.288 | 2.77× |
+| q53 | 0.921 | 0.570 | 0.385 | 2.39× |
+| q54 | 1.209 | 0.811 | 0.541 | 2.23× |
+| q55 | 0.765 | 0.408 | 0.257 | 2.98× |
+| q56 | 1.371 | 0.711 | 0.415 | 3.30× |
+| q57 | 2.589 | 2.951 | 2.023 | 1.28× |
+| q58 | 1.109 | 0.636 | 0.462 | 2.40× |
+| q59 | 7.866 | 4.178 | 2.239 | 3.51× |
+| q60 | 1.573 | 0.795 | 0.513 | 3.07× |
+| q61 | 1.617 | 0.981 | 0.508 | 3.18× |
+| q62 | 1.062 | 0.923 | 0.768 | 1.38× |
+| q63 | 0.869 | 0.575 | 0.387 | 2.25× |
+| q64 | 9.903 | 13.503 | 9.184 | 1.08× |
+| q65 | 3.736 | 2.758 | 2.083 | 1.79× |
+| q66 | 1.839 | 1.825 | 2.440 | 0.75× |
+| q67‡ | 54.213 | 28.133 | 12.842 | 4.22× |
+| q68 | 2.000 | 1.325 | 0.924 | 2.16× |
+| q69 | 1.066 | 0.801 | 0.502 | 2.12× |
+| q70 | 9.696 | 8.637 | 6.905 | 1.40× |
+| q71 | 1.478 | 0.807 | 0.468 | 3.16× |
+| q72 | 2.918 | 4.721 | 3.327 | 0.88× |
+| q73 | 0.984 | 0.644 | 0.429 | 2.29× |
+| q74 | 5.609 | 8.268 | 5.404 | 1.04× |
+| q75 | 5.568 | 3.404 | 1.946 | 2.86× |
+| q76 | 1.416 | 0.724 | 0.458 | 3.09× |
+| q77 | 1.832 | 0.965 | 0.578 | 3.17× |
+| q78 | 22.721 | 15.257 | 10.197 | 2.23× |
+| q79 | 2.377 | 1.506 | 1.364 | 1.74× |
+| q80 | 10.869 | 12.915 | 7.276 | 1.49× |
+| q81 | 0.756 | 0.736 | 0.764 | 0.99× |
+| q82 | 0.890 | 0.576 | 0.459 | 1.94× |
+| q83 | 0.154 | 0.139 | 0.171 | 0.90× |
+| q84 | 0.508 | 0.571 | 0.593 | 0.86× |
+| q85 | 2.553 | 2.233 | 2.051 | 1.24× |
+| q86 | 0.555 | 0.328 | 0.243 | 2.28× |
+| q87† | 6.030 | 4.028 | 2.903 | 2.08× |
+| q88 | 6.013 | 3.068 | 1.742 | 3.45× |
+| q89 | 1.470 | 0.953 | 0.692 | 2.12× |
+| q90 | 0.338 | 0.163 | 0.120 | 2.82× |
+| q91 | 0.494 | 0.582 | 0.549 | 0.90× |
+| q92 | 0.314 | 0.218 | 0.185 | 1.70× |
+| q93 | 0.846 | 0.540 | 0.406 | 2.08× |
+| q94 | 0.818 | 0.722 | 0.525 | 1.56× |
+| q95 | 17.295 | 12.943 | 9.548 | 1.81× |
+| q96 | 0.634 | 0.375 | 0.247 | 2.57× |
+| q97 | 5.458 | 3.053 | 2.059 | 2.65× |
+| q98 | 1.008 | 0.562 | 0.422 | 2.39× |
+| q99 | 2.126 | 2.366 | 1.464 | 1.45× |
+| **total** | **428.58** | **326.80** | **217.51** | **1.97×** |
+
+† 1 node: the second hot run of q87 failed with a kernel image link error
+(#779); the value is the best of hot runs 1 and 3.
+
+‡ 2 nodes: `qdbd` on node 2 crashed in q67 (#779). q67–q99 were then run again
+on a restarted 2-node cluster; the table takes q01–q66 from the first pass and
+q67–q99 from the second.
+
+On 4 nodes, the first pass after the `qdbd` restart lost a chunk on a stale
+node link in q01 (#707) and was stopped; the table comes from a second pass
+against the same running daemons.

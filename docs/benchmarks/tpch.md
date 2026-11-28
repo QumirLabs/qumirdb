@@ -254,3 +254,63 @@ times.
 RAM). For q9 the cold run passed in 81.2 s and all 3 hot runs failed; q18
 failed in all runs. The totals cover the 20 queries both systems completed;
 qdb over all 22 queries: 166.72 s.
+
+## Distributed runs, TPDE (1, 2 and 4 × CCX53)
+
+Runs on 1, 2 and 4 Hetzner CCX53 nodes were made on 2026-11-27 and 2026-11-28
+at scale 100, qdb only. They are separate from the single-machine results above
+and are not included in the benchmark index summary.
+
+### Cluster
+
+- **Hardware:** Hetzner Cloud CCX53 (32 dedicated vCPU, 128 GB RAM), location
+  fsn1, private network between the nodes, image ubuntu-26.04 (kernel
+  7.0.0-44). The same stand ran 4 nodes, then 2 (nodes 3 and 4 removed), then
+  1. The CPU model was not recorded.
+- **Data:** TPC-H SF100 Parquet with decimals stored as INT64 (the decimal
+  datasets), a full copy on every node.
+- **qdb:** `qdbd` from master `e559e317`, Debian packages 0.5.1-38 from
+  Actions run 46073444784, flags `--kernel:backend=tpde --net:io_threads=2`
+  (kernels built by TPDE, two network I/O threads). The plan width is
+  nodes × 32. The 1-node runs use the same `qdbd` cluster with one node.
+  Queries are the `benchmark/tpch` templates; qdb runs the original TPC-H SQL.
+- **Measurement:** execution time only (`X-Qdb-Execute-Seconds`). Each query
+  is the best of 3 hot runs after 1 cold run; the page cache is dropped on all
+  nodes before the cold run. Planning, kernel build and wall time are
+  excluded. Totals are the sums of the per-query values; the last column is
+  the 1-node time divided by the 4-node time. Ratios use the rounded values
+  shown.
+
+### Scale 100
+
+All 22 queries completed in all three configurations. The answers were
+compared with an earlier qdb run on the same data (no DuckDB check at scale
+100): all equal, except that on 1 and 2 nodes q11 returns ties in a different
+order. Peak `qdbd` RSS per node: 13.3 GiB on 1 node, 11.3 GiB on 2, 10.6 GiB
+on 4.
+
+| Query | 1 node (s) | 2 nodes (s) | 4 nodes (s) | 1 node ÷ 4 nodes |
+| --- | --- | --- | --- | --- |
+| q1 | 10.581 | 5.373 | 2.727 | 3.88× |
+| q2 | 1.166 | 0.859 | 0.681 | 1.71× |
+| q3 | 3.215 | 4.055 | 2.717 | 1.18× |
+| q4 | 2.311 | 1.823 | 1.426 | 1.62× |
+| q5 | 5.668 | 7.808 | 4.755 | 1.19× |
+| q6 | 1.346 | 0.702 | 0.365 | 3.69× |
+| q7 | 3.147 | 1.809 | 1.048 | 3.00× |
+| q8 | 1.979 | 1.314 | 1.028 | 1.93× |
+| q9 | 6.309 | 4.178 | 3.061 | 2.06× |
+| q10 | 3.761 | 5.463 | 4.093 | 0.92× |
+| q11 | 0.508 | 0.374 | 0.262 | 1.94× |
+| q12 | 2.674 | 1.455 | 1.985 | 1.35× |
+| q13 | 8.899 | 4.598 | 2.315 | 3.84× |
+| q14 | 1.280 | 0.887 | 0.476 | 2.69× |
+| q15 | 1.926 | 1.196 | 0.655 | 2.94× |
+| q16 | 1.303 | 1.048 | 0.731 | 1.78× |
+| q17 | 1.746 | 0.952 | 0.616 | 2.83× |
+| q18 | 5.241 | 6.203 | 3.351 | 1.56× |
+| q19 | 5.691 | 3.014 | 1.688 | 3.37× |
+| q20 | 1.376 | 0.817 | 0.663 | 2.08× |
+| q21 | 9.825 | 6.779 | 4.481 | 2.19× |
+| q22 | 1.532 | 1.177 | 1.050 | 1.46× |
+| **total** | **81.48** | **61.88** | **40.18** | **2.03×** |
