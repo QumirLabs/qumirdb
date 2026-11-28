@@ -17,6 +17,7 @@
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/runtime_filters.h>
 #include <qdb/plan/passes/typing.h>
+#include <qdb/plan/types/nullable.h>
 #include <qdb/sexp/parser.h>
 
 #include <algorithm>
@@ -480,6 +481,48 @@ TEST(JoinPlanner, RuntimeFilterRejectsRowsWithOneLanePerSide) {
         EXPECT_EQ(bindings->Filter->StatsSnapshot().RejectedRows, 2u);
         EXPECT_EQ(bindings->Filter->StatsSnapshot().SkippedProbeRows, 0u);
     }
+}
+
+TEST(JoinPlanner, LeftBuildSemiRuntimeFilterKeepsDuplicateMatches) {
+    std::vector<int64_t> lk = {1, 2, 1, 1}, lv = {10, 20, 30, 40};
+    std::vector<int64_t> rk = {1, 1, 3, 2}, rv = {100, 101, 300, 200};
+    std::vector<TColumn> lcols, rcols;
+    uint8_t validity = 0b0111;
+    auto leftBatch = KeyValBatch(lk.data(), lv.data(), 4, lcols);
+    auto rightBatch = KeyValBatch(rk.data(), rv.data(), 4, rcols);
+    lcols[0].Mask = &validity;
+    rcols[0].Mask = &validity;
+    const auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    const std::vector<TTypePtr> types = {MakeNullableType(TestTypes(), i64), i64};
+    TMockSource left({"lk", "lv"}, {leftBatch}, types);
+    TMockSource right({"rk", "rv"}, {rightBatch}, types);
+    auto bindings = std::make_shared<TCountingFilterBindingFactory>();
+    NScheduler::TSettings settings;
+    settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
+    settings.Scheduler.WorkerCount = 2;
+    settings.Queue.RowsetCapacityPerLane = 1;
+    settings.HashShuffle.PartitionCount = 2;
+
+    auto plan = PlanJoin(
+        "(rel join (rel source \"L\") (rel source \"R\") "
+        "((lk rk)) (left_semi) (emit-filter 7 left))",
+        left, right, settings, bindings);
+
+    std::vector<int64_t> values;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        for (int64_t row = 0; row < out.RowCount; ++row) {
+            if (!out.Selection || out.Selection[row]) {
+                values.push_back(reinterpret_cast<const int64_t*>(out.Columns[1].Data)[row]);
+            }
+        }
+        Release(&out);
+    }
+    std::sort(values.begin(), values.end());
+    EXPECT_EQ(values, (std::vector<int64_t>{10, 30}));
+    ASSERT_TRUE(bindings->Filter);
+    EXPECT_EQ(bindings->Filter->StatsSnapshot().ProbeRows, 4u);
+    EXPECT_GE(bindings->Filter->StatsSnapshot().RejectedRows, 1u);
 }
 
 TEST(JoinPlanner, LeftOuterRuntimeFilterPreservesUnmatchedRows) {

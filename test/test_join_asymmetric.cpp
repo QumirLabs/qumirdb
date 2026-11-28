@@ -855,7 +855,7 @@ TEST(AttachRuntimeFilters, FilteredBuildCanCompensateForUnknownNdv) {
     EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Right);
 }
 
-TEST(AttachRuntimeFilters, SemiPublishesOnlyFromTheRight) {
+TEST(AttachRuntimeFilters, EquiSemiPublishesFromEitherSide) {
     auto join = JoinOfType(EJoinType::LeftSemi);
     ASSERT_TRUE(join);
     auto* j = static_cast<TJoinOperator*>(join.Get());
@@ -868,8 +868,19 @@ TEST(AttachRuntimeFilters, SemiPublishesOnlyFromTheRight) {
 
     j->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 10000);
     j->Right()->Stats_ = RowsWithKeyNdv(400000, "rk", 400000);
-    EXPECT_FALSE(AttachTo(join).has_value());
+    emitted = AttachTo(join);
+    ASSERT_TRUE(emitted.has_value());
+    EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Left);
+    EXPECT_TRUE(j->Left()->RuntimeFilterUses.empty());
+    ASSERT_EQ(j->Right()->RuntimeFilterUses.size(), 1u);
+    EXPECT_EQ(j->Right()->RuntimeFilterUses[0].ProbeKeys,
+        (std::vector<std::string>{"rk"}));
+}
 
+TEST(AttachRuntimeFilters, SkipsResidualSemi) {
+    auto join = JoinOfType(EJoinType::LeftSemi);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.Get());
     j->Left()->Stats_ = RowsWithKeyNdv(400000, "lk", 400000);
     j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 10000);
     j->MutableFilter() = NQumir::MakeIntrusive<TBinaryExpr>(

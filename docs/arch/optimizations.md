@@ -709,6 +709,12 @@ subquery. The symmetric path stores the left rows and the distinct right keys.
 A residual requires the left build side, whose marks only accepted pairs set.
 See [join.md](join.md).
 
+For equi-semi joins, the runtime filter pass can choose either input to
+publish a filter before physical lowering. When the small side is the left
+input, the right input can discard rows whose keys are absent from the left
+before repartitioning. The join still tests the keys and emits each matching
+left row once, including duplicate left rows.
+
 ```
 SELECT big.c, u.d FROM big, u WHERE big.a = u.a;   -- threaded, 4 scan tasks
 

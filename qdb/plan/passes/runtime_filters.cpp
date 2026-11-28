@@ -274,22 +274,28 @@ std::optional<TScoredPlacement> BestReusePlacement(
     return BestScoredPlacement(probe, probeKeys, buildKey, saved - waitCost);
 }
 
+bool CanPublishRuntimeFilter(const TJoinOperator& join, EJoinFilterSide side) {
+    switch (join.JoinType()) {
+        case EJoinType::Inner:
+            return true;
+        case EJoinType::Left:
+            // Only the right input can drop rows of a left outer join.
+            return side == EJoinFilterSide::Left;
+        case EJoinType::LeftSemi:
+            // Either input can discard keys absent from the other. A residual
+            // requires row marks on the left build side.
+            return !join.Filter();
+        default:
+            return false;
+    }
+}
+
 std::optional<TFilterDecision> ChooseRuntimeFilter(
     const TJoinOperator& join, bool force)
 {
-    if (join.Keys().empty()) {
-        return std::nullopt;
-    }
-    const auto type = join.JoinType();
-    const bool semi = type == EJoinType::LeftSemi;
-    const bool leftOuter = type == EJoinType::Left;
-    // A left outer join may filter only its nullable right input, using keys
-    // from the preserved left input. Anti joins need a different rule.
-    if (type != EJoinType::Inner && !semi && !leftOuter) {
-        return std::nullopt;
-    }
-    // Residual SEMI builds the left, but filters are published from the right.
-    if (semi && join.Filter()) {
+    const bool allowLeft = CanPublishRuntimeFilter(join, EJoinFilterSide::Left);
+    const bool allowRight = CanPublishRuntimeFilter(join, EJoinFilterSide::Right);
+    if (join.Keys().empty() || (!allowLeft && !allowRight)) {
         return std::nullopt;
     }
 
@@ -301,12 +307,8 @@ std::optional<TFilterDecision> ChooseRuntimeFilter(
     }
     // Measurement mode retains the structural rules but bypasses estimates.
     if (force) {
-        const auto side = leftOuter
-            || (!semi && leftStats->RowCount < rightStats->RowCount)
+        const auto side = allowLeft && (!allowRight || leftStats->RowCount < rightStats->RowCount)
             ? EJoinFilterSide::Left : EJoinFilterSide::Right;
-        if (semi && rightStats->RowCount > leftStats->RowCount) {
-            return std::nullopt;
-        }
         auto placements = PlacementCandidates(
             ProbeInput(join, side), ProbeKeys(join, side));
         return TFilterDecision{
@@ -335,14 +337,13 @@ std::optional<TFilterDecision> ChooseRuntimeFilter(
                 .Benefit = placement->Benefit};
         }
     };
-    if (!leftOuter && leftNdv && rightNdv) {
+    if (allowRight && leftNdv && rightNdv) {
         consider(EJoinFilterSide::Right, EstimatedPassFraction(
             static_cast<double>(rightStats->RowCount),
             static_cast<double>(leftStats->RowCount),
             *rightNdv, *leftNdv), rightNdv);
     }
-    // SEMI can publish only from its key-only right table.
-    if (!semi && leftNdv && rightNdv) {
+    if (allowLeft && leftNdv && rightNdv) {
         consider(EJoinFilterSide::Left, EstimatedPassFraction(
             static_cast<double>(leftStats->RowCount),
             static_cast<double>(rightStats->RowCount),
@@ -351,7 +352,7 @@ std::optional<TFilterDecision> ChooseRuntimeFilter(
     if (!decision) {
         const double leftRows = static_cast<double>(leftStats->RowCount);
         const double rightRows = static_cast<double>(rightStats->RowCount);
-        if (!leftOuter && FilteredBuildCandidate(
+        if (allowRight && FilteredBuildCandidate(
                 join.Right(), rightRows, leftRows)) {
             // Filtered-build row estimates can be pessimistic, so the
             // fallback keeps its existing barrier assumption. Placement
@@ -360,7 +361,7 @@ std::optional<TFilterDecision> ChooseRuntimeFilter(
             consider(EJoinFilterSide::Right, /*passFraction=*/0.0,
                 std::nullopt, /*includeBuildPenalty=*/false);
         }
-        if (!semi && FilteredBuildCandidate(join.Left(), leftRows, rightRows)) {
+        if (allowLeft && FilteredBuildCandidate(join.Left(), leftRows, rightRows)) {
             consider(EJoinFilterSide::Left, /*passFraction=*/0.0,
                 std::nullopt, /*includeBuildPenalty=*/false);
         }
@@ -809,13 +810,7 @@ void PlaceRuntimeFilterConsumers(const TOperatorPtr& root) {
         return;
     }
     const auto& filter = *join.Cast()->RuntimeFilter();
-    const auto type = join.Cast()->JoinType();
-    if (!((type == EJoinType::Inner)
-            || (type == EJoinType::LeftSemi
-                && !join.Cast()->Filter()
-                && filter.BuildSide == EJoinFilterSide::Right)
-            || (type == EJoinType::Left
-                && filter.BuildSide == EJoinFilterSide::Left))) {
+    if (!CanPublishRuntimeFilter(*join.Cast(), filter.BuildSide)) {
         throw std::runtime_error("runtime filter build side is unsafe for join type");
     }
     auto probe = ProbeInput(*join.Cast(), filter.BuildSide);
